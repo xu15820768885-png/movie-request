@@ -22,6 +22,8 @@
 
 默认通过 `ghcr.mirrorify.net` 加速拉取公开的 GHCR 镜像，适合国内网络；镜像内容仍来自本项目发布的 `ghcr.io/xu15820768885-png/movie-request:latest`。
 
+Compose 默认将外部 HTTP/HTTPS 请求交给 `http://192.168.31.129:7890`，用于访问 TMDB；局域网段已加入 `NO_PROXY`，访问 NAS 和 Emby 不会绕行代理。如代理地址不同，请修改这三项环境变量。
+
 ```bash
 docker compose pull
 docker compose up -d

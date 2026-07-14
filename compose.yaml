@@ -6,6 +6,9 @@ services:
       TZ: Asia/Shanghai
       DATA_DIR: /data
       PORT: 5056
+      HTTP_PROXY: http://192.168.31.129:7890
+      HTTPS_PROXY: http://192.168.31.129:7890
+      NO_PROXY: localhost,127.0.0.1,192.168.31.0/24
     ports:
       - "1802:5056"
     volumes:
