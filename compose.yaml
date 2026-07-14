@@ -1,0 +1,19 @@
+services:
+  movie-request:
+    image: ghcr.io/xu15820768885-png/movie-request:latest
+    container_name: movie-request
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+      PORT: 5056
+    ports:
+      - "1802:5056"
+    volumes:
+      - /volume1/docker/movie-request/data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5056/api/health', timeout=3)"]
+      start_period: 15s
+      interval: 30s
+      timeout: 5s
+      retries: 3

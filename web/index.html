@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11100f">
+  <title>映单</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #11100f;
+      --panel: #1b1917;
+      --panel-soft: #24211e;
+      --line: #35312c;
+      --text: #f7f1e8;
+      --muted: #aaa097;
+      --cream: #f3dfb3;
+      --orange: #ff7a45;
+      --orange-2: #ff9a62;
+      --green: #67c79a;
+      --yellow: #edc66c;
+      --red: #e47b7b;
+      --blue: #77aee8;
+      --shadow: 0 24px 70px rgba(0,0,0,.32);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -10%, rgba(255,122,69,.14), transparent 30rem),
+        radial-gradient(circle at 100% 12%, rgba(243,223,179,.06), transparent 26rem),
+        var(--bg);
+    }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); }
+    .shell { width: min(1160px, calc(100% - 36px)); margin: 0 auto; }
+    .topbar {
+      position: sticky; top: 0; z-index: 20;
+      border-bottom: 1px solid rgba(53,49,44,.75);
+      background: rgba(17,16,15,.83); backdrop-filter: blur(18px);
+    }
+    .topbar-inner { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .brand-mark {
+      width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto;
+      border-radius: 14px; color: #2c160b; font-size: 21px; font-weight: 900;
+      background: linear-gradient(145deg, #ffd091, var(--orange));
+      box-shadow: 0 10px 30px rgba(255,122,69,.22);
+    }
+    .brand-name { font-size: 18px; font-weight: 800; letter-spacing: .04em; }
+    .brand-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .user-menu { display: flex; align-items: center; gap: 10px; }
+    .avatar {
+      width: 35px; height: 35px; display: grid; place-items: center; border-radius: 50%;
+      color: var(--cream); background: var(--panel-soft); border: 1px solid var(--line); font-weight: 800;
+    }
+    .btn {
+      min-height: 40px; padding: 9px 15px; border: 1px solid var(--line); border-radius: 12px;
+      background: var(--panel-soft); color: var(--text); transition: .18s ease;
+    }
+    .btn:hover { border-color: #5a5149; transform: translateY(-1px); }
+    .btn-primary { border-color: var(--orange); color: #2c160b; background: var(--orange); font-weight: 800; }
+    .btn-primary:hover { background: var(--orange-2); }
+    .btn-ghost { background: transparent; }
+    .btn-small { min-height: 34px; padding: 6px 11px; font-size: 12px; border-radius: 9px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+    main { padding: 46px 0 80px; }
+    .hero { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: end; margin-bottom: 28px; }
+    .eyebrow { color: var(--orange-2); font-size: 12px; font-weight: 800; letter-spacing: .16em; }
+    h1 { max-width: 720px; margin: 10px 0 12px; font-size: clamp(32px, 5vw, 58px); line-height: 1.06; letter-spacing: -.04em; }
+    .hero p { max-width: 600px; margin: 0; color: var(--muted); line-height: 1.75; }
+    .hero-stamp { color: #776e66; font-size: 12px; text-align: right; line-height: 1.7; }
+    .search-box {
+      display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 9px;
+      border: 1px solid #494139; border-radius: 18px; background: rgba(27,25,23,.92); box-shadow: var(--shadow);
+    }
+    .search-box input { width: 100%; min-height: 50px; border: 0; outline: 0; padding: 0 14px; color: var(--text); background: transparent; font-size: 16px; }
+    .search-box input::placeholder { color: #7e746c; }
+    .search-tip { margin: 11px 4px 0; color: #857b72; font-size: 12px; }
+    .tabs { display: flex; gap: 6px; margin: 36px 0 18px; overflow-x: auto; scrollbar-width: none; }
+    .tab { white-space: nowrap; padding: 9px 14px; border: 0; border-radius: 10px; color: var(--muted); background: transparent; }
+    .tab.active { color: var(--text); background: var(--panel-soft); }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 8px 0 16px; }
+    .section-head h2 { margin: 0; font-size: 19px; }
+    .section-head span { color: var(--muted); font-size: 12px; }
+    .movie-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 18px; }
+    .movie-card {
+      min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 17px;
+      background: var(--panel); box-shadow: 0 16px 38px rgba(0,0,0,.16);
+    }
+    .poster { position: relative; aspect-ratio: 2/3; background: linear-gradient(150deg,#302c28,#191715); overflow: hidden; }
+    .poster img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .3s ease; }
+    .movie-card:hover .poster img { transform: scale(1.025); }
+    .poster-empty { height: 100%; display: grid; place-items: center; color: #7d746c; font-size: 36px; }
+    .media-type { position: absolute; left: 9px; top: 9px; padding: 5px 7px; border-radius: 7px; color: #1b120e; background: rgba(247,241,232,.9); font-size: 10px; font-weight: 900; }
+    .rating { position: absolute; right: 9px; top: 9px; padding: 5px 7px; border-radius: 7px; color: #2b1d0b; background: rgba(237,198,108,.94); font-size: 10px; font-weight: 900; }
+    .movie-body { padding: 13px; }
+    .movie-title { min-height: 42px; margin: 0; font-size: 14px; line-height: 1.45; font-weight: 800; }
+    .movie-meta { margin: 6px 0 12px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .movie-body .btn { width: 100%; }
+    .empty {
+      padding: 52px 24px; border: 1px dashed var(--line); border-radius: 16px;
+      color: var(--muted); text-align: center; background: rgba(27,25,23,.45); line-height: 1.7;
+    }
+    .request-list { display: grid; gap: 11px; }
+    .request-row {
+      display: grid; grid-template-columns: 54px minmax(0,1fr) auto; gap: 14px; align-items: center;
+      padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel);
+    }
+    .request-poster { width: 54px; height: 78px; object-fit: cover; border-radius: 9px; background: var(--panel-soft); }
+    .request-title { font-weight: 800; }
+    .request-meta, .request-note { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .request-note { color: var(--cream); }
+    .badge { display: inline-flex; padding: 6px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .badge-pending { color: #ffe2a0; background: rgba(237,198,108,.13); }
+    .badge-approved { color: #b7d9ff; background: rgba(119,174,232,.14); }
+    .badge-searching { color: #ffc4a7; background: rgba(255,122,69,.14); }
+    .badge-available { color: #b7f1d4; background: rgba(103,199,154,.14); }
+    .badge-rejected { color: #ffc4c4; background: rgba(228,123,123,.14); }
+    .admin-grid { display: grid; grid-template-columns: minmax(0,1.65fr) minmax(300px,.8fr); gap: 18px; }
+    .panel { padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .panel h3 { margin: 0 0 14px; font-size: 15px; }
+    .admin-request { padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .admin-request:first-child { padding-top: 0; }
+    .admin-request:last-child { border-bottom: 0; padding-bottom: 0; }
+    .admin-request-head { display: flex; justify-content: space-between; gap: 15px; }
+    .requester { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; color: var(--cream); font-size: 12px; font-weight: 800; }
+    .requester-avatar { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; color: #2c160b; background: var(--cream); }
+    .member-filter { width: auto; min-width: 150px; padding: 8px 10px; }
+    .admin-request-actions { display: grid; grid-template-columns: 150px minmax(160px,1fr) auto; gap: 8px; margin-top: 12px; }
+    input, textarea, select {
+      width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px;
+      outline: 0; color: var(--text); background: #151311;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(255,122,69,.1); }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+    .stack { display: grid; gap: 12px; }
+    .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+    .user-row:last-child { border: 0; }
+    .user-name { font-weight: 700; }
+    .user-login { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .overlay {
+      position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px;
+      background: rgba(8,7,6,.78); backdrop-filter: blur(14px);
+    }
+    .auth-card { width: min(440px, 100%); padding: 26px; border: 1px solid var(--line); border-radius: 22px; background: #191715; box-shadow: var(--shadow); }
+    .auth-card .brand { margin-bottom: 24px; }
+    .auth-card h2 { margin: 0 0 7px; font-size: 24px; }
+    .auth-card p { margin: 0 0 22px; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .toast { position: fixed; right: 20px; bottom: 20px; z-index: 80; max-width: min(420px, calc(100% - 40px)); padding: 12px 15px; border: 1px solid var(--line); border-radius: 11px; background: #28231f; box-shadow: var(--shadow); font-size: 13px; }
+    .preview-ribbon { position: fixed; z-index: 70; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 8px 12px; border-radius: 999px; color: #29170d; background: var(--cream); font-size: 11px; font-weight: 800; box-shadow: var(--shadow); }
+    @media (max-width: 920px) {
+      .movie-grid { grid-template-columns: repeat(4, minmax(0,1fr)); }
+      .admin-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 680px) {
+      .shell { width: min(100% - 24px, 1160px); }
+      .topbar-inner { height: 64px; }
+      .brand-sub, .user-label { display: none; }
+      main { padding-top: 28px; }
+      .hero { grid-template-columns: 1fr; gap: 12px; }
+      .hero-stamp { display: none; }
+      .hero p { font-size: 13px; }
+      .search-box { grid-template-columns: 1fr; }
+      .search-box .btn { width: 100%; }
+      .movie-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+      .request-row { grid-template-columns: 46px minmax(0,1fr); }
+      .request-poster { width: 46px; height: 68px; }
+      .request-row > .badge { grid-column: 2; justify-self: start; }
+      .admin-request-actions { grid-template-columns: 1fr; }
+      .inline { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="authOverlay" class="overlay hidden">
+    <form id="authForm" class="auth-card">
+      <div class="brand"><div class="brand-mark">映</div><div><div class="brand-name">映单</div><div class="brand-sub">私人影视请求中心</div></div></div>
+      <h2 id="authTitle">欢迎回来</h2>
+      <p id="authIntro">登录后搜一搜，选中正确的影片即可提交请求。</p>
+      <div id="setupNameField" class="stack hidden" style="margin-bottom:12px">
+        <label>你的称呼<input id="displayName" placeholder="例如：小唐"></label>
+      </div>
+      <div class="stack">
+        <label>账号<input id="username" autocomplete="username" placeholder="请输入账号" required></label>
+        <label>密码<input id="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required></label>
+        <label id="setupTmdbField" class="hidden">TMDB API Read Access Token
+          <input id="tmdbToken" type="password" autocomplete="off" placeholder="从 TMDB API 设置页面复制">
+        </label>
+        <button id="authSubmit" class="btn btn-primary" type="submit">登录</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="topbar">
+      <div class="shell topbar-inner">
+        <div class="brand"><div class="brand-mark">映</div><div><div class="brand-name">映单</div><div class="brand-sub">私人片库 · 影片请求</div></div></div>
+        <div class="user-menu"><span id="userLabel" class="user-label muted"></span><div id="avatar" class="avatar">家</div><button id="logoutButton" class="btn btn-ghost btn-small">退出</button></div>
+      </div>
+    </div>
+    <main class="shell">
+      <section id="familyHero" class="hero">
+        <div><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
+        <div class="hero-stamp">数据来自 TMDB<br>每条需求都有唯一影片编号</div>
+      </section>
+      <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
+      <div id="searchTip" class="search-tip">只显示 TMDB 已收录的电影和剧集；已在 Emby 的资源会标记“已入库”。</div>
+
+      <nav class="tabs">
+        <button id="discoverTab" class="tab active" data-view="discover">找片</button>
+        <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
+        <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
+        <button id="familyTab" class="tab hidden" data-view="family">成员账号</button>
+        <button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button>
+      </nav>
+
+      <section id="discoverView" class="view">
+        <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
+        <div id="movieResults" class="empty">输入片名后，会显示 TMDB 匹配到的海报、年份和类型。<br>这样家里就不会找错版本。</div>
+      </section>
+      <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
+      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
+      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个人只看到自己的请求</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
+      <section id="settingsView" class="view hidden"><div class="section-head"><h2>系统设置</h2><span>敏感信息只保存在 NAS</span></div><div class="admin-grid"><form id="settingsForm" class="panel stack"><h3>TMDB 搜索</h3><label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label><div id="tmdbState" class="muted" style="font-size:12px"></div><h3 style="margin-top:14px">Emby 媒体库</h3><label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label><label>API 密钥<input id="settingsEmbyKey" type="password" placeholder="留空表示不修改"></label><div id="embyState" class="muted" style="font-size:12px"></div><button id="embyTest" class="btn" type="button">测试 Emby 连接</button><h3 style="margin-top:14px">Telegram 通知与菜单</h3><label>Bot Token<input id="settingsTelegramToken" type="password" placeholder="留空表示不修改"></label><label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label><label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label><div class="muted" style="font-size:12px;line-height:1.6">菜单包含“求片需求”和“完成情况”；通知、菜单和机器人消息都会通过上面的代理连接。</div><button class="btn btn-primary" type="submit">保存全部设置</button><button id="telegramTest" class="btn" type="button">发送测试消息并启用菜单</button></form><aside class="panel"><h3>工作方式</h3><div class="muted" style="font-size:12px;line-height:1.8">家人提交需求后，Telegram 会立即收到片名、年份、类型和 TMDB ID。系统通过 TMDB ID 对照 Emby 媒体库，不会自动下载任何资源。</div></aside></div></section>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <div id="previewRibbon" class="preview-ribbon hidden">界面预览 · 示例影片均带真实 TMDB ID</div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const previewMode = new URLSearchParams(location.search).get('preview');
+    const preview = previewMode === '1' || previewMode === 'member';
+    let currentUser = null;
+    let needsSetup = false;
+    let requestsCache = [];
+    const statusOptions = {pending:'待处理', approved:'已收到', searching:'寻找中', available:'已入库', rejected:'暂时无法完成'};
+    const demoMovies = [
+      {tmdb_id:157336,media_type:'movie',title:'星际穿越',original_title:'Interstellar',year:'2014',rating:8.5,in_library:true,poster_path:'/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',overview:'一队探险家穿越虫洞，为人类寻找新的家园。'},
+      {tmdb_id:27205,media_type:'movie',title:'盗梦空间',original_title:'Inception',year:'2010',rating:8.4,poster_path:'/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg',poster_url:'https://image.tmdb.org/t/p/w500/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg',overview:'潜入梦境窃取秘密的高手，接下了一个植入想法的任务。'},
+      {tmdb_id:1399,media_type:'tv',title:'权力的游戏',original_title:'Game of Thrones',year:'2011',rating:8.5,poster_path:'/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',overview:'九大家族争夺维斯特洛大陆最高权力的史诗故事。'},
+      {tmdb_id:535167,media_type:'movie',title:'流浪地球',original_title:'The Wandering Earth',year:'2019',rating:6.6,poster_path:'/6lLxWq6lX1pQqgxGqj2ZJ7JkqQG.jpg',poster_url:'',overview:'人类开启“流浪地球”计划，试图带着地球逃离太阳系。'},
+      {tmdb_id:94997,media_type:'tv',title:'人生切割术',original_title:'Severance',year:'2022',rating:8.4,poster_path:'/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',poster_url:'https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',overview:'员工的工作记忆与生活记忆被彻底分离。'}
+    ];
+    const demoRequests = [
+      {id:1,user_id:2,username:'mama',title:'沙丘2',year:'2024',media_type:'movie',tmdb_id:693134,status:'searching',status_name:'寻找中',admin_note:'正在找合适的 4K 国语字幕版',display_name:'妈妈',created_at:new Date().toISOString(),poster_url:'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg'},
+      {id:2,user_id:2,username:'mama',title:'繁花',year:'2023',media_type:'tv',tmdb_id:119543,status:'available',status_name:'已入库',admin_note:'已经放进电视剧库了',display_name:'妈妈',created_at:new Date(Date.now()-86400000).toISOString(),poster_url:''},
+      {id:3,user_id:3,username:'baba',title:'疾速追杀4',year:'2023',media_type:'movie',tmdb_id:603692,status:'pending',status_name:'待处理',admin_note:'',display_name:'爸爸',created_at:new Date(Date.now()-3600000).toISOString(),poster_url:'https://image.tmdb.org/t/p/w500/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg'}
+    ];
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    function toast(message, error=false) {
+      const node = $('toast'); node.textContent = message; node.style.borderColor = error ? 'rgba(228,123,123,.7)' : 'rgba(103,199,154,.6)'; node.classList.remove('hidden');
+      clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => node.classList.add('hidden'), 3200);
+    }
+    async function api(path, options={}) {
+      const response = await fetch(path, {credentials:'same-origin', headers:{'Content-Type':'application/json', ...(options.headers||{})}, ...options});
+      let data={}; try { data=await response.json(); } catch {}
+      if (!response.ok) throw new Error(data.detail || `请求失败 ${response.status}`);
+      return data;
+    }
+    function showAuth(setup=false) {
+      needsSetup=setup; $('authOverlay').classList.remove('hidden'); $('app').classList.add('hidden');
+      $('authTitle').textContent=setup?'先把家安好':'欢迎回来';
+      $('authIntro').textContent=setup?'创建管理员账号并连接 TMDB，之后就能添加成员。':'登录后搜一搜，选中正确的影片即可提交请求。';
+      $('setupNameField').classList.toggle('hidden',!setup); $('setupTmdbField').classList.toggle('hidden',!setup); $('authSubmit').textContent=setup?'创建并进入':'登录';
+    }
+    function showApp() {
+      $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
+      $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
+      const admin=currentUser.role==='admin'; ['adminTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
+      $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
+      $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
+      $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
+    }
+    function switchView(name) {
+      document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
+      document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='family') loadUsers(); if(name==='settings') loadSettings();
+    }
+    function renderMovies(items) {
+      const root=$('movieResults'); $('resultCount').textContent=`${items.length} 个匹配结果`; $('resultTitle').textContent='TMDB 匹配结果';
+      root.className='movie-grid'; root.innerHTML=items.map((item,index)=>{const admin=currentUser?.role==='admin';const label=item.in_library?'已入库':admin?'未入库':'我想看';const disabled=item.in_library||admin;return `<article class="movie-card"><div class="poster">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${item.media_type==='movie'?'电影':'剧集'}</span>${item.rating?`<span class="rating">★ ${item.rating}</span>`:''}</div><div class="movie-body"><h3 class="movie-title">${escapeHtml(item.title)}</h3><div class="movie-meta">${escapeHtml(item.year||'年份未知')} · TMDB ${item.tmdb_id}</div><button class="btn ${disabled?'':'btn-primary'} btn-small" data-request-index="${index}" ${disabled?'disabled':''}>${label}</button></div></article>`}).join('');
+      root.querySelectorAll('[data-request-index]').forEach(button=>button.onclick=()=>submitRequest(items[Number(button.dataset.requestIndex)],button));
+    }
+    async function submitRequest(item,button) {
+      if(preview){ toast(`已选择《${item.title}》，正式版会提交给管理员`); return; }
+      button.disabled=true; button.textContent='提交中…';
+      try { await api('/api/requests',{method:'POST',body:JSON.stringify(item)}); button.textContent='已提交'; toast(`《${item.title}》已提交`); await loadRequests(); }
+      catch(error){ button.disabled=false; button.textContent='我想看'; toast(error.message,true); }
+    }
+    function requestRow(item) {
+      const owner=currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:'';
+      return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}${owner}</div>${item.admin_note?`<div class="request-note">管理员回复：${escapeHtml(item.admin_note)}</div>`:''}</div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></article>`;
+    }
+    async function loadRequests() {
+      const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
+      $('adminCount').textContent=currentUser.role==='admin'&&items.filter(x=>x.status==='pending').length?`· ${items.filter(x=>x.status==='pending').length}`:'';
+      const mine=currentUser.role==='admin'?items:items.filter(x=>Number(x.user_id)===Number(currentUser.id)||!x.user_id);
+      $('mineCount').textContent=mine.length?`· ${mine.length}`:'';
+      $('mineRequests').innerHTML=mine.length?mine.map(requestRow).join(''):'<div class="empty">还没有提交过需求。</div>';
+      if(currentUser.role==='admin') { updateMemberFilter(items); renderAdminRequests(items); }
+    }
+    function updateMemberFilter(items) {
+      const filter=$('requestUserFilter'); const selected=filter.value; const members=[]; const seen=new Set();
+      items.forEach(item=>{const key=String(item.user_id||item.username||item.display_name||'');if(key&&!seen.has(key)){seen.add(key);members.push({key,name:item.display_name||item.username||'成员',username:item.username||''});}});
+      filter.innerHTML='<option value="">全部成员</option>'+members.map(member=>`<option value="${escapeHtml(member.key)}">${escapeHtml(member.name)}${member.username?`（${escapeHtml(member.username)}）`:''}</option>`).join('');
+      if(members.some(member=>member.key===selected)) filter.value=selected;
+    }
+    function renderAdminRequests(items) {
+      const selected=$('requestUserFilter').value; const visible=selected?items.filter(item=>String(item.user_id||item.username||item.display_name||'')===selected):items;
+      $('adminRequests').innerHTML=visible.length?visible.map(item=>`<div class="admin-request"><div class="requester"><span class="requester-avatar">${escapeHtml((item.display_name||'成').slice(0,1))}</span>${escapeHtml(item.display_name||'成员')}${item.username?` · @${escapeHtml(item.username)}`:''} 提交</div><div class="admin-request-head"><div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}</div></div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></div><div class="admin-request-actions"><select data-status="${item.id}">${Object.entries(statusOptions).map(([key,label])=>`<option value="${key}" ${key===item.status?'selected':''}>${label}</option>`).join('')}</select><input data-note="${item.id}" value="${escapeHtml(item.admin_note||'')}" placeholder="给成员的回复"><button class="btn btn-primary btn-small" data-save="${item.id}">保存</button></div></div>`).join(''):'<div class="empty">这个成员还没有求片请求。</div>';
+      $('adminRequests').querySelectorAll('[data-save]').forEach(button=>button.onclick=()=>saveRequest(Number(button.dataset.save),button));
+    }
+    async function saveRequest(id,button) {
+      if(preview){ toast('预览模式：状态已模拟保存'); return; }
+      const status=document.querySelector(`[data-status="${id}"]`).value; const admin_note=document.querySelector(`[data-note="${id}"]`).value;
+      button.disabled=true; try { await api(`/api/requests/${id}`,{method:'PATCH',body:JSON.stringify({status,admin_note})}); toast('状态已更新'); await loadRequests(); } catch(error){toast(error.message,true);} finally {button.disabled=false;}
+    }
+    async function loadUsers() {
+      if(preview){ $('userList').innerHTML='<h3>已有成员</h3><div class="user-row"><div><div class="user-name">妈妈</div><div class="user-login">账号 mama · 正常使用</div></div><span class="badge badge-available">正常</span></div><div class="user-row"><div><div class="user-name">管理员</div><div class="user-login">账号 admin</div></div><span class="badge badge-approved">管理员</span></div>'; return; }
+      const users=(await api('/api/admin/users')).users; $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div>`).join('');
+    }
+    async function loadSettings() {
+      if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
+      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'Emby 已配置':'尚未配置 Emby';
+    }
+    $('authForm').onsubmit=async event=>{event.preventDefault(); try { const path=needsSetup?'/api/bootstrap':'/api/login'; const body={username:$('username').value,password:$('password').value,display_name:$('displayName').value,tmdb_token:$('tmdbToken').value}; await api(path,{method:'POST',body:JSON.stringify(body)}); location.reload(); } catch(error){toast(error.message,true);} };
+    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); renderMovies(items.length?items:(preview?demoMovies:[])); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='TMDB 没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
+    document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
+    $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
+    $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
+    $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：成员账号创建成功');try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value})});event.target.reset();toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
+    $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：设置已保存，Telegram 将通过代理连接');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value})});toast('设置已保存');loadSettings();}catch(error){toast(error.message,true);}};
+    $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
+    $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
+    $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，1 条需求已更新为“已入库”');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，${result.updated} 条需求更新为“已入库”`);loadRequests();}catch(error){toast(error.message,true);}};
+
+    async function init() {
+      if(preview){
+        currentUser = previewMode === 'member'
+          ? {id:2,username:'mama',display_name:'妈妈',role:'member'}
+          : {id:1,username:'admin',display_name:'管理员',role:'admin'};
+        $('previewRibbon').textContent = previewMode === 'member'
+          ? '成员端预览 · 只能找片和查看自己的请求'
+          : '管理员预览 · 请求、Emby 和 Telegram 管理';
+        $('previewRibbon').classList.remove('hidden');showApp();renderMovies(demoMovies);loadRequests();
+        if(currentUser.role==='admin') switchView('admin');
+        return;
+      }
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+    }
+    init();
+    setInterval(() => {
+      if (currentUser && !preview) loadRequests().catch(() => {});
+    }, 60000);
+  </script>
+</body>
+</html>
