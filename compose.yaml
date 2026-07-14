@@ -1,6 +1,6 @@
 services:
   movie-request:
-    image: ghcr.io/xu15820768885-png/movie-request:latest
+    image: ghcr.mirrorify.net/xu15820768885-png/movie-request:latest
     container_name: movie-request
     environment:
       TZ: Asia/Shanghai

@@ -20,6 +20,8 @@
 
 将 `compose.yaml` 保存到 `/volume1/docker/movie-request`，然后在绿联 Docker 的“项目”中导入并部署。也可以在该目录运行：
 
+默认通过 `ghcr.mirrorify.net` 加速拉取公开的 GHCR 镜像，适合国内网络；镜像内容仍来自本项目发布的 `ghcr.io/xu15820768885-png/movie-request:latest`。
+
 ```bash
 docker compose pull
 docker compose up -d
