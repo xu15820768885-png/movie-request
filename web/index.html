@@ -294,6 +294,7 @@
     let needsSetup = false;
     let requestsCache = [];
     let currentDetail = null;
+    const detailCache = new Map();
     const statusOptions = {pending:'待处理', approved:'已收到', searching:'寻找中', available:'已入库', rejected:'暂时无法完成'};
     const demoMovies = [
       {tmdb_id:157336,media_type:'movie',title:'星际穿越',original_title:'Interstellar',year:'2014',rating:8.5,in_library:true,poster_path:'/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',overview:'一队探险家穿越虫洞，为人类寻找新的家园。'},
@@ -356,7 +357,7 @@
     }
     async function openDetails(item) {
       currentDetail=null; $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden'; $('detailCard').innerHTML='<div class="detail-loading">正在读取 TMDB 影片详情…</div>';
-      try { let resolved=item; if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};} const detail=preview?previewDetails(resolved):await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`); currentDetail=detail; renderDetails(detail); }
+      try { const requestedKey=item.source==='douban'?`douban:${item.media_type}:${item.douban_id}`:`tmdb:${item.media_type}:${item.tmdb_id}`; if(detailCache.has(requestedKey)){currentDetail=detailCache.get(requestedKey);renderDetails(currentDetail);return;} let resolved=item; if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};} const tmdbKey=`tmdb:${resolved.media_type}:${resolved.tmdb_id}`; const detail=detailCache.get(tmdbKey)||(preview?previewDetails(resolved):await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`)); detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail); }
       catch(error){ $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><div class="detail-loading">${escapeHtml(error.message)}</div>`; bindDetailActions(); }
     }
     function renderDetails(item) {

@@ -19,6 +19,9 @@ class FakeRequest:
 
 class MovieRequestTests(unittest.TestCase):
     def setUp(self):
+        with app.CACHE_LOCK:
+            app.TMDB_RESPONSE_CACHE.clear()
+            app.EMBY_LIBRARY_CACHE.update({"key": "", "expires": 0.0, "ids": set()})
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -163,6 +166,20 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["title"], "本周热门")
         self.assertEqual([item["media_type"] for item in result["results"]], ["movie", "tv"])
 
+    def test_tmdb_responses_are_cached(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": 157336, "title": "星际穿越"}
+
+        with patch.object(app.requests, "get", return_value=FakeResponse()) as get:
+            first = app.tmdb_get("/movie/157336", {"language": "zh-CN", "append_to_response": "credits"})
+            second = app.tmdb_get("/movie/157336", {"language": "zh-CN", "append_to_response": "credits"})
+        self.assertEqual(first, second)
+        self.assertEqual(get.call_count, 1)
+
     def test_douban_chart_is_marked_for_tmdb_resolution(self):
         payload = {
             "subject_collection_items": [
@@ -171,7 +188,7 @@ class MovieRequestTests(unittest.TestCase):
                     "title": "肖申克的救赎",
                     "year": "1994",
                     "rating": {"value": 9.7, "count": 3000000},
-                    "cover": {"url": "https://example.com/poster.jpg"},
+                    "pic": {"large": "https://img9.doubanio.com/view/photo/m_ratio_poster/public/test.jpg"},
                 }
             ]
         }
@@ -182,6 +199,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(item["source"], "douban")
         self.assertEqual(item["douban_id"], "1292052")
         self.assertEqual(item["tmdb_id"], 0)
+        self.assertIn("/api/douban/poster", item["poster_url"])
 
     def test_douban_item_must_resolve_to_tmdb_before_requesting(self):
         subject = {

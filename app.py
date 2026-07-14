@@ -8,7 +8,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
@@ -33,6 +33,13 @@ STATUS_NAMES = {
 
 APP = FastAPI(title="映单", docs_url=None, redoc_url=None)
 TELEGRAM_OFFSET = 0
+CACHE_LOCK = Lock()
+TMDB_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+EMBY_LIBRARY_CACHE: dict[str, Any] = {
+    "key": "",
+    "expires": 0.0,
+    "ids": set(),
+}
 
 
 def now_iso() -> str:
@@ -182,12 +189,21 @@ def emby_api_url(base_url: str, path: str) -> str:
     return f"{base}/emby/{path.lstrip('/')}"
 
 
-def emby_library_tmdb_ids() -> set[int]:
+def emby_library_tmdb_ids(force: bool = False) -> set[int]:
     with db() as connection:
         base_url = setting(connection, "emby_url")
         api_key = setting(connection, "emby_api_key")
     if not base_url or not api_key:
         return set()
+    cache_key = hashlib.sha256(f"{base_url}|{api_key}".encode()).hexdigest()
+    now = time.monotonic()
+    with CACHE_LOCK:
+        if (
+            not force
+            and EMBY_LIBRARY_CACHE["key"] == cache_key
+            and EMBY_LIBRARY_CACHE["expires"] > now
+        ):
+            return set(EMBY_LIBRARY_CACHE["ids"])
     try:
         response = requests.get(
             emby_api_url(base_url, "/Items"),
@@ -207,13 +223,20 @@ def emby_library_tmdb_ids() -> set[int]:
             raw_id = provider_ids.get("Tmdb") or provider_ids.get("TMDB")
             if str(raw_id or "").isdigit():
                 values.add(int(raw_id))
+        with CACHE_LOCK:
+            EMBY_LIBRARY_CACHE.update(
+                {"key": cache_key, "expires": now + 300, "ids": set(values)}
+            )
         return values
     except (requests.RequestException, ValueError, TypeError):
+        with CACHE_LOCK:
+            if EMBY_LIBRARY_CACHE["key"] == cache_key:
+                return set(EMBY_LIBRARY_CACHE["ids"])
         return set()
 
 
-def sync_emby_requests() -> int:
-    tmdb_ids = emby_library_tmdb_ids()
+def sync_emby_requests(force: bool = False) -> int:
+    tmdb_ids = emby_library_tmdb_ids(force=force)
     if not tmdb_ids:
         return 0
     placeholders = ",".join("?" for _ in tmdb_ids)
@@ -231,11 +254,25 @@ def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
         credential = setting(connection, "tmdb_token")
     if not credential:
         raise HTTPException(503, "管理员还没有配置 TMDB 凭证")
+    params = dict(params)
     headers = {"Accept": "application/json"}
     if credential.startswith("eyJ") or len(credential) > 80:
         headers["Authorization"] = f"Bearer {credential}"
     else:
         params["api_key"] = credential
+    cache_params = {key: value for key, value in params.items() if key != "api_key"}
+    cache_key = hashlib.sha256(
+        json.dumps(
+            [path, cache_params, hashlib.sha256(credential.encode()).hexdigest()],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    now = time.monotonic()
+    with CACHE_LOCK:
+        cached = TMDB_RESPONSE_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1]
     try:
         response = requests.get(
             f"https://api.themoviedb.org/3{path}",
@@ -244,7 +281,17 @@ def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
             timeout=15,
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        cache_seconds = 3600 if "append_to_response" in cache_params else 300
+        with CACHE_LOCK:
+            if len(TMDB_RESPONSE_CACHE) >= 512:
+                expired = [key for key, value in TMDB_RESPONSE_CACHE.items() if value[0] <= now]
+                for key in expired:
+                    TMDB_RESPONSE_CACHE.pop(key, None)
+                if len(TMDB_RESPONSE_CACHE) >= 512:
+                    TMDB_RESPONSE_CACHE.pop(next(iter(TMDB_RESPONSE_CACHE)))
+            TMDB_RESPONSE_CACHE[cache_key] = (now + cache_seconds, data)
+        return data
     except requests.RequestException as error:
         code = getattr(error.response, "status_code", "")
         if code in (401, 403):
@@ -296,7 +343,8 @@ def douban_get(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, 
 
 def douban_media_item(item: dict[str, Any], media_type: str) -> dict[str, Any]:
     cover = item.get("cover") or {}
-    poster_url = cover.get("url") or item.get("cover_url") or ""
+    pic = item.get("pic") or {}
+    poster_url = cover.get("url") or item.get("cover_url") or pic.get("large") or ""
     rating = item.get("rating") or {}
     return {
         "source": "douban",
@@ -980,7 +1028,7 @@ def emby_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, 
 @APP.post("/api/admin/emby-sync")
 def emby_sync(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
-    return {"ok": True, "updated": sync_emby_requests()}
+    return {"ok": True, "updated": sync_emby_requests(force=True)}
 
 
 if __name__ == "__main__":
