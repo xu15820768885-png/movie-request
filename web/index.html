@@ -272,7 +272,7 @@
       </nav>
 
       <section id="discoverView" class="view">
-        <div class="chart-bar" aria-label="影视榜单"><button class="chart-chip active" data-chart="trending">TMDB 本周热门</button><button class="chart-chip" data-chart="movies">TMDB 电影</button><button class="chart-chip" data-chart="tv">TMDB 剧集</button><button class="chart-chip" data-chart="douban_movies">豆瓣电影</button><button class="chart-chip" data-chart="douban_tv">豆瓣剧集</button></div>
+        <div class="chart-bar" aria-label="影视榜单"><button class="chart-chip active" data-chart="douban_movies">豆瓣电影</button><button class="chart-chip" data-chart="douban_tv">豆瓣剧集</button><button class="chart-chip" data-chart="trending">TMDB 本周热门</button><button class="chart-chip" data-chart="movies">TMDB 电影</button><button class="chart-chip" data-chart="tv">TMDB 剧集</button></div>
         <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
         <div id="movieResults" class="empty">输入片名后，会显示 TMDB 匹配到的海报、年份和类型。<br>这样家里就不会找错版本。</div>
       </section>
@@ -447,11 +447,11 @@
         $('previewRibbon').textContent = previewMode === 'member'
           ? '成员端预览 · 只能找片和查看自己的请求'
           : '管理员预览 · 请求、Emby 和 Telegram 管理';
-        $('previewRibbon').classList.remove('hidden');showApp();loadChart('trending');loadRequests();
+        $('previewRibbon').classList.remove('hidden');showApp();loadChart('douban_movies');loadRequests();
         if(currentUser.role==='admin') switchView('admin');
         return;
       }
-      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadChart('trending');loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadChart('douban_movies');loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
     }
     init();
     setInterval(() => {
