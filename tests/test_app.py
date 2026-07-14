@@ -140,6 +140,58 @@ class MovieRequestTests(unittest.TestCase):
             },
         )
 
+    def test_member_can_delete_only_own_request_and_admin_can_delete_any(self):
+        member_token = "member-session-token"
+        other_token = "other-session-token"
+        with app.db() as connection:
+            member = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                "VALUES('member', '成员', ?, 'member', ?)",
+                (app.hash_password("password123"), app.now_iso()),
+            ).lastrowid
+            other = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                "VALUES('other', '其他成员', ?, 'member', ?)",
+                (app.hash_password("password123"), app.now_iso()),
+            ).lastrowid
+            expires = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+            connection.executemany(
+                "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES(?, ?, ?)",
+                [
+                    (hashlib.sha256(member_token.encode()).hexdigest(), member, expires),
+                    (hashlib.sha256(other_token.encode()).hexdigest(), other, expires),
+                ],
+            )
+            timestamp = app.now_iso()
+            own_request = connection.execute(
+                "INSERT INTO movie_requests(user_id, tmdb_id, media_type, title, year, created_at, updated_at) "
+                "VALUES(?, 1, 'movie', '自己的片', '2026', ?, ?)",
+                (member, timestamp, timestamp),
+            ).lastrowid
+            admin_request = connection.execute(
+                "INSERT INTO movie_requests(user_id, tmdb_id, media_type, title, year, created_at, updated_at) "
+                "VALUES(?, 2, 'movie', '管理员可删', '2026', ?, ?)",
+                (member, timestamp, timestamp),
+            ).lastrowid
+        with patch.object(app, "send_telegram"):
+            with self.assertRaises(app.HTTPException) as error:
+                app.delete_request(own_request, other_token)
+            self.assertEqual(error.exception.status_code, 403)
+            self.assertTrue(app.delete_request(own_request, member_token)["ok"])
+            self.assertTrue(app.delete_request(admin_request, self.token)["ok"])
+        with app.db() as connection:
+            remaining = connection.execute("SELECT COUNT(*) FROM movie_requests").fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_telegram_messages_remove_old_reply_keyboard(self):
+        with app.db() as connection:
+            app.set_setting(connection, "telegram_token", "bot-token")
+            app.set_setting(connection, "telegram_chat_id", "123456")
+        with patch.object(app, "telegram_request") as telegram:
+            app.send_telegram("测试")
+        payload = telegram.call_args.args[1]
+        self.assertEqual(payload["reply_markup"], {"remove_keyboard": True})
+
 
 if __name__ == "__main__":
     unittest.main()

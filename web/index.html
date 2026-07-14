@@ -68,6 +68,8 @@
     .btn-primary { border-color: var(--orange); color: #2c160b; background: var(--orange); font-weight: 800; }
     .btn-primary:hover { background: var(--orange-2); }
     .btn-ghost { background: transparent; }
+    .btn-danger { color: #ffc4c4; border-color: rgba(228,123,123,.45); background: rgba(228,123,123,.08); }
+    .btn-danger:hover { border-color: var(--red); background: rgba(228,123,123,.14); }
     .btn-small { min-height: 34px; padding: 6px 11px; font-size: 12px; border-radius: 9px; }
     .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
     main { padding: 46px 0 80px; }
@@ -117,6 +119,7 @@
     .request-title { font-weight: 800; }
     .request-meta, .request-note { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .request-note { color: var(--cream); }
+    .request-controls { display: grid; justify-items: end; gap: 8px; }
     .badge { display: inline-flex; padding: 6px 9px; border-radius: 999px; font-size: 11px; font-weight: 800; white-space: nowrap; }
     .badge-pending { color: #ffe2a0; background: rgba(237,198,108,.13); }
     .badge-approved { color: #b7d9ff; background: rgba(119,174,232,.14); }
@@ -133,7 +136,7 @@
     .requester { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; color: var(--cream); font-size: 12px; font-weight: 800; }
     .requester-avatar { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; color: #2c160b; background: var(--cream); }
     .member-filter { width: auto; min-width: 150px; padding: 8px 10px; }
-    .admin-request-actions { display: grid; grid-template-columns: 150px minmax(160px,1fr) auto; gap: 8px; margin-top: 12px; }
+    .admin-request-actions { display: grid; grid-template-columns: 150px minmax(160px,1fr) auto auto; gap: 8px; margin-top: 12px; }
     input, textarea, select {
       width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px;
       outline: 0; color: var(--text); background: #151311;
@@ -173,8 +176,10 @@
       .movie-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
       .request-row { grid-template-columns: 46px minmax(0,1fr); }
       .request-poster { width: 46px; height: 68px; }
-      .request-row > .badge { grid-column: 2; justify-self: start; }
+      .request-controls { grid-column: 2; justify-items: start; grid-auto-flow: column; align-items: center; }
+      .request-controls .btn { min-height: 40px; padding-inline: 14px; }
       .admin-request-actions { grid-template-columns: 1fr; }
+      .admin-request-actions .btn { min-height: 42px; }
       .inline { grid-template-columns: 1fr; }
     }
   </style>
@@ -229,7 +234,7 @@
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个人只看到自己的请求</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
-      <section id="settingsView" class="view hidden"><div class="section-head"><h2>系统设置</h2><span>敏感信息只保存在 NAS</span></div><div class="admin-grid"><form id="settingsForm" class="panel stack"><h3>TMDB 搜索</h3><label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label><div id="tmdbState" class="muted" style="font-size:12px"></div><h3 style="margin-top:14px">Emby 媒体库</h3><label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label><label>API 密钥<input id="settingsEmbyKey" type="password" placeholder="留空表示不修改"></label><div id="embyState" class="muted" style="font-size:12px"></div><button id="embyTest" class="btn" type="button">测试 Emby 连接</button><h3 style="margin-top:14px">Telegram 通知与菜单</h3><label>Bot Token<input id="settingsTelegramToken" type="password" placeholder="留空表示不修改"></label><label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label><label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label><div class="muted" style="font-size:12px;line-height:1.6">菜单包含“求片需求”和“完成情况”；通知、菜单和机器人消息都会通过上面的代理连接。</div><button class="btn btn-primary" type="submit">保存全部设置</button><button id="telegramTest" class="btn" type="button">发送测试消息并启用菜单</button></form><aside class="panel"><h3>工作方式</h3><div class="muted" style="font-size:12px;line-height:1.8">家人提交需求后，Telegram 会立即收到片名、年份、类型和 TMDB ID。系统通过 TMDB ID 对照 Emby 媒体库，不会自动下载任何资源。</div></aside></div></section>
+      <section id="settingsView" class="view hidden"><div class="section-head"><h2>系统设置</h2><span>敏感信息只保存在 NAS</span></div><div class="admin-grid"><form id="settingsForm" class="panel stack"><h3>TMDB 搜索</h3><label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label><div id="tmdbState" class="muted" style="font-size:12px"></div><h3 style="margin-top:14px">Emby 媒体库</h3><label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label><label>API 密钥<input id="settingsEmbyKey" type="password" placeholder="留空表示不修改"></label><div id="embyState" class="muted" style="font-size:12px"></div><button id="embyTest" class="btn" type="button">测试 Emby 连接</button><h3 style="margin-top:14px">Telegram 通知与菜单</h3><label>Bot Token<input id="settingsTelegramToken" type="password" placeholder="留空表示不修改"></label><label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label><label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label><div class="muted" style="font-size:12px;line-height:1.6">使用 Telegram 左下角原生菜单，包含“求片需求”和“完成情况”；不会再显示聊天框下方的白色快捷键。</div><button class="btn btn-primary" type="submit">保存全部设置</button><button id="telegramTest" class="btn" type="button">发送测试消息并更新菜单</button></form><aside class="panel"><h3>工作方式</h3><div class="muted" style="font-size:12px;line-height:1.8">家人提交需求后，Telegram 会立即收到片名、年份、类型和 TMDB ID。系统通过 TMDB ID 对照 Emby 媒体库，不会自动下载任何资源。</div></aside></div></section>
     </main>
   </div>
   <div id="toast" class="toast hidden"></div>
@@ -300,7 +305,7 @@
     }
     function requestRow(item) {
       const owner=currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:'';
-      return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}${owner}</div>${item.admin_note?`<div class="request-note">管理员回复：${escapeHtml(item.admin_note)}</div>`:''}</div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></article>`;
+      return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}${owner}</div>${item.admin_note?`<div class="request-note">管理员回复：${escapeHtml(item.admin_note)}</div>`:''}</div><div class="request-controls"><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span><button class="btn btn-danger btn-small" data-delete="${item.id}">删除</button></div></article>`;
     }
     async function loadRequests() {
       const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
@@ -308,6 +313,7 @@
       const mine=currentUser.role==='admin'?items:items.filter(x=>Number(x.user_id)===Number(currentUser.id)||!x.user_id);
       $('mineCount').textContent=mine.length?`· ${mine.length}`:'';
       $('mineRequests').innerHTML=mine.length?mine.map(requestRow).join(''):'<div class="empty">还没有提交过需求。</div>';
+      $('mineRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
       if(currentUser.role==='admin') { updateMemberFilter(items); renderAdminRequests(items); }
     }
     function updateMemberFilter(items) {
@@ -318,13 +324,20 @@
     }
     function renderAdminRequests(items) {
       const selected=$('requestUserFilter').value; const visible=selected?items.filter(item=>String(item.user_id||item.username||item.display_name||'')===selected):items;
-      $('adminRequests').innerHTML=visible.length?visible.map(item=>`<div class="admin-request"><div class="requester"><span class="requester-avatar">${escapeHtml((item.display_name||'成').slice(0,1))}</span>${escapeHtml(item.display_name||'成员')}${item.username?` · @${escapeHtml(item.username)}`:''} 提交</div><div class="admin-request-head"><div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}</div></div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></div><div class="admin-request-actions"><select data-status="${item.id}">${Object.entries(statusOptions).map(([key,label])=>`<option value="${key}" ${key===item.status?'selected':''}>${label}</option>`).join('')}</select><input data-note="${item.id}" value="${escapeHtml(item.admin_note||'')}" placeholder="给成员的回复"><button class="btn btn-primary btn-small" data-save="${item.id}">保存</button></div></div>`).join(''):'<div class="empty">这个成员还没有求片请求。</div>';
+      $('adminRequests').innerHTML=visible.length?visible.map(item=>`<div class="admin-request"><div class="requester"><span class="requester-avatar">${escapeHtml((item.display_name||'成').slice(0,1))}</span>${escapeHtml(item.display_name||'成员')}${item.username?` · @${escapeHtml(item.username)}`:''} 提交</div><div class="admin-request-head"><div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}</div></div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></div><div class="admin-request-actions"><select data-status="${item.id}">${Object.entries(statusOptions).map(([key,label])=>`<option value="${key}" ${key===item.status?'selected':''}>${label}</option>`).join('')}</select><input data-note="${item.id}" value="${escapeHtml(item.admin_note||'')}" placeholder="给成员的回复"><button class="btn btn-primary btn-small" data-save="${item.id}">保存</button><button class="btn btn-danger btn-small" data-delete="${item.id}">删除</button></div></div>`).join(''):'<div class="empty">这个成员还没有求片请求。</div>';
       $('adminRequests').querySelectorAll('[data-save]').forEach(button=>button.onclick=()=>saveRequest(Number(button.dataset.save),button));
+      $('adminRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
     }
     async function saveRequest(id,button) {
       if(preview){ toast('预览模式：状态已模拟保存'); return; }
       const status=document.querySelector(`[data-status="${id}"]`).value; const admin_note=document.querySelector(`[data-note="${id}"]`).value;
       button.disabled=true; try { await api(`/api/requests/${id}`,{method:'PATCH',body:JSON.stringify({status,admin_note})}); toast('状态已更新'); await loadRequests(); } catch(error){toast(error.message,true);} finally {button.disabled=false;}
+    }
+    async function deleteRequest(id,button) {
+      if(preview){ const index=demoRequests.findIndex(item=>item.id===id); if(index>=0)demoRequests.splice(index,1); toast('需求已删除'); await loadRequests(); return; }
+      button.disabled=true;
+      try { await api(`/api/requests/${id}`,{method:'DELETE'}); toast('需求已删除'); await loadRequests(); }
+      catch(error){ toast(error.message,true); button.disabled=false; }
     }
     async function loadUsers() {
       if(preview){ $('userList').innerHTML='<h3>已有成员</h3><div class="user-row"><div><div class="user-name">妈妈</div><div class="user-login">账号 mama · 正常使用</div></div><span class="badge badge-available">正常</span></div><div class="user-row"><div><div class="user-name">管理员</div><div class="user-login">账号 admin</div></div><span class="badge badge-approved">管理员</span></div>'; return; }

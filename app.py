@@ -272,14 +272,6 @@ def telegram_request(method: str, payload: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def telegram_menu_markup() -> dict[str, Any]:
-    return {
-        "keyboard": [[{"text": "求片需求"}, {"text": "完成情况"}]],
-        "resize_keyboard": True,
-        "is_persistent": True,
-    }
-
-
 def configure_telegram_menu() -> None:
     telegram_request(
         "setMyCommands",
@@ -293,14 +285,18 @@ def configure_telegram_menu() -> None:
     )
 
 
-def send_telegram(text: str, show_menu: bool = False) -> None:
+def send_telegram(text: str) -> None:
     with db() as connection:
         chat_id = setting(connection, "telegram_chat_id")
     if not chat_id:
         return
-    payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
-    if show_menu:
-        payload["reply_markup"] = telegram_menu_markup()
+    # Remove the old persistent reply keyboard. Bot commands remain available
+    # through Telegram's native blue menu button configured by setMyCommands.
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "reply_markup": {"remove_keyboard": True},
+    }
     telegram_request("sendMessage", payload)
 
 
@@ -354,12 +350,12 @@ def telegram_poll_loop() -> None:
             if chat_id != str(allowed_chat):
                 continue
             if text in ("求片需求", "/requests") or text.startswith("/requests@"):
-                send_telegram(telegram_request_summary(False), show_menu=True)
+                send_telegram(telegram_request_summary(False))
             elif text in ("完成情况", "/completed") or text.startswith("/completed@"):
                 sync_emby_requests()
-                send_telegram(telegram_request_summary(True), show_menu=True)
+                send_telegram(telegram_request_summary(True))
             elif text in ("/start", "/menu") or text.startswith("/menu@"):
-                send_telegram("请选择要查看的内容：", show_menu=True)
+                send_telegram("请点击左下角“菜单”，选择“求片需求”或“完成情况”。")
         if not data:
             time.sleep(3)
 
@@ -601,6 +597,25 @@ async def update_request(request_id: int, request: Request, movie_session: Optio
     return {"ok": True}
 
 
+@APP.delete("/api/requests/{request_id}")
+def delete_request(request_id: int, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT r.*, u.display_name AS requester_name FROM movie_requests r "
+            "JOIN users u ON u.id = r.user_id WHERE r.id = ?",
+            (request_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "没有找到这条需求")
+        if user["role"] != "admin" and row["user_id"] != user["id"]:
+            raise HTTPException(403, "只能删除自己提交的需求")
+        connection.execute("DELETE FROM movie_requests WHERE id = ?", (request_id,))
+    actor = "管理员删除了" if user["role"] == "admin" else f"{row['requester_name']} 取消了"
+    send_telegram(f"🗑️ 求片需求已删除\n\n{actor}：{row['title']} ({row['year']})")
+    return {"ok": True}
+
+
 @APP.get("/api/admin/users")
 def list_users(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
@@ -696,7 +711,7 @@ def telegram_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[s
         if not setting(connection, "telegram_token") or not setting(connection, "telegram_chat_id"):
             raise HTTPException(400, "请先保存 Telegram Bot Token 和 Chat ID")
     configure_telegram_menu()
-    send_telegram("✅ 映单：Telegram 通知测试成功\n\n机器人菜单已经启用。", show_menu=True)
+    send_telegram("✅ 映单：Telegram 通知测试成功\n\n原生机器人菜单已经启用，旧快捷键已移除。")
     return {"ok": True}
 
 
