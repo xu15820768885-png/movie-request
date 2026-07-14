@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Thread
 from typing import Any, Optional
+from urllib.parse import quote, urlparse
 
 import requests
 import uvicorn
@@ -251,6 +252,69 @@ def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(502, "暂时无法连接 TMDB，请稍后重试") from error
 
 
+def tmdb_media_item(
+    item: dict[str, Any], media_type: str, library_ids: set[int]
+) -> dict[str, Any]:
+    date = item.get("release_date") or item.get("first_air_date") or ""
+    title = item.get("title") or item.get("name") or "未命名"
+    original = item.get("original_title") or item.get("original_name") or ""
+    poster_path = item.get("poster_path") or ""
+    tmdb_id = int(item.get("id") or 0)
+    return {
+        "tmdb_id": tmdb_id,
+        "media_type": media_type,
+        "title": title,
+        "original_title": original,
+        "year": str(date)[:4],
+        "overview": item.get("overview") or "暂无简介",
+        "poster_path": poster_path,
+        "poster_url": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
+        "rating": round(float(item.get("vote_average") or 0), 1),
+        "vote_count": int(item.get("vote_count") or 0),
+        "in_library": tmdb_id in library_ids,
+    }
+
+
+def douban_get(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Read public data used by Douban's own mobile web pages."""
+    try:
+        response = requests.get(
+            f"https://m.douban.com/rexxar/api/v2{path}",
+            params=params or {},
+            headers={
+                "Accept": "application/json",
+                "Referer": "https://m.douban.com/",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as error:
+        raise HTTPException(502, "豆瓣榜单暂时无法连接，请稍后重试") from error
+
+
+def douban_media_item(item: dict[str, Any], media_type: str) -> dict[str, Any]:
+    cover = item.get("cover") or {}
+    poster_url = cover.get("url") or item.get("cover_url") or ""
+    rating = item.get("rating") or {}
+    return {
+        "source": "douban",
+        "douban_id": str(item.get("id") or ""),
+        "tmdb_id": 0,
+        "media_type": media_type,
+        "title": item.get("title") or "未命名",
+        "original_title": item.get("original_title") or "",
+        "year": str(item.get("year") or "")[:4],
+        "overview": item.get("intro") or item.get("card_subtitle") or item.get("info") or "暂无简介",
+        "poster_path": "",
+        "poster_url": f"/api/douban/poster?url={quote(poster_url, safe='')}" if poster_url else "",
+        "rating": round(float(rating.get("value") or 0), 1),
+        "vote_count": int(rating.get("count") or 0),
+        "in_library": False,
+    }
+
+
 def telegram_request(method: str, payload: dict[str, Any]) -> dict[str, Any]:
     with db() as connection:
         token = setting(connection, "telegram_token")
@@ -480,25 +544,197 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         media_type = item.get("media_type")
         if media_type not in ("movie", "tv"):
             continue
-        date = item.get("release_date") or item.get("first_air_date") or ""
-        title = item.get("title") or item.get("name") or "未命名"
-        original = item.get("original_title") or item.get("original_name") or ""
-        poster_path = item.get("poster_path") or ""
-        results.append(
-            {
-                "tmdb_id": item.get("id"),
-                "media_type": media_type,
-                "title": title,
-                "original_title": original,
-                "year": date[:4],
-                "overview": item.get("overview") or "暂无简介",
-                "poster_path": poster_path,
-                "poster_url": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
-                "rating": round(float(item.get("vote_average") or 0), 1),
-                "in_library": int(item.get("id") or 0) in library_ids,
-            }
-        )
+        results.append(tmdb_media_item(item, media_type, library_ids))
     return {"results": results[:20]}
+
+
+@APP.get("/api/charts/{chart_name}")
+def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_user(movie_session)
+    douban_config = {
+        "douban_movies": ("/subject_collection/movie_hot_gaia/items", "movie", "豆瓣热门电影"),
+        "douban_tv": ("/subject_collection/tv_hot/items", "tv", "豆瓣热门剧集"),
+    }
+    if chart_name in douban_config:
+        path, media_type, title = douban_config[chart_name]
+        data = douban_get(
+            path,
+            {"start": 0, "count": 20, "items_only": 1, "for_mobile": 1},
+        )
+        items = data.get("subject_collection_items") or []
+        return {
+            "title": title,
+            "source": "douban",
+            "results": [douban_media_item(item, media_type) for item in items[:20]],
+        }
+    chart_config = {
+        "trending": ("/trending/all/week", None, "本周热门"),
+        "movies": ("/movie/popular", "movie", "热门电影"),
+        "tv": ("/tv/popular", "tv", "热门剧集"),
+    }
+    if chart_name not in chart_config:
+        raise HTTPException(404, "没有找到这个榜单")
+    path, fixed_type, title = chart_config[chart_name]
+    data = tmdb_get(path, {"language": "zh-CN", "page": 1})
+    library_ids = emby_library_tmdb_ids()
+    results = []
+    for item in data.get("results", []):
+        media_type = fixed_type or item.get("media_type")
+        if media_type not in ("movie", "tv"):
+            continue
+        results.append(tmdb_media_item(item, media_type, library_ids))
+    return {"title": title, "results": results[:20]}
+
+
+@APP.get("/api/douban/resolve/{media_type}/{douban_id}")
+def resolve_douban(
+    media_type: str,
+    douban_id: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if media_type not in ("movie", "tv") or not douban_id.isdigit():
+        raise HTTPException(400, "豆瓣影片信息无效")
+    subject = douban_get(f"/{media_type}/{douban_id}")
+    title = subject.get("original_title") or subject.get("title") or ""
+    fallback_title = subject.get("title") or ""
+    year = str(subject.get("year") or "")[:4]
+    if not title:
+        raise HTTPException(404, "豆瓣条目缺少片名，无法匹配 TMDB")
+    params: dict[str, Any] = {
+        "query": title,
+        "language": "zh-CN",
+        "include_adult": "false",
+        "page": 1,
+    }
+    if year:
+        params["year" if media_type == "movie" else "first_air_date_year"] = year
+    data = tmdb_get(f"/search/{media_type}", params)
+    candidates = data.get("results") or []
+    if not candidates and fallback_title and fallback_title != title:
+        params["query"] = fallback_title
+        data = tmdb_get(f"/search/{media_type}", params)
+        candidates = data.get("results") or []
+    if not candidates:
+        raise HTTPException(404, "这条豆瓣影片暂时无法准确匹配到 TMDB，不能提交")
+    exact_year = []
+    for candidate in candidates:
+        date = candidate.get("release_date") or candidate.get("first_air_date") or ""
+        if year and str(date)[:4] == year:
+            exact_year.append(candidate)
+    match = exact_year[0] if exact_year else candidates[0]
+    tmdb_id = int(match.get("id") or 0)
+    if tmdb_id <= 0:
+        raise HTTPException(404, "这条豆瓣影片暂时无法准确匹配到 TMDB，不能提交")
+    return {"tmdb_id": tmdb_id, "media_type": media_type}
+
+
+@APP.get("/api/douban/poster")
+def douban_poster(
+    url: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> Response:
+    require_user(movie_session)
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme != "https"
+        or not (hostname == "doubanio.com" or hostname.endswith(".doubanio.com"))
+        or not parsed.path.startswith("/view/photo/")
+    ):
+        raise HTTPException(400, "豆瓣海报地址无效")
+    try:
+        image = requests.get(
+            url,
+            headers={
+                "Referer": "https://m.douban.com/",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
+            },
+            timeout=15,
+        )
+        image.raise_for_status()
+    except requests.RequestException as error:
+        raise HTTPException(502, "豆瓣海报暂时无法读取") from error
+    content_type = image.headers.get("Content-Type", "image/jpeg")
+    if not content_type.startswith("image/"):
+        raise HTTPException(502, "豆瓣海报返回了无效内容")
+    return Response(
+        content=image.content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@APP.get("/api/details/{media_type}/{tmdb_id}")
+def media_details(
+    media_type: str,
+    tmdb_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if media_type not in ("movie", "tv") or tmdb_id <= 0:
+        raise HTTPException(400, "影片信息无效")
+    data = tmdb_get(
+        f"/{media_type}/{tmdb_id}",
+        {
+            "language": "zh-CN",
+            "append_to_response": "credits,videos,recommendations",
+        },
+    )
+    if int(data.get("id") or 0) != tmdb_id:
+        raise HTTPException(404, "TMDB 没有找到这部影片")
+    library_ids = emby_library_tmdb_ids()
+    basic = tmdb_media_item(data, media_type, library_ids)
+    credits = data.get("credits") or {}
+    cast = [
+        {
+            "name": person.get("name") or "",
+            "character": person.get("character") or "",
+        }
+        for person in credits.get("cast", [])[:8]
+        if person.get("name")
+    ]
+    directors = [
+        person.get("name")
+        for person in credits.get("crew", [])
+        if person.get("job") in ("Director", "Series Director") and person.get("name")
+    ][:3]
+    if media_type == "tv" and not directors:
+        directors = [person.get("name") for person in data.get("created_by", []) if person.get("name")][:3]
+    videos = (data.get("videos") or {}).get("results", [])
+    trailer = next(
+        (
+            video
+            for video in videos
+            if video.get("site") == "YouTube"
+            and video.get("type") in ("Trailer", "Teaser")
+            and video.get("key")
+        ),
+        None,
+    )
+    recommendations = []
+    for item in (data.get("recommendations") or {}).get("results", [])[:8]:
+        recommendations.append(tmdb_media_item(item, media_type, library_ids))
+    basic.update(
+        {
+            "backdrop_url": (
+                f"https://image.tmdb.org/t/p/original{data.get('backdrop_path')}"
+                if data.get("backdrop_path")
+                else ""
+            ),
+            "genres": [genre.get("name") for genre in data.get("genres", []) if genre.get("name")],
+            "runtime": int(data.get("runtime") or 0),
+            "episode_runtime": int((data.get("episode_run_time") or [0])[0] or 0),
+            "number_of_seasons": int(data.get("number_of_seasons") or 0),
+            "number_of_episodes": int(data.get("number_of_episodes") or 0),
+            "tagline": data.get("tagline") or "",
+            "directors": directors,
+            "cast": cast,
+            "trailer_url": f"https://www.youtube.com/watch?v={trailer['key']}" if trailer else "",
+            "recommendations": recommendations,
+        }
+    )
+    return basic
 
 
 @APP.get("/api/requests")

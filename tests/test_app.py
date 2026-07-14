@@ -118,6 +118,89 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 409)
         self.assertIn("Emby", error.exception.detail)
 
+    def test_details_include_story_cast_and_recommendations(self):
+        details = {
+            "id": 157336,
+            "title": "星际穿越",
+            "original_title": "Interstellar",
+            "release_date": "2014-11-05",
+            "overview": "一队探险家穿越虫洞。",
+            "runtime": 169,
+            "vote_average": 8.4,
+            "vote_count": 36000,
+            "genres": [{"name": "科幻"}, {"name": "剧情"}],
+            "credits": {
+                "cast": [{"name": "马修·麦康纳", "character": "库珀"}],
+                "crew": [{"name": "克里斯托弗·诺兰", "job": "Director"}],
+            },
+            "videos": {"results": [{"site": "YouTube", "type": "Trailer", "key": "abc"}]},
+            "recommendations": {
+                "results": [{"id": 27205, "title": "盗梦空间", "release_date": "2010-07-16"}]
+            },
+        }
+        with patch.object(app, "tmdb_get", return_value=details) as tmdb:
+            result = app.media_details("movie", 157336, self.token)
+        tmdb.assert_called_once_with(
+            "/movie/157336",
+            {"language": "zh-CN", "append_to_response": "credits,videos,recommendations"},
+        )
+        self.assertEqual(result["runtime"], 169)
+        self.assertEqual(result["directors"], ["克里斯托弗·诺兰"])
+        self.assertEqual(result["cast"][0]["character"], "库珀")
+        self.assertEqual(result["recommendations"][0]["title"], "盗梦空间")
+        self.assertIn("youtube.com", result["trailer_url"])
+
+    def test_tmdb_chart_filters_people_and_normalizes_media(self):
+        payload = {
+            "results": [
+                {"id": 1, "media_type": "movie", "title": "电影", "release_date": "2026-01-01"},
+                {"id": 2, "media_type": "tv", "name": "剧集", "first_air_date": "2025-01-01"},
+                {"id": 3, "media_type": "person", "name": "演员"},
+            ]
+        }
+        with patch.object(app, "tmdb_get", return_value=payload):
+            result = app.charts("trending", self.token)
+        self.assertEqual(result["title"], "本周热门")
+        self.assertEqual([item["media_type"] for item in result["results"]], ["movie", "tv"])
+
+    def test_douban_chart_is_marked_for_tmdb_resolution(self):
+        payload = {
+            "subject_collection_items": [
+                {
+                    "id": "1292052",
+                    "title": "肖申克的救赎",
+                    "year": "1994",
+                    "rating": {"value": 9.7, "count": 3000000},
+                    "cover": {"url": "https://example.com/poster.jpg"},
+                }
+            ]
+        }
+        with patch.object(app, "douban_get", return_value=payload):
+            result = app.charts("douban_movies", self.token)
+        item = result["results"][0]
+        self.assertEqual(result["title"], "豆瓣热门电影")
+        self.assertEqual(item["source"], "douban")
+        self.assertEqual(item["douban_id"], "1292052")
+        self.assertEqual(item["tmdb_id"], 0)
+
+    def test_douban_item_must_resolve_to_tmdb_before_requesting(self):
+        subject = {
+            "id": "1292052",
+            "title": "肖申克的救赎",
+            "original_title": "The Shawshank Redemption",
+            "year": "1994",
+        }
+        tmdb = {"results": [{"id": 278, "title": "肖申克的救赎", "release_date": "1994-09-23"}]}
+        with patch.object(app, "douban_get", return_value=subject):
+            with patch.object(app, "tmdb_get", return_value=tmdb):
+                result = app.resolve_douban("movie", "1292052", self.token)
+        self.assertEqual(result, {"tmdb_id": 278, "media_type": "movie"})
+
+    def test_douban_poster_proxy_rejects_non_douban_hosts(self):
+        with self.assertRaises(app.HTTPException) as error:
+            app.douban_poster("https://example.com/not-allowed.jpg", self.token)
+        self.assertEqual(error.exception.status_code, 400)
+
     def test_telegram_uses_configured_proxy(self):
         class FakeResponse:
             def raise_for_status(self):
