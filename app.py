@@ -391,6 +391,8 @@ def configure_telegram_menu() -> None:
             "commands": [
                 {"command": "requests", "description": "求片需求"},
                 {"command": "completed", "description": "完成情况"},
+                {"command": "notice", "description": "发布片库公告"},
+                {"command": "clear_notice", "description": "清除片库公告"},
                 {"command": "menu", "description": "显示菜单"},
             ]
         },
@@ -441,6 +443,54 @@ def telegram_request_summary(completed: bool) -> str:
     return "\n".join(lines)
 
 
+def handle_telegram_message(text: str) -> bool:
+    text = str(text or "").strip()
+    if not text:
+        return False
+    first, separator, argument = text.partition(" ")
+    command = first.split("@", 1)[0].lower()
+    argument = argument.strip() if separator else ""
+
+    if text == "求片需求" or command == "/requests":
+        send_telegram(telegram_request_summary(False))
+    elif text == "完成情况" or command == "/completed":
+        sync_emby_requests()
+        send_telegram(telegram_request_summary(True))
+    elif command == "/notice":
+        if argument:
+            notice = argument[:240]
+            with db() as connection:
+                set_setting(connection, "site_notice", notice)
+                set_setting(connection, "telegram_notice_pending", "")
+            send_telegram(f"📢 片库公告已发布\n\n{notice}")
+        else:
+            with db() as connection:
+                set_setting(connection, "telegram_notice_pending", "1")
+            send_telegram("请发送公告内容，你的下一条普通消息会显示在网页上。")
+    elif command == "/clear_notice":
+        with db() as connection:
+            set_setting(connection, "site_notice", "")
+            set_setting(connection, "telegram_notice_pending", "")
+        send_telegram("✅ 片库公告已清除")
+    elif command in ("/start", "/menu"):
+        send_telegram(
+            "请点击左下角“菜单”，可以查看求片需求、完成情况，或发布片库公告。"
+        )
+    elif not text.startswith("/"):
+        with db() as connection:
+            pending = setting(connection, "telegram_notice_pending") == "1"
+            if pending:
+                notice = text[:240]
+                set_setting(connection, "site_notice", notice)
+                set_setting(connection, "telegram_notice_pending", "")
+        if not pending:
+            return False
+        send_telegram(f"📢 片库公告已发布\n\n{notice}")
+    else:
+        return False
+    return True
+
+
 def telegram_poll_loop() -> None:
     global TELEGRAM_OFFSET
     while True:
@@ -461,13 +511,7 @@ def telegram_poll_loop() -> None:
             text = str(message.get("text") or "").strip()
             if chat_id != str(allowed_chat):
                 continue
-            if text in ("求片需求", "/requests") or text.startswith("/requests@"):
-                send_telegram(telegram_request_summary(False))
-            elif text in ("完成情况", "/completed") or text.startswith("/completed@"):
-                sync_emby_requests()
-                send_telegram(telegram_request_summary(True))
-            elif text in ("/start", "/menu") or text.startswith("/menu@"):
-                send_telegram("请点击左下角“菜单”，选择“求片需求”或“完成情况”。")
+            handle_telegram_message(text)
         if not data:
             time.sleep(3)
 
@@ -484,6 +528,7 @@ def emby_sync_loop() -> None:
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
+    Thread(target=configure_telegram_menu, name="telegram-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
 
@@ -503,6 +548,13 @@ def bootstrap(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, 
     with db() as connection:
         ready = bool(connection.execute("SELECT 1 FROM users LIMIT 1").fetchone())
     return {"needs_setup": not ready, "user": session_user(movie_session)}
+
+
+@APP.get("/api/notice")
+def site_notice(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, str]:
+    require_user(movie_session)
+    with db() as connection:
+        return {"text": setting(connection, "site_notice")}
 
 
 @APP.post("/api/bootstrap")

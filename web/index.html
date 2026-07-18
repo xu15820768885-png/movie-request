@@ -73,11 +73,24 @@
     .btn-small { min-height: 34px; padding: 6px 11px; font-size: 12px; border-radius: 9px; }
     .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
     main { padding: 46px 0 80px; }
-    .hero { display: grid; grid-template-columns: 1fr auto; gap: 32px; align-items: end; margin-bottom: 28px; }
+    .hero {
+      display: grid; grid-template-columns: minmax(0,1fr) auto;
+      grid-template-areas: "copy stamp"; gap: 28px; align-items: end; margin-bottom: 28px;
+    }
+    .hero.has-notice { grid-template-columns: minmax(0,1fr) minmax(320px,.95fr) auto; grid-template-areas: "copy notice stamp"; }
+    .hero-copy { grid-area: copy; }
     .eyebrow { color: var(--orange-2); font-size: 12px; font-weight: 800; letter-spacing: .16em; }
     h1 { max-width: 720px; margin: 10px 0 12px; font-size: clamp(32px, 5vw, 58px); line-height: 1.06; letter-spacing: -.04em; }
     .hero p { max-width: 600px; margin: 0; color: var(--muted); line-height: 1.75; }
-    .hero-stamp { color: #776e66; font-size: 12px; text-align: right; line-height: 1.7; }
+    .hero-stamp { grid-area: stamp; color: #776e66; font-size: 12px; text-align: right; line-height: 1.7; }
+    .site-notice {
+      grid-area: notice; min-height: 102px; padding: 18px 20px; align-self: stretch; display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+      border: 1px solid rgba(255,123,70,.3); border-radius: 17px;
+      background: linear-gradient(135deg, rgba(255,123,70,.13), rgba(31,28,25,.92) 58%);
+      box-shadow: inset 3px 0 0 var(--orange), 0 18px 44px rgba(0,0,0,.14);
+    }
+    .notice-kicker { color: var(--orange-2); font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+    .notice-text { margin-top: 9px; color: var(--text); font-size: 15px; font-weight: 700; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
     .search-box {
       display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 9px;
       border: 1px solid #494139; border-radius: 18px; background: rgba(27,25,23,.92); box-shadow: var(--shadow);
@@ -195,14 +208,18 @@
     @media (max-width: 920px) {
       .movie-grid { grid-template-columns: repeat(4, minmax(0,1fr)); }
       .admin-grid { grid-template-columns: 1fr; }
+      .hero { grid-template-columns: 1fr; grid-template-areas: "copy"; }
+      .hero.has-notice { grid-template-columns: minmax(0,1fr) minmax(280px,.9fr); grid-template-areas: "copy notice"; }
+      .hero-stamp { display: none; }
     }
     @media (max-width: 680px) {
       .shell { width: min(100% - 24px, 1160px); }
       .topbar-inner { height: 64px; }
       .brand-sub, .user-label { display: none; }
       main { padding-top: 28px; }
-      .hero { grid-template-columns: 1fr; gap: 12px; }
-      .hero-stamp { display: none; }
+      .hero, .hero.has-notice { grid-template-columns: 1fr; grid-template-areas: "copy" "notice"; gap: 14px; }
+      .site-notice { min-height: 0; padding: 15px 17px; }
+      .notice-text { margin-top: 7px; font-size: 14px; }
       .hero p { font-size: 13px; }
       .search-box { grid-template-columns: 1fr; }
       .search-box .btn { width: 100%; }
@@ -257,7 +274,8 @@
     </div>
     <main class="shell">
       <section id="familyHero" class="hero">
-        <div><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
+        <div class="hero-copy"><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
+        <aside id="siteNotice" class="site-notice hidden" aria-live="polite"><div class="notice-kicker">重要提醒</div><div id="siteNoticeText" class="notice-text"></div></aside>
         <div class="hero-stamp">数据来自 TMDB<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
@@ -319,6 +337,16 @@
       let data={}; try { data=await response.json(); } catch {}
       if (!response.ok) throw new Error(data.detail || `请求失败 ${response.status}`);
       return data;
+    }
+    function renderSiteNotice(text) {
+      const clean=String(text||'').trim();
+      $('siteNoticeText').textContent=clean;
+      $('siteNotice').classList.toggle('hidden',!clean);
+      $('familyHero').classList.toggle('has-notice',!!clean);
+    }
+    async function loadSiteNotice() {
+      if(preview){renderSiteNotice('今晚会更新一批新片，提交后请留意入库状态。');return;}
+      try {const data=await api('/api/notice');renderSiteNotice(data.text||'');} catch {}
     }
     function showAuth(setup=false) {
       needsSetup=setup; $('authOverlay').classList.remove('hidden'); $('app').classList.add('hidden');
@@ -448,16 +476,19 @@
         $('previewRibbon').textContent = previewMode === 'member'
           ? '成员端预览 · 只能找片和查看自己的请求'
           : '管理员预览 · 请求、Emby 和 Telegram 管理';
-        $('previewRibbon').classList.remove('hidden');showApp();loadChart('douban_movies');loadRequests();
+        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadChart('douban_movies');loadRequests();
         if(currentUser.role==='admin') switchView('admin');
         return;
       }
-      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadChart('douban_movies');loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadChart('douban_movies');loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
     }
     init();
     setInterval(() => {
       if (currentUser && !preview) loadRequests().catch(() => {});
     }, 60000);
+    setInterval(() => {
+      if (currentUser && !preview) loadSiteNotice();
+    }, 15000);
   </script>
 </body>
 </html>

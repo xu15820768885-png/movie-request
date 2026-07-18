@@ -293,6 +293,34 @@ class MovieRequestTests(unittest.TestCase):
         payload = telegram.call_args.args[1]
         self.assertEqual(payload["reply_markup"], {"remove_keyboard": True})
 
+    def test_telegram_notice_prompt_uses_next_plain_message(self):
+        with patch.object(app, "send_telegram") as send:
+            self.assertTrue(app.handle_telegram_message("/notice"))
+            with app.db() as connection:
+                self.assertEqual(app.setting(connection, "telegram_notice_pending"), "1")
+            self.assertTrue(app.handle_telegram_message("今晚更新片库，请稍后再来看看。"))
+        self.assertIn("片库公告已发布", send.call_args.args[0])
+        self.assertEqual(
+            app.site_notice(self.token)["text"],
+            "今晚更新片库，请稍后再来看看。",
+        )
+        with app.db() as connection:
+            self.assertEqual(app.setting(connection, "telegram_notice_pending"), "")
+
+    def test_telegram_notice_direct_command_and_clear(self):
+        with patch.object(app, "send_telegram"):
+            self.assertTrue(app.handle_telegram_message("/notice 今晚新增 4K 资源"))
+            self.assertEqual(app.site_notice(self.token)["text"], "今晚新增 4K 资源")
+            self.assertTrue(app.handle_telegram_message("/clear_notice"))
+        self.assertEqual(app.site_notice(self.token)["text"], "")
+
+    def test_telegram_menu_contains_notice_commands(self):
+        with patch.object(app, "telegram_request") as telegram:
+            app.configure_telegram_menu()
+        commands = telegram.call_args.args[1]["commands"]
+        self.assertIn({"command": "notice", "description": "发布片库公告"}, commands)
+        self.assertIn({"command": "clear_notice", "description": "清除片库公告"}, commands)
+
 
 if __name__ == "__main__":
     unittest.main()
