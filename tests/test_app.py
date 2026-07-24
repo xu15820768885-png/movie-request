@@ -490,6 +490,39 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(resource["episode_label"], "第1、2季 · 第1–12集")
 
+    def test_dian_resource_lists_exact_episodes_from_openapi_file_list(self):
+        resource = app.normalize_dian_resource(
+            {
+                "id": 11,
+                "season": 1,
+                "episode_count": 2,
+                "file_list": [
+                    "百花杀.2026.S01E03.2160p.mkv",
+                    "百花杀.2026.S01E05.2160p.mkv",
+                ],
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第3、5集")
+
+    def test_dian_resource_compacts_exact_episode_range_from_nested_files(self):
+        resource = app.normalize_dian_resource(
+            {
+                "resource": {
+                    "name": "百花杀",
+                    "metadata": {
+                        "season": 1,
+                        "episode_count": 3,
+                        "file_list": [
+                            {"file_name": "百花杀.S01E01.mkv"},
+                            {"file_name": "百花杀.S01E02.mkv"},
+                            {"file_name": "百花杀.S01E03.mkv"},
+                        ],
+                    },
+                }
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–3集")
+
     def test_dian_tv_resources_do_not_default_to_specials(self):
         with patch.object(app, "dian_call", return_value={"data": {"rows": []}}) as call:
             app.dian_resources("tv", 88416, None, self.token)

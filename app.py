@@ -416,7 +416,70 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     return links
 
 
-def dian_episode_label(pick: Any, title: str) -> str:
+def compact_episode_numbers(numbers: set[int]) -> str:
+    ordered = sorted(number for number in numbers if number > 0)
+    if not ordered:
+        return ""
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for number in ordered[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}–{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}–{previous}")
+    return "、".join(ranges)
+
+
+def episode_label_from_files(file_names: list[str], default_season: int) -> str:
+    episodes_by_season: dict[int, set[int]] = {}
+    for file_name in file_names:
+        text = str(file_name or "")
+        text_season = default_season
+        matched_spans: list[tuple[int, int]] = []
+        for match in re.finditer(
+            r"(?i)S(\d{1,2})[.\s_-]*E(\d{1,3})"
+            r"(?:\s*(?:-|~|–|至)\s*(?:S\d{1,2}[.\s_-]*)?E?(\d{1,3}))?",
+            text,
+        ):
+            season = int(match.group(1))
+            text_season = season
+            start = int(match.group(2))
+            end = int(match.group(3) or start)
+            if 0 < start <= end <= 999 and end - start <= 500:
+                episodes_by_season.setdefault(season, set()).update(
+                    range(start, end + 1)
+                )
+            matched_spans.append(match.span())
+
+        remaining = "".join(
+            character
+            for index, character in enumerate(text)
+            if not any(start <= index < end for start, end in matched_spans)
+        )
+        for value in re.findall(r"(?i)(?:^|[.\s_-])E(\d{1,3})(?=[.\s_-]|$)", remaining):
+            episodes_by_season.setdefault(text_season, set()).add(int(value))
+        for value in re.findall(r"第\s*(\d{1,3})\s*集", remaining):
+            episodes_by_season.setdefault(text_season, set()).add(int(value))
+
+    groups = []
+    for season, episodes in sorted(episodes_by_season.items()):
+        episode_text = compact_episode_numbers(episodes)
+        if not episode_text:
+            continue
+        if season >= 0:
+            groups.append(f"第{season}季 · 第{episode_text}集")
+        else:
+            groups.append(f"第{episode_text}集")
+    return "；".join(groups)
+
+
+def dian_episode_label(
+    pick: Any,
+    title: str,
+    file_names: Optional[list[str]] = None,
+) -> str:
     seasons_csv = str(pick("seasons_csv") or "").strip()
     episodes_csv = str(pick("episodes_csv") or "").strip()
     if seasons_csv or episodes_csv:
@@ -440,6 +503,15 @@ def dian_episode_label(pick: Any, title: str) -> str:
             parts.append(f"第{episode_text}集")
         return " · ".join(parts)
 
+    season = pick("season_number", "season", "season_no", "season_num")
+    try:
+        default_season = int(season)
+    except (TypeError, ValueError):
+        default_season = -1
+    file_label = episode_label_from_files(file_names or [], default_season)
+    if file_label:
+        return file_label
+
     explicit = pick(
         "episode_label", "episode_summary", "episodes_summary",
         "episode_range_text", "episode_text",
@@ -449,7 +521,6 @@ def dian_episode_label(pick: Any, title: str) -> str:
         if "集" in text:
             return text
 
-    season = pick("season_number", "season", "season_no", "season_num")
     episode_start = pick(
         "episode_start", "start_episode", "episode_from",
         "first_episode", "episode_number",
@@ -510,10 +581,16 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
 
     dictionaries: list[dict[str, Any]] = [item, resource, share]
     seen = {id(value) for value in dictionaries}
-    for value in list(item.values()) + list(resource.values()) + list(share.values()):
-        if isinstance(value, dict) and id(value) not in seen:
-            dictionaries.append(value)
-            seen.add(id(value))
+    position = 0
+    while position < len(dictionaries):
+        source = dictionaries[position]
+        position += 1
+        for value in source.values():
+            nested_values = value if isinstance(value, list) else [value]
+            for nested in nested_values:
+                if isinstance(nested, dict) and id(nested) not in seen:
+                    dictionaries.append(nested)
+                    seen.add(id(nested))
 
     def pick(*keys: str, sources: Optional[list[dict[str, Any]]] = None) -> Any:
         for source in sources or dictionaries:
@@ -581,7 +658,40 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
         "files", "file_summary", "episode_summary", "file_count",
         "episode_count",
     )
-    episode_label = dian_episode_label(pick, str(title))
+    raw_file_list = pick("file_list", "files_list", "filenames", "file_names")
+    file_names: list[str] = []
+    if isinstance(raw_file_list, str):
+        try:
+            decoded_file_list = json.loads(raw_file_list)
+        except (TypeError, ValueError):
+            decoded_file_list = None
+        if isinstance(decoded_file_list, list):
+            raw_file_list = decoded_file_list
+        else:
+            file_names.extend(
+                line.strip()
+                for line in raw_file_list.splitlines()
+                if line.strip()
+            )
+    if isinstance(raw_file_list, list):
+        for entry in raw_file_list:
+            if isinstance(entry, dict):
+                name = (
+                    entry.get("name")
+                    or entry.get("file_name")
+                    or entry.get("filename")
+                    or entry.get("title")
+                )
+                if name:
+                    file_names.append(str(name))
+            elif entry:
+                file_names.append(str(entry))
+    episode_title = (
+        pick("file_name", "filename")
+        or pick("offline_title", "title_override")
+        or title
+    )
+    episode_label = dian_episode_label(pick, str(episode_title), file_names)
     if not episode_label and isinstance(files, str) and "集" in files:
         episode_label = files.strip()
     if not episode_label and isinstance(files, (int, float)):
