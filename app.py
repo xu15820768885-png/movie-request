@@ -258,7 +258,12 @@ def is_115_share_url(value: str) -> bool:
     host = (parsed.hostname or "").lower()
     return (
         parsed.scheme in ("http", "https")
-        and (host == "115.com" or host.endswith(".115.com"))
+        and (
+            host == "115.com"
+            or host.endswith(".115.com")
+            or host == "115cdn.com"
+            or host.endswith(".115cdn.com")
+        )
         and parsed.path.startswith("/s/")
     )
 
@@ -1205,6 +1210,9 @@ async def dian_transfer(
     raw_links = (
         data.get("share_url")
         or data.get("url")
+        or data.get("full_url")
+        or data.get("complete_url")
+        or data.get("link")
         or data.get("share_link")
         or data.get("offline_url")
         or data.get("offline_urls")
@@ -1212,6 +1220,25 @@ async def dian_transfer(
         or data.get("urls")
         or ""
     )
+    share_code = str(
+        data.get("share_code")
+        or data.get("sharecode")
+        or data.get("shareCode")
+        or ""
+    ).strip()
+    receive_code = str(
+        data.get("receive_code")
+        or data.get("receivecode")
+        or data.get("receiveCode")
+        or data.get("access_code")
+        or data.get("password")
+        or data.get("pwd")
+        or ""
+    ).strip()
+    if not raw_links and share_code:
+        raw_links = f"https://115cdn.com/s/{quote(share_code, safe='')}"
+        if receive_code:
+            raw_links += f"?password={quote(receive_code, safe='')}"
     if isinstance(raw_links, list):
         links = [str(link).strip() for link in raw_links if str(link).strip()]
     else:

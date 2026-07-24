@@ -430,6 +430,7 @@ class MovieRequestTests(unittest.TestCase):
                 return {"state": True, "data": {"list": items}}
 
             def share_snap(self, *_args, **_kwargs):
+                self.share_url = _kwargs["share_url"]
                 return {"state": True, "data": {"list": [{"fid": "101"}, {"cid": "202"}]}}
 
             def share_receive(self, payload, **_kwargs):
@@ -442,7 +443,12 @@ class MovieRequestTests(unittest.TestCase):
         with patch.object(
             app,
             "dian_call",
-            return_value={"data": {"share_url": "https://115.com/s/example?password=abcd"}},
+            return_value={
+                "data": {
+                    "share_code": "example115code",
+                    "receive_code": "abcd",
+                }
+            },
         ) as dian:
             with patch.object(app, "p115_client", return_value=client):
                 with patch.object(app, "send_telegram"):
@@ -461,7 +467,18 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["mode"], "share")
         dian.assert_called_once_with("unlock", {"share_id": 11, "resource_id": 22})
+        self.assertEqual(
+            client.share_url,
+            "https://115cdn.com/s/example115code?password=abcd",
+        )
         self.assertEqual(client.received, {"file_id": "101,202", "cid": "7788"})
+
+    def test_115cdn_url_is_recognized_as_share(self):
+        self.assertTrue(
+            app.is_115_share_url(
+                "https://115cdn.com/s/example115code?password=abcd"
+            )
+        )
 
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
