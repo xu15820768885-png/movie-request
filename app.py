@@ -241,6 +241,18 @@ def response_summary(payload: dict[str, Any]) -> str:
     return json.dumps(summary, ensure_ascii=False) if summary else "无状态字段"
 
 
+def p115_call(label: str, method: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    try:
+        result = method(*args, **kwargs)
+        if not isinstance(result, dict):
+            raise RuntimeError("115返回了无效响应")
+        return result
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"{label}：{error}") from error
+
+
 def is_115_share_url(value: str) -> bool:
     parsed = urlparse(value.strip())
     host = (parsed.hostname or "").lower()
@@ -268,7 +280,9 @@ def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def p115_folder_snapshot(client: Any, cid: str) -> set[tuple[str, str, str]]:
-    result = client.fs_files(
+    result = p115_call(
+        "读取115目标目录失败",
+        client.fs_files,
         {
             "cid": cid,
             "limit": 200,
@@ -291,7 +305,11 @@ def p115_folder_snapshot(client: Any, cid: str) -> set[tuple[str, str, str]]:
 
 
 def p115_offline_snapshot(client: Any) -> set[tuple[str, str, str]]:
-    result = client.clouddownload_task_list({"page": 1, "page_size": 100})
+    result = p115_call(
+        "读取115云下载任务失败",
+        client.clouddownload_task_list,
+        {"page": 1, "page_size": 100},
+    )
     if not response_ok(result):
         raise HTTPException(502, response_message(result, "无法验证115云下载任务"))
     return {
@@ -1208,7 +1226,9 @@ async def dian_transfer(
     if not is_115_share_url(share_url):
         before_tasks = p115_offline_snapshot(client)
         if len(links) == 1:
-            queued = client.clouddownload_task_add_url(
+            queued = p115_call(
+                "提交115离线任务失败",
+                client.clouddownload_task_add_url,
                 {"url": share_url, "wp_path_id": target_cid}
             )
         else:
@@ -1217,7 +1237,11 @@ async def dian_transfer(
                 for index, link in enumerate(links)
             }
             offline_payload["wp_path_id"] = target_cid
-            queued = client.clouddownload_task_add_urls(offline_payload)
+            queued = p115_call(
+                "批量提交115离线任务失败",
+                client.clouddownload_task_add_urls,
+                offline_payload,
+            )
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
         if not wait_for_p115_change(
@@ -1238,7 +1262,12 @@ async def dian_transfer(
         }
 
     before_files = p115_folder_snapshot(client, target_cid)
-    snap = client.share_snap(0, share_url=share_url)
+    snap = p115_call(
+        "读取115分享失败",
+        client.share_snap,
+        0,
+        share_url=share_url,
+    )
     if not response_ok(snap):
         raise HTTPException(502, response_message(snap, "无法读取115分享"))
     items = extract_share_items(snap)
@@ -1249,8 +1278,11 @@ async def dian_transfer(
     )
     if not file_ids:
         raise HTTPException(502, "115分享中没有找到可转存内容")
-    received = client.share_receive(
-        {"file_id": file_ids, "cid": target_cid}, share_url=share_url
+    received = p115_call(
+        "接收115分享失败",
+        client.share_receive,
+        {"file_id": file_ids, "cid": target_cid},
+        share_url=share_url,
     )
     if not response_ok(received):
         raise HTTPException(502, response_message(received, "115转存失败"))
