@@ -477,6 +477,40 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(resource["episode_label"], "第1季 · 第1–6集")
 
+    def test_dian_resource_uses_openapi_v2_share_episodes_field(self):
+        resource = app.normalize_dian_resource(
+            {
+                "share_kind": "115",
+                "media_type": "tv",
+                "seasons_csv": "1",
+                "episodes": "1-26",
+                "episode_count": 26,
+                "source": "user_upload",
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–26集")
+        self.assertEqual(resource["share_type_label"], "115")
+
+    def test_dian_resource_supports_array_episode_fields(self):
+        resource = app.normalize_dian_resource(
+            {
+                "share_kind": "115",
+                "seasons": [1],
+                "episodes": [1, 2, 4],
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–2、4集")
+
+    def test_dian_resource_labels_ed2k_offline_share(self):
+        resource = app.normalize_dian_resource(
+            {
+                "share_kind": "offline",
+                "offline_type": "ed2k",
+                "url": "ed2k://|file|example.mkv|123|HASH|/",
+            }
+        )
+        self.assertEqual(resource["share_type_label"], "ED2K")
+
     def test_dian_resource_formats_multiple_openapi_v2_seasons(self):
         resource = app.normalize_dian_resource(
             {

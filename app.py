@@ -432,6 +432,35 @@ def compact_episode_numbers(numbers: set[int]) -> str:
     return "、".join(ranges)
 
 
+def dian_number_values(value: Any, *, allow_zero: bool = False) -> set[int]:
+    """Parse Dian's CSV/range fields, including arrays returned by v2."""
+    if isinstance(value, (list, tuple, set)):
+        values: set[int] = set()
+        for entry in value:
+            values.update(dian_number_values(entry, allow_zero=allow_zero))
+        return values
+    if value is None or isinstance(value, dict):
+        return set()
+    text = str(value).strip().replace("，", ",").replace("–", "-").replace("~", "-")
+    if not text:
+        return set()
+    values = set()
+    for part in text.split(","):
+        part = part.strip()
+        range_match = re.fullmatch(r"(\d+)\s*(?:-|至)\s*(\d+)", part)
+        if range_match:
+            start, end = map(int, range_match.groups())
+            if start > end:
+                start, end = end, start
+            if end - start <= 500:
+                values.update(range(start, end + 1))
+            continue
+        if re.fullmatch(r"\d+", part):
+            values.add(int(part))
+    minimum = 0 if allow_zero else 1
+    return {number for number in values if number >= minimum}
+
+
 def episode_label_from_files(file_names: list[str], default_season: int) -> str:
     episodes_by_season: dict[int, set[int]] = {}
     for file_name in file_names:
@@ -480,26 +509,25 @@ def dian_episode_label(
     title: str,
     file_names: Optional[list[str]] = None,
 ) -> str:
-    seasons_csv = str(pick("seasons_csv") or "").strip()
-    episodes_csv = str(pick("episodes_csv") or "").strip()
-    if seasons_csv or episodes_csv:
+    # The public v2 list response uses ``episodes`` on share cards, while
+    # create/edit payloads use ``episodes_csv``. Accept both (and array forms).
+    season_values = dian_number_values(
+        pick("seasons_csv", "seasons", "season_numbers", "season_list"),
+        allow_zero=True,
+    )
+    episode_values = dian_number_values(
+        pick("episodes", "episodes_csv", "episode_numbers", "episode_list")
+    )
+    if season_values or episode_values:
         parts = []
-        if seasons_csv:
-            season_values = [
-                value.strip()
-                for value in seasons_csv.split(",")
-                if value.strip()
-            ]
+        if season_values:
+            ordered_seasons = sorted(season_values)
             if len(season_values) == 1:
-                parts.append(f"第{season_values[0]}季")
-            elif season_values:
-                parts.append(f"第{'、'.join(season_values)}季")
-        if episodes_csv:
-            episode_text = (
-                episodes_csv
-                .replace(",", "、")
-                .replace("-", "–")
-            )
+                parts.append(f"第{ordered_seasons[0]}季")
+            else:
+                parts.append(f"第{'、'.join(map(str, ordered_seasons))}季")
+        if episode_values:
+            episode_text = compact_episode_numbers(episode_values)
             parts.append(f"第{episode_text}集")
         return " · ".join(parts)
 
@@ -570,6 +598,31 @@ def dian_episode_label(
     elif count_number:
         parts.append(f"共{count_number}集")
     return " · ".join(parts)
+
+
+def dian_share_type_label(pick: Any) -> str:
+    share_kind = str(pick("share_kind", "share_type") or "").strip().lower()
+    offline_type = str(pick("offline_type", "link_type") or "").strip().lower()
+    link = str(
+        pick("url", "offline_url", "share_url", "url_115", "share_code") or ""
+    ).strip().lower()
+    is_offline = share_kind == "offline" or bool(offline_type) or link.startswith(
+        ("ed2k://", "magnet:")
+    )
+    if is_offline:
+        if offline_type == "ed2k" or link.startswith("ed2k://"):
+            return "ED2K"
+        if offline_type == "magnet" or link.startswith("magnet:"):
+            return "磁力"
+        return offline_type.upper() if offline_type else "离线"
+    if (
+        share_kind == "115"
+        or pick("url_115", "receive_code")
+        or "115.com/" in link
+        or "115cdn.com/" in link
+    ):
+        return "115"
+    return ""
 
 
 def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
@@ -659,6 +712,8 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
         "episode_count",
     )
     raw_file_list = pick("file_list", "files_list", "filenames", "file_names")
+    if raw_file_list is None and isinstance(files, (list, dict)):
+        raw_file_list = files
     file_names: list[str] = []
     if isinstance(raw_file_list, str):
         try:
@@ -673,19 +728,27 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
                 for line in raw_file_list.splitlines()
                 if line.strip()
             )
-    if isinstance(raw_file_list, list):
-        for entry in raw_file_list:
-            if isinstance(entry, dict):
-                name = (
-                    entry.get("name")
-                    or entry.get("file_name")
-                    or entry.get("filename")
-                    or entry.get("title")
-                )
-                if name:
-                    file_names.append(str(name))
-            elif entry:
-                file_names.append(str(entry))
+    def collect_file_names(value: Any) -> None:
+        if isinstance(value, dict):
+            name = (
+                value.get("name")
+                or value.get("file_name")
+                or value.get("filename")
+                or value.get("title")
+            )
+            if name:
+                file_names.append(str(name))
+            for key, nested in value.items():
+                if key not in {"name", "file_name", "filename", "title"}:
+                    collect_file_names(nested)
+        elif isinstance(value, (list, tuple)):
+            for entry in value:
+                collect_file_names(entry)
+        elif value:
+            file_names.append(str(value))
+
+    if isinstance(raw_file_list, (list, dict)):
+        collect_file_names(raw_file_list)
     episode_title = (
         pick("file_name", "filename")
         or pick("offline_title", "title_override")
@@ -725,6 +788,7 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
             "source": pick("source", "source_tag", "origin", "channel"),
             "files": files,
             "episode_label": episode_label,
+            "share_type_label": dian_share_type_label(pick),
             "hot": pick(
                 "hot", "heat", "hotness", "score", "views", "view_count",
             ),
