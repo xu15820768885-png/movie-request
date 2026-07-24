@@ -336,6 +336,47 @@ def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
     return False
 
 
+def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if isinstance(value, dict):
+            for key in (
+                "share_url", "url", "full_url", "complete_url", "link",
+                "share_link", "offline_url", "offline_link",
+                "download_url", "ed2k", "ed2k_url",
+            ):
+                if key in value:
+                    add(value[key])
+            return
+        if isinstance(value, list):
+            for item in value:
+                add(item)
+            return
+        for line in str(value or "").splitlines():
+            link = line.strip()
+            if (
+                link
+                and link.lower().startswith(
+                    ("http://", "https://", "ed2k://", "magnet:", "ftp://")
+                )
+                and link not in seen
+            ):
+                links.append(link)
+                seen.add(link)
+
+    for key in (
+        "share_url", "url", "full_url", "complete_url", "link",
+        "share_link", "offline_url", "offline_link", "download_url",
+        "offline_urls", "offline_links", "ed2k_urls", "ed2k_links",
+        "download_urls", "download_links", "urls", "links", "files",
+    ):
+        if key in data:
+            add(data[key])
+    return links
+
+
 def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
     """Flatten Dian's share wrapper into the fields used by the member UI."""
     nested_resource = item.get("resource")
@@ -1207,19 +1248,7 @@ async def dian_transfer(
     unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
-    raw_links = (
-        data.get("share_url")
-        or data.get("url")
-        or data.get("full_url")
-        or data.get("complete_url")
-        or data.get("link")
-        or data.get("share_link")
-        or data.get("offline_url")
-        or data.get("offline_urls")
-        or data.get("download_url")
-        or data.get("urls")
-        or ""
-    )
+    links = extract_dian_transfer_links(data)
     share_code = str(
         data.get("share_code")
         or data.get("sharecode")
@@ -1235,14 +1264,11 @@ async def dian_transfer(
         or data.get("pwd")
         or ""
     ).strip()
-    if not raw_links and share_code:
-        raw_links = f"https://115cdn.com/s/{quote(share_code, safe='')}"
+    if not links and share_code:
+        share_link = f"https://115cdn.com/s/{quote(share_code, safe='')}"
         if receive_code:
-            raw_links += f"?password={quote(receive_code, safe='')}"
-    if isinstance(raw_links, list):
-        links = [str(link).strip() for link in raw_links if str(link).strip()]
-    else:
-        links = [line.strip() for line in str(raw_links).splitlines() if line.strip()]
+            share_link += f"?password={quote(receive_code, safe='')}"
+        links = [share_link]
     if not links:
         raise HTTPException(502, "癫影没有返回可用的分享链接或离线地址")
     share_url = links[0]

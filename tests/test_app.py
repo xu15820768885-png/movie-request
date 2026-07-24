@@ -480,6 +480,29 @@ class MovieRequestTests(unittest.TestCase):
             )
         )
 
+    def test_dian_offline_links_are_extracted_from_file_objects(self):
+        links = app.extract_dian_transfer_links(
+            {
+                "files": [
+                    {
+                        "name": "episode01.mkv",
+                        "offline_url": "ed2k://|file|episode01.mkv|123|hash1|/",
+                    },
+                    {
+                        "name": "episode02.mkv",
+                        "link": "ed2k://|file|episode02.mkv|456|hash2|/",
+                    },
+                ]
+            }
+        )
+        self.assertEqual(
+            links,
+            [
+                "ed2k://|file|episode01.mkv|123|hash1|/",
+                "ed2k://|file|episode02.mkv|456|hash2|/",
+            ],
+        )
+
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
             def clouddownload_task_list(self, _payload):
