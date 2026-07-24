@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -183,15 +184,46 @@ def dian_call(method: str, *args: Any) -> dict[str, Any]:
         raise HTTPException(502, f"暂时无法连接癫影：{error}") from error
 
 
-def perform_dian_signin(mode: str) -> dict[str, Any]:
+def signin_result_message(result: dict[str, Any], default: str) -> str:
+    data = result.get("data")
+    return str(
+        (data.get("message") if isinstance(data, dict) else "")
+        or result.get("message")
+        or default
+    )
+
+
+def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
     if mode not in ("normal", "lucky"):
         raise HTTPException(400, "签到模式无效")
-    result = dian_call("signin", mode)
+    attempted_at = now_iso()
+    mode_label = "运气签到" if mode == "lucky" else "普通签到"
+    source_label = "自动签到" if source == "auto" else "手动签到"
+    try:
+        result = dian_call("signin", mode)
+    except HTTPException as error:
+        message = str(error.detail)
+        with db() as connection:
+            set_setting(connection, "dian_last_signin_at", attempted_at)
+            set_setting(connection, "dian_last_signin_day", datetime.now().date().isoformat())
+            set_setting(connection, "dian_last_signin_mode", mode)
+            set_setting(connection, "dian_last_signin_status", "failed")
+            set_setting(connection, "dian_last_signin_message", message)
+        send_telegram(
+            f"❌ 癫影签到失败\n\n{source_label} · {mode_label}\n原因：{message}"
+        )
+        raise
+    message = signin_result_message(result, "签到成功")
     with db() as connection:
-        set_setting(connection, "dian_last_signin_at", now_iso())
+        set_setting(connection, "dian_last_signin_at", attempted_at)
         set_setting(connection, "dian_last_signin_day", datetime.now().date().isoformat())
         set_setting(connection, "dian_last_signin_mode", mode)
+        set_setting(connection, "dian_last_signin_status", "success")
+        set_setting(connection, "dian_last_signin_message", message)
         set_setting(connection, "dian_last_signin_result", json.dumps(result, ensure_ascii=False))
+    send_telegram(
+        f"✅ 癫影签到成功\n\n{source_label} · {mode_label}\n结果：{message}"
+    )
     return result
 
 
@@ -384,6 +416,91 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     return links
 
 
+def dian_episode_label(pick: Any, title: str) -> str:
+    seasons_csv = str(pick("seasons_csv") or "").strip()
+    episodes_csv = str(pick("episodes_csv") or "").strip()
+    if seasons_csv or episodes_csv:
+        parts = []
+        if seasons_csv:
+            season_values = [
+                value.strip()
+                for value in seasons_csv.split(",")
+                if value.strip()
+            ]
+            if len(season_values) == 1:
+                parts.append(f"第{season_values[0]}季")
+            elif season_values:
+                parts.append(f"第{'、'.join(season_values)}季")
+        if episodes_csv:
+            episode_text = (
+                episodes_csv
+                .replace(",", "、")
+                .replace("-", "–")
+            )
+            parts.append(f"第{episode_text}集")
+        return " · ".join(parts)
+
+    explicit = pick(
+        "episode_label", "episode_summary", "episodes_summary",
+        "episode_range_text", "episode_text",
+    )
+    if explicit:
+        text = str(explicit).strip()
+        if "集" in text:
+            return text
+
+    season = pick("season_number", "season", "season_no", "season_num")
+    episode_start = pick(
+        "episode_start", "start_episode", "episode_from",
+        "first_episode", "episode_number",
+    )
+    episode_end = pick(
+        "episode_end", "end_episode", "episode_to", "last_episode",
+    )
+    episode_count = pick(
+        "episode_count", "episodes_count", "total_episodes", "file_count",
+    )
+
+    season_match = re.search(
+        r"(?i)(?:^|[.\s_-])S(\d{1,2})(?=E?\d|[.\s_-]|$)",
+        title,
+    )
+    episode_matches = [
+        int(value)
+        for value in re.findall(r"(?i)E(\d{1,3})", title)
+    ]
+    if not season and season_match:
+        season = int(season_match.group(1))
+    if not episode_start and episode_matches:
+        episode_start = min(episode_matches)
+    if not episode_end and len(episode_matches) > 1:
+        episode_end = max(episode_matches)
+
+    def number(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    season_number = number(season)
+    start_number = number(episode_start)
+    end_number = number(episode_end)
+    count_number = number(episode_count)
+    if start_number and not end_number and count_number:
+        end_number = start_number + count_number - 1
+
+    parts = []
+    if season_number:
+        parts.append(f"第{season_number}季")
+    if start_number and end_number > start_number:
+        parts.append(f"第{start_number}–{end_number}集")
+    elif start_number:
+        parts.append(f"第{start_number}集")
+    elif count_number:
+        parts.append(f"共{count_number}集")
+    return " · ".join(parts)
+
+
 def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
     """Flatten Dian's share wrapper into the fields used by the member UI."""
     nested_resource = item.get("resource")
@@ -452,6 +569,27 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
 
     # Share IDs live on the outer wrapper while media details commonly live
     # inside ``resource``. Prefer the inner resource's descriptive title.
+    title = (
+        pick(
+            "title", "name", "display_name", "resource_name",
+            sources=[resource],
+        )
+        or pick("title", "name", "display_name", "resource_name")
+        or ""
+    )
+    files = pick(
+        "files", "file_summary", "episode_summary", "file_count",
+        "episode_count",
+    )
+    episode_label = dian_episode_label(pick, str(title))
+    if not episode_label and isinstance(files, str) and "集" in files:
+        episode_label = files.strip()
+    if not episode_label and isinstance(files, (int, float)):
+        episode_label = dian_episode_label(
+            lambda *keys, **_kwargs: files if "episode_count" in keys else None,
+            str(title),
+        )
+
     normalized = dict(item)
     normalized.update(
         {
@@ -459,11 +597,7 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
             or pick("id", sources=[share, item]),
             "resource_id": pick("resource_id", sources=[item, resource])
             or pick("id", sources=[resource, item]),
-            "title": pick(
-                "title", "name", "display_name", "resource_name",
-                sources=[resource],
-            )
-            or pick("title", "name", "display_name", "resource_name"),
+            "title": title,
             "res": pick(
                 "res", "resolution", "quality", "definition",
                 "video_resolution", "video_quality",
@@ -479,10 +613,8 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
             "chn_sub": has_chinese_subtitle,
             "size_gb": raw_size,
             "source": pick("source", "source_tag", "origin", "channel"),
-            "files": pick(
-                "files", "file_summary", "episode_summary", "file_count",
-                "episode_count",
-            ),
+            "files": files,
+            "episode_label": episode_label,
             "hot": pick(
                 "hot", "heat", "hotness", "score", "views", "view_count",
             ),
@@ -968,7 +1100,7 @@ def dian_signin_loop() -> None:
                 and last_day != now.date().isoformat()
                 and now.strftime("%H:%M") >= schedule
             ):
-                perform_dian_signin(mode)
+                perform_dian_signin(mode, source="auto")
         except Exception:
             pass
         time.sleep(30)
@@ -1619,6 +1751,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         dian_signin_mode = setting(connection, "dian_signin_mode") or "normal"
         dian_last_signin_at = setting(connection, "dian_last_signin_at")
         dian_last_signin_mode = setting(connection, "dian_last_signin_mode") or ""
+        dian_last_signin_status = setting(connection, "dian_last_signin_status") or ""
+        dian_last_signin_message = setting(connection, "dian_last_signin_message") or ""
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
@@ -1637,6 +1771,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "dian_signin_mode": dian_signin_mode,
         "dian_last_signin_at": dian_last_signin_at,
         "dian_last_signin_mode": dian_last_signin_mode,
+        "dian_last_signin_status": dian_last_signin_status,
+        "dian_last_signin_message": dian_last_signin_message,
         "p115_app": p115_app,
         "p115_app_name": P115_APPS.get(p115_app, p115_app),
         "p115_apps": P115_APPS,
@@ -1683,12 +1819,8 @@ async def dian_signin(
     payload = await request.json()
     with db() as connection:
         mode = str(payload.get("mode") or setting(connection, "dian_signin_mode") or "normal")
-    result = perform_dian_signin(mode)
-    message = str(
-        (result.get("data") or {}).get("message")
-        or result.get("message")
-        or "癫影签到成功"
-    )
+    result = perform_dian_signin(mode, source="manual")
+    message = signin_result_message(result, "癫影签到成功")
     return {"ok": True, "message": message, "result": result}
 
 
