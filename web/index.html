@@ -104,9 +104,6 @@
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 8px 0 16px; }
     .section-head h2 { margin: 0; font-size: 19px; }
     .section-head span { color: var(--muted); font-size: 12px; }
-    .chart-bar { display: flex; gap: 8px; margin: 0 0 18px; overflow-x: auto; scrollbar-width: none; }
-    .chart-chip { flex: 0 0 auto; min-height: 38px; padding: 8px 13px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel); }
-    .chart-chip.active { color: #2c160b; border-color: var(--orange); background: var(--orange); font-weight: 800; }
     .movie-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 18px; }
     .movie-card {
       min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 17px;
@@ -189,6 +186,36 @@
     .detail-block p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
     .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
     .detail-actions .btn { min-width: 150px; }
+    .dian-section { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
+    .dian-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 12px; }
+    .dian-head h3 { margin: 0 0 5px; font-size: 17px; }
+    .dian-source { color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .resource-list { display: grid; gap: 10px; }
+    .resource-card { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 16px; align-items: center; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .resource-title { font-size: 13px; font-weight: 800; line-height: 1.45; }
+    .resource-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .resource-tag { padding: 4px 7px; border-radius: 999px; color: var(--cream); background: rgba(243,223,179,.09); font-size: 10px; font-weight: 700; }
+    .resource-tag.accent { color: #251309; background: var(--orange-2); }
+    .resource-meta { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .resource-card .btn { min-width: 126px; }
+    .transfer-note { display: flex; gap: 8px; align-items: center; margin-top: 11px; padding: 10px 12px; border-radius: 11px; color: var(--muted); background: rgba(255,255,255,.025); font-size: 11px; }
+    .integration-status { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin-bottom: 18px; }
+    .status-card { padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .status-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #67c79a; box-shadow: 0 0 0 4px rgba(103,199,154,.1); }
+    .status-value { margin-top: 8px; font-weight: 800; }
+    .integration-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .integration-line { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .integration-line:last-of-type { border-bottom: 0; }
+    .integration-label { color: var(--muted); font-size: 11px; }
+    .integration-value { margin-top: 5px; font-size: 13px; font-weight: 750; }
+    .checkin-result { margin: 12px 0; padding: 12px; border: 1px solid rgba(103,199,154,.18); border-radius: 12px; color: #b7f1d4; background: rgba(103,199,154,.07); font-size: 12px; line-height: 1.6; }
+    .folder-path { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--cream); background: #151311; font-size: 12px; }
+    .folder-picker { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: #12100f; }
+    .folder-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: 9px; color: var(--text); background: transparent; text-align: left; }
+    .folder-row:hover, .folder-row.selected { color: #29170d; background: var(--cream); }
+    .folder-row small { opacity: .7; }
+    .integration-actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 12px; }
     .recommend-title { margin: 28px 0 12px; font-size: 16px; }
     .recommend-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; }
     .recommend-card { padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--panel); text-align: left; }
@@ -234,6 +261,14 @@
       .detail-columns { grid-template-columns: 1fr; gap: 10px; }
       .detail-actions { display: grid; grid-template-columns: 1fr; }
       .detail-actions .btn { width: 100%; min-height: 44px; }
+      .dian-head { display: block; }
+      .dian-source { margin-top: 6px; }
+      .resource-card { grid-template-columns: 1fr; gap: 12px; }
+      .resource-card .btn { width: 100%; min-height: 42px; }
+      .integration-status, .integration-grid { grid-template-columns: 1fr; }
+      .integration-line { align-items: start; }
+      .integration-actions { display: grid; grid-template-columns: 1fr; }
+      .integration-actions .btn { width: 100%; min-height: 42px; }
       .recommend-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .request-row { grid-template-columns: 46px minmax(0,1fr); }
       .request-poster { width: 46px; height: 68px; }
@@ -276,26 +311,56 @@
       <section id="familyHero" class="hero">
         <div class="hero-copy"><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
         <aside id="siteNotice" class="site-notice hidden" aria-live="polite"><div class="notice-kicker">重要提醒</div><div id="siteNoticeText" class="notice-text"></div></aside>
-        <div class="hero-stamp">数据来自 TMDB<br>每条需求都有唯一影片编号</div>
+        <div class="hero-stamp">精准匹配影片资料<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
-      <div id="searchTip" class="search-tip">只显示 TMDB 已收录的电影和剧集；已在 Emby 的资源会标记“已入库”。</div>
+      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在 Emby 的资源会标记“已入库”。</div>
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
         <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
         <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
+        <button id="storageTab" class="tab hidden" data-view="storage">癫影与 115</button>
         <button id="familyTab" class="tab hidden" data-view="family">成员账号</button>
         <button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button>
       </nav>
 
       <section id="discoverView" class="view">
-        <div class="chart-bar" aria-label="影视榜单"><button class="chart-chip active" data-chart="douban_movies">豆瓣电影</button><button class="chart-chip" data-chart="douban_tv">豆瓣剧集</button><button class="chart-chip" data-chart="trending">TMDB 本周热门</button><button class="chart-chip" data-chart="movies">TMDB 电影</button><button class="chart-chip" data-chart="tv">TMDB 剧集</button></div>
         <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
-        <div id="movieResults" class="empty">输入片名后，会显示 TMDB 匹配到的海报、年份和类型。<br>这样家里就不会找错版本。</div>
+        <div id="movieResults" class="empty">输入片名后，会显示准确匹配的海报、年份和类型。<br>这样就不会找错版本。</div>
       </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
+      <section id="storageView" class="view hidden">
+        <div class="section-head"><div><h2>癫影与 115</h2><span>先按影片编号精确匹配资源，再转存到指定文件夹</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
+        <div class="integration-status">
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>癫影 OpenAPI</div><div id="dianStatus" class="status-value">待配置</div></div>
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>115 账号</div><div id="p115Status" class="status-value">待扫码</div></div>
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>转存目录</div><div id="storageStatusFolder" class="status-value">影视自动转存</div></div>
+        </div>
+        <div class="integration-grid">
+          <form id="integrationForm" class="panel stack">
+            <h3>癫影账户与签到</h3>
+            <label>OpenAPI 地址<input id="dianBaseUrl" placeholder="https://你的癫影站点"></label>
+            <label>OpenAPI Key<input id="dianApiKey" type="password" placeholder="留空表示不修改"></label>
+            <div class="inline"><label>自动签到时间<input id="dianSigninTime" type="time" value="08:30"></label><label>签到模式<select id="dianSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
+            <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="dianSigninEnabled" type="checkbox" style="width:auto">启用每日自动签到</label>
+            <div id="checkinResult" class="checkin-result">尚未执行签到</div>
+            <div class="integration-actions"><button class="btn" type="submit">保存配置</button><button id="dianCheckinPreview" class="btn btn-primary" type="button">立即签到</button></div>
+          </form>
+          <section class="panel">
+            <h3>115 转存设置</h3>
+            <label>扫码设备<select id="p115App"></select></label>
+            <div class="integration-line"><div><div class="integration-label">登录状态</div><div id="p115LoginValue" class="integration-value">尚未扫码</div></div><button id="qrLoginPreview" class="btn btn-small" type="button">扫码登录</button></div>
+            <div id="qrPanel" class="hidden" style="text-align:center;padding:14px"><img id="qrImage" alt="115登录二维码" style="width:210px;max-width:100%;border-radius:12px;background:white;padding:8px"><div class="muted" style="margin-top:8px;font-size:12px">请使用115手机App扫码确认</div></div>
+            <div class="integration-label" style="margin-top:14px">家人选中资源后转存到</div>
+            <div id="selectedFolderPath" class="folder-path">115网盘 / 我的接收 / 影视自动转存</div>
+            <div class="integration-actions"><button id="folderSelectPreview" class="btn">选择转存文件夹</button></div>
+            <div id="folderPicker" class="folder-picker hidden"></div>
+          </section>
+        </div>
+        <div class="transfer-note" style="margin-top:18px">OpenAPI Key、115 Cookie和目标目录CID只保存在NAS的 /data 目录，不会进入网页或GitHub。</div>
+      </section>
       <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个人只看到自己的请求</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
       <section id="settingsView" class="view hidden"><div class="section-head"><h2>系统设置</h2><span>敏感信息只保存在 NAS</span></div><div class="admin-grid"><form id="settingsForm" class="panel stack"><h3>TMDB 搜索</h3><label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label><div id="tmdbState" class="muted" style="font-size:12px"></div><h3 style="margin-top:14px">Emby 媒体库</h3><label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label><label>API 密钥<input id="settingsEmbyKey" type="password" placeholder="留空表示不修改"></label><div id="embyState" class="muted" style="font-size:12px"></div><button id="embyTest" class="btn" type="button">测试 Emby 连接</button><h3 style="margin-top:14px">Telegram 通知与菜单</h3><label>Bot Token<input id="settingsTelegramToken" type="password" placeholder="留空表示不修改"></label><label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label><label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label><div class="muted" style="font-size:12px;line-height:1.6">使用 Telegram 左下角原生菜单，包含“求片需求”和“完成情况”；不会再显示聊天框下方的白色快捷键。</div><button class="btn btn-primary" type="submit">保存全部设置</button><button id="telegramTest" class="btn" type="button">发送测试消息并更新菜单</button></form><aside class="panel"><h3>工作方式</h3><div class="muted" style="font-size:12px;line-height:1.8">家人提交需求后，Telegram 会立即收到片名、年份、类型和 TMDB ID。系统通过 TMDB ID 对照 Emby 媒体库，不会自动下载任何资源。</div></aside></div></section>
     </main>
@@ -357,7 +422,7 @@
     function showApp() {
       $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
-      const admin=currentUser.role==='admin'; ['adminTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
@@ -366,27 +431,69 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='family') loadUsers(); if(name==='settings') loadSettings();
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage') loadIntegrations();
     }
-    function renderMovies(items,title='TMDB 匹配结果') {
+    function renderMovies(items,title='匹配结果') {
       const root=$('movieResults'); $('resultCount').textContent=`${items.length} 部`; $('resultTitle').textContent=title;
       root.className='movie-grid'; root.innerHTML=items.map((item,index)=>{const admin=currentUser?.role==='admin';const isDouban=item.source==='douban';const label=isDouban?'匹配 TMDB':item.in_library?'已入库':admin?'未入库':'我想看';const disabled=!isDouban&&(item.in_library||admin);const actionAttribute=isDouban?`data-detail-index="${index}"`:`data-request-index="${index}"`;const sourceMeta=isDouban?`豆瓣 ${escapeHtml(item.douban_id)}`:`TMDB ${item.tmdb_id}`;const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'剧集');return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" aria-label="查看《${escapeHtml(item.title)}》详情">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${item.rating?`<span class="rating">★ ${item.rating}</span>`:''}</button><div class="movie-body"><button class="movie-title movie-title-button" data-detail-index="${index}">${escapeHtml(item.title)}</button><div class="movie-meta">${escapeHtml(item.year||'年份未知')} · ${sourceMeta}</div><div class="detail-hint">${isDouban?'打开时自动匹配 TMDB':'点击查看剧情与演职员'}</div><button class="btn ${disabled?'':'btn-primary'} btn-small" ${actionAttribute} ${disabled?'disabled':''}>${label}</button></div></article>`}).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)]));
       root.querySelectorAll('[data-request-index]').forEach(button=>button.onclick=()=>submitRequest(items[Number(button.dataset.requestIndex)],button));
     }
-    async function loadChart(name) {
-      document.querySelectorAll('[data-chart]').forEach(button=>button.classList.toggle('active',button.dataset.chart===name));
-      $('movieResults').className='empty'; $('movieResults').textContent='正在读取影视榜单…'; $('resultTitle').textContent='影视榜单'; $('resultCount').textContent='';
-      try { const data=preview?{title:name==='movies'?'热门电影':name==='tv'?'热门剧集':name==='douban_movies'?'豆瓣热门电影':name==='douban_tv'?'豆瓣热门剧集':'本周热门',results:demoMovies}:await api(`/api/charts/${name}`); renderMovies(data.results,data.title); }
-      catch(error){ $('movieResults').className='empty'; $('movieResults').textContent='榜单暂时无法读取。'; toast(error.message,true); }
+    function previewResources(item) {
+      if(item.in_library||item.tmdb_id===535167)return [];
+      if(item.media_type==='tv')return [
+        {id:201,title:`${item.title} S01-S03 2160p WEB-DL`,res:'4K',codec:'HEVC',hdr:'Dolby Vision',audio:'英语 · Atmos',chn_sub:true,size_gb:126.4,source:'流媒体',hot:862,files:'全季 · 简繁字幕'},
+        {id:202,title:`${item.title} S01-S03 BluRay 1080p`,res:'1080P',codec:'H.264',hdr:'SDR',audio:'国英双语',chn_sub:true,size_gb:84.7,source:'蓝光',hot:614,files:'全季 · 内封中字'}
+      ];
+      return [
+        {id:101,title:`${item.title} ${item.year} UHD BluRay 2160p`,res:'4K',codec:'HEVC',hdr:'HDR10',audio:'国语 · TrueHD 7.1',chn_sub:true,size_gb:79.6,source:'蓝光原盘',hot:986,files:'正片 + 简繁字幕'},
+        {id:102,title:`${item.title} ${item.year} WEB-DL 2160p`,res:'4K',codec:'HEVC',hdr:'Dolby Vision',audio:'英语 · Atmos',chn_sub:true,size_gb:31.8,source:'流媒体',hot:742,files:'单文件 · 内封中字'},
+        {id:103,title:`${item.title} ${item.year} BluRay 1080p`,res:'1080P',codec:'H.264',hdr:'SDR',audio:'国英双语',chn_sub:true,size_gb:18.4,source:'蓝光',hot:531,files:'正片 + 字幕'}
+      ];
     }
     function previewDetails(item) {
-      return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','悬疑'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?52:0,number_of_seasons:item.media_type==='tv'?3:0,number_of_episodes:item.media_type==='tv'?24:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
+      return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','悬疑'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?52:0,number_of_seasons:item.media_type==='tv'?3:0,number_of_episodes:item.media_type==='tv'?24:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',dian_resources:previewResources(item),recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
     }
     async function openDetails(item) {
       currentDetail=null; $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden'; $('detailCard').innerHTML='<div class="detail-loading">正在读取 TMDB 影片详情…</div>';
-      try { const requestedKey=item.source==='douban'?`douban:${item.media_type}:${item.douban_id}`:`tmdb:${item.media_type}:${item.tmdb_id}`; if(detailCache.has(requestedKey)){currentDetail=detailCache.get(requestedKey);renderDetails(currentDetail);return;} let resolved=item; if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};} const tmdbKey=`tmdb:${resolved.media_type}:${resolved.tmdb_id}`; const detail=detailCache.get(tmdbKey)||(preview?previewDetails(resolved):await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`)); detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail); }
+      try {
+        const requestedKey=item.source==='douban'?`douban:${item.media_type}:${item.douban_id}`:`tmdb:${item.media_type}:${item.tmdb_id}`;
+        if(detailCache.has(requestedKey)){currentDetail=detailCache.get(requestedKey);renderDetails(currentDetail);return;}
+        let resolved=item;
+        if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};}
+        const tmdbKey=`tmdb:${resolved.media_type}:${resolved.tmdb_id}`;
+        let detail;
+        if(preview) detail=previewDetails(resolved);
+        else {
+          const [detailResult,resourceResult]=await Promise.all([
+            detailCache.has(tmdbKey)?Promise.resolve(detailCache.get(tmdbKey)):api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`),
+            api(`/api/dian/resources/${resolved.media_type}/${resolved.tmdb_id}`).catch(error=>({resources:[],error:error.message}))
+          ]);
+          detail={...detailResult,dian_resources:(resourceResult.resources||[]).map((resource,index)=>normalizeResource(resource,index,resolved)),dian_error:resourceResult.error||''};
+        }
+        detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail);
+      }
       catch(error){ $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><div class="detail-loading">${escapeHtml(error.message)}</div>`; bindDetailActions(); }
+    }
+    function normalizeResource(resource,index,item) {
+      const tags=resource.tags||resource.tag||{};
+      const rawSize=resource.size_gb??resource.size??resource.total_size_gb??'';
+      const size=typeof rawSize==='number'&&rawSize>1024*1024?Math.round(rawSize/1024/1024/1024*10)/10:rawSize;
+      return {
+        ...resource,
+        share_id:resource.share_id??resource.share?.id??resource.id,
+        resource_id:resource.resource_id??resource.resource?.id??resource.id,
+        title:resource.title||resource.name||resource.display_name||`${item.title} 资源 ${index+1}`,
+        res:resource.res||resource.resolution||tags.res||'版本',
+        codec:resource.codec||tags.codec||'编码未知',
+        hdr:resource.hdr||tags.hdr||'',
+        audio:resource.audio||tags.audio||'音轨未知',
+        chn_sub:Boolean(resource.chn_sub??tags.chn_sub),
+        size_gb:size||'未知',
+        source:resource.source||resource.source_tag||tags.source_tag||'115分享',
+        files:resource.files||resource.file_summary||resource.episode_summary||'点击后转存',
+        hot:resource.hot||resource.heat||resource.score||'-'
+      };
     }
     function renderDetails(item) {
       const admin=currentUser?.role==='admin'; const disabled=item.in_library||admin; const requestLabel=item.in_library?'已入库':admin?'管理员仅查看':'我想看';
@@ -394,14 +501,27 @@
       const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,length,...(item.genres||[])];
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
       const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
-      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div></div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'TMDB 暂无剧情简介。')}</p><div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||'TMDB 暂无资料')}</p></div><div class="detail-block"><h3>主要演员</h3><p>${cast}</p></div></div><div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${requestLabel}</button></div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
+      const resources=item.dian_resources||[];
+      const resourceCards=resources.map((resource,index)=>`<article class="resource-card"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="resource-tags"><span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)} · ${escapeHtml(resource.size_gb)} GB<br>${escapeHtml(resource.files)} · 热度 ${escapeHtml(resource.hot)}</div></div><button class="btn btn-primary" data-transfer-index="${index}">转存这个版本</button></article>`).join('');
+      const dianSection=!admin&&!item.in_library?`<section class="dian-section"><div class="dian-head"><div><h3>${resources.length?`癫影找到 ${resources.length} 个可转存版本`:'癫影暂时没有合适资源'}</h3><div class="dian-source">${resources.length?'先看清晰度、音轨、字幕和大小，再决定是否转存。':item.dian_error?escapeHtml(item.dian_error):'你仍然可以提交求片，由管理员去其他资源网站寻找。'}</div></div><div class="dian-source">按影片编号精确匹配</div></div>${resourceCards?`<div class="resource-list">${resourceCards}</div><div class="transfer-note">转存目录由管理员在“癫影与 115”中设置</div>`:''}</section>`:'';
+      const fallbackLabel=item.in_library?'已入库':admin?'管理员仅查看':resources.length?'没有合适版本，仍然求片':'癫影暂无资源，提交求片';
+      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div></div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'TMDB 暂无剧情简介。')}</p><div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||'TMDB 暂无资料')}</p></div><div class="detail-block"><h3>主要演员</h3><p>${cast}</p></div></div>${dianSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button></div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
     }
     function bindDetailActions() {
       $('detailCard').querySelectorAll('[data-close-detail]').forEach(button=>button.onclick=closeDetails);
       $('detailCard').querySelectorAll('[data-recommend]').forEach(button=>button.onclick=()=>openDetails(currentDetail.recommendations[Number(button.dataset.recommend)]));
+      $('detailCard').querySelectorAll('[data-transfer-index]').forEach(button=>button.onclick=()=>previewTransfer(currentDetail.dian_resources[Number(button.dataset.transferIndex)],button));
       const request=$('detailRequest'); if(request&&currentDetail)request.onclick=()=>submitRequest(currentDetail,request);
+    }
+    async function previewTransfer(resource,button) {
+      if(preview){button.disabled=true;button.textContent='已加入转存';return toast(`《${currentDetail.title}》的 ${resource.res} 版本已加入 115 转存队列`);}
+      button.disabled=true; button.textContent='转存中…';
+      try {
+        await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,title:currentDetail.title})});
+        button.textContent='已加入转存'; toast(`《${currentDetail.title}》已转存到 115`);
+      } catch(error) {button.disabled=false;button.textContent='重新转存';toast(error.message,true);}
     }
     function closeDetails() { $('detailOverlay').classList.add('hidden'); document.body.style.overflow=''; currentDetail=null; }
     async function submitRequest(item,button) {
@@ -454,10 +574,57 @@
       if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
       const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'Emby 已配置':'尚未配置 Emby';
     }
+    async function loadIntegrations() {
+      const settings=preview?{
+        dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
+        dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
+        p115_target_cid:'123456',p115_target_name:'影视自动转存',
+        p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
+      }:await api('/api/admin/integrations');
+      $('dianBaseUrl').value=settings.dian_base_url||'';
+      $('dianSigninEnabled').checked=Boolean(settings.dian_signin_enabled);
+      $('dianSigninTime').value=settings.dian_signin_time||'08:30';
+      $('dianSigninMode').value=settings.dian_signin_mode||'normal';
+      $('dianStatus').textContent=settings.dian_configured?'已连接':'待配置';
+      $('checkinResult').textContent=settings.dian_last_signin_at?`上次签到：${settings.dian_last_signin_at} · ${settings.dian_last_signin_mode==='lucky'?'运气签到':'普通签到'}`:'尚未执行签到';
+      $('p115App').innerHTML=Object.entries(settings.p115_apps||{}).map(([value,label])=>`<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('');
+      $('p115App').value=settings.p115_app||'alipaymini';
+      $('p115Status').textContent=settings.p115_logged_in?'已登录':settings.p115_configured?'登录已失效':'待扫码';
+      $('p115LoginValue').textContent=settings.p115_logged_in?`${settings.p115_app_name||'115账号'} · 可用`:'尚未扫码或登录已失效';
+      $('storageStatusFolder').textContent=settings.p115_target_name||'未选择';
+      $('selectedFolderPath').textContent=settings.p115_target_name?`115网盘 / ${settings.p115_target_name}`:'尚未选择转存文件夹';
+    }
+    function renderFolderPicker(items,cid='0',path='115网盘') {
+      const root=$('folderPicker');
+      root.classList.remove('hidden');
+      root.innerHTML=`<button class="folder-row selected" type="button" data-choose-cid="${escapeHtml(cid)}" data-choose-name="${escapeHtml(path.replace(/^115网盘\s*\/\s*/,'' )||'根目录')}"><span>✓ 使用当前目录：${escapeHtml(path)}</span></button>`+
+        items.map(item=>`<button class="folder-row" type="button" data-open-cid="${escapeHtml(item.cid)}" data-open-name="${escapeHtml(item.name)}"><span>📁 ${escapeHtml(item.name)}</span><span>进入 ›</span></button>`).join('');
+      root.querySelectorAll('[data-open-cid]').forEach(button=>button.onclick=()=>loadFolders(button.dataset.openCid,`${path} / ${button.dataset.openName}`));
+      root.querySelectorAll('[data-choose-cid]').forEach(button=>button.onclick=()=>saveTargetFolder(button.dataset.chooseCid,button.dataset.chooseName,path));
+      $('folderSelectPreview').textContent='收起文件夹';
+    }
+    async function loadFolders(cid='0',path='115网盘') {
+      if(preview)return renderFolderPicker([{cid:'1001',name:'我的接收'},{cid:'1002',name:'家庭影视'},{cid:'1003',name:'电影'}],cid,path);
+      $('folderPicker').classList.remove('hidden');$('folderPicker').innerHTML='<div class="muted" style="padding:12px">正在读取目录…</div>';
+      try {const result=await api(`/api/admin/p115/folders?cid=${encodeURIComponent(cid)}`);renderFolderPicker(result.folders||[],cid,path);}
+      catch(error){$('folderPicker').innerHTML=`<div class="muted" style="padding:12px">${escapeHtml(error.message)}</div>`;toast(error.message,true);}
+    }
+    async function saveTargetFolder(cid,name,path) {
+      if(!preview)await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p115_target_cid:String(cid),p115_target_name:name})});
+      $('selectedFolderPath').textContent=path;$('storageStatusFolder').textContent=name;$('folderPicker').classList.add('hidden');$('folderSelectPreview').textContent='选择转存文件夹';toast(`已选择：${path}`);
+    }
+    let qrPollTimer=null;
+    async function startQrLogin() {
+      if(preview)return toast('预览：正式版会显示当前所选设备身份的 115 登录二维码');
+      try {
+        const result=await api('/api/admin/p115/qrcode',{method:'POST',body:JSON.stringify({app:$('p115App').value})});
+        $('qrImage').src=result.qr_image;$('qrPanel').classList.remove('hidden');$('p115LoginValue').textContent='等待扫码确认…';
+        clearInterval(qrPollTimer);qrPollTimer=setInterval(async()=>{try{const state=await api(`/api/admin/p115/qrcode/${result.token_id}`);if(state.status==='signed_in'){clearInterval(qrPollTimer);$('qrPanel').classList.add('hidden');toast('115 登录成功');loadIntegrations();}else if(state.status==='expired'||state.status==='canceled'){clearInterval(qrPollTimer);$('p115LoginValue').textContent='二维码已失效，请重新扫码';}}catch(error){clearInterval(qrPollTimer);toast(error.message,true);}},2000);
+      } catch(error){toast(error.message,true);}
+    }
     $('authForm').onsubmit=async event=>{event.preventDefault(); try { const path=needsSetup?'/api/bootstrap':'/api/login'; const body={username:$('username').value,password:$('password').value,display_name:$('displayName').value,tmdb_token:$('tmdbToken').value}; await api(path,{method:'POST',body:JSON.stringify(body)}); location.reload(); } catch(error){toast(error.message,true);} };
-    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); document.querySelectorAll('[data-chart]').forEach(button=>button.classList.remove('active')); renderMovies(items.length?items:(preview?demoMovies:[]),`“${query}”的搜索结果`); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='TMDB 没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
+    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); renderMovies(items.length?items:(preview?demoMovies:[]),`“${query}”的搜索结果`); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
-    document.querySelectorAll('[data-chart]').forEach(button=>button.onclick=()=>loadChart(button.dataset.chart));
     $('detailOverlay').onclick=event=>{if(event.target===$('detailOverlay'))closeDetails();};
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
@@ -467,6 +634,10 @@
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
     $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，1 条需求已更新为“已入库”');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，${result.updated} 条需求更新为“已入库”`);loadRequests();}catch(error){toast(error.message,true);}};
+    $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('dianCheckinPreview').onclick=async()=>{if(preview){$('checkinResult').textContent='刚刚签到成功 · 运气签到';return toast('癫影签到成功');}try{const result=await api('/api/admin/dian-signin',{method:'POST',body:JSON.stringify({mode:$('dianSigninMode').value})});$('checkinResult').textContent='刚刚签到成功';toast(result.message||'癫影签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('qrLoginPreview').onclick=startQrLogin;
+    $('folderSelectPreview').onclick=()=>{$('folderPicker').classList.contains('hidden')?loadFolders():($('folderPicker').classList.add('hidden'),$('folderSelectPreview').textContent='选择转存文件夹');};
 
     async function init() {
       if(preview){
@@ -474,13 +645,13 @@
           ? {id:2,username:'mama',display_name:'妈妈',role:'member'}
           : {id:1,username:'admin',display_name:'管理员',role:'admin'};
         $('previewRibbon').textContent = previewMode === 'member'
-          ? '成员端预览 · 只能找片和查看自己的请求'
-          : '管理员预览 · 请求、Emby 和 Telegram 管理';
-        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadChart('douban_movies');loadRequests();
+          ? '成员端预览 · 可选癫影版本或继续求片'
+          : '管理员预览 · 癫影签到与 115 转存设置';
+        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadRequests();
         if(currentUser.role==='admin') switchView('admin');
         return;
       }
-      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadChart('douban_movies');loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
     }
     init();
     setInterval(() => {

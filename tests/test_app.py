@@ -321,6 +321,95 @@ class MovieRequestTests(unittest.TestCase):
         self.assertIn({"command": "notice", "description": "发布片库公告"}, commands)
         self.assertIn({"command": "clear_notice", "description": "清除片库公告"}, commands)
 
+    def test_dian_resources_query_uses_tmdb_identity(self):
+        response = {
+            "data": {
+                "list": [
+                    {
+                        "share_id": 11,
+                        "resource_id": 22,
+                        "title": "星际穿越 2160p",
+                    }
+                ]
+            }
+        }
+        with patch.object(app, "dian_call", return_value=response) as call:
+            result = app.dian_resources("movie", 157336, 0, self.token)
+        self.assertEqual(result["resources"][0]["resource_id"], 22)
+        call.assert_called_once_with(
+            "list_shares",
+            {
+                "tmdb_id": 157336,
+                "media_type": "movie",
+                "page": 1,
+                "size": 30,
+                "sort": "hot",
+            },
+        )
+
+    def test_manual_dian_signin_accepts_selected_mode(self):
+        with patch.object(app, "perform_dian_signin", return_value={"message": "签到成功"}) as signin:
+            result = asyncio.run(
+                app.dian_signin(FakeRequest({"mode": "lucky"}), self.token)
+            )
+        self.assertTrue(result["ok"])
+        signin.assert_called_once_with("lucky")
+
+    def test_dian_settings_and_p115_target_are_persisted(self):
+        payload = {
+            "dian_base_url": "https://dian.example.com",
+            "dian_api_key": "dys_secret",
+            "dian_signin_enabled": True,
+            "dian_signin_time": "07:45",
+            "dian_signin_mode": "normal",
+            "p115_app": "alipaymini",
+            "p115_target_cid": "9988",
+            "p115_target_name": "家庭影视",
+        }
+        with patch.object(app, "configure_telegram_menu"):
+            asyncio.run(app.update_settings(FakeRequest(payload), self.token))
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["dian_configured"])
+        self.assertEqual(settings["dian_key_prefix"], "dys_secr***")
+        self.assertEqual(settings["dian_signin_time"], "07:45")
+        self.assertEqual(settings["p115_target_cid"], "9988")
+        self.assertEqual(settings["p115_app_name"], "115生活_支付宝小程序端")
+
+    def test_dian_transfer_unlocks_and_receives_share(self):
+        class FakeP115:
+            def share_snap(self, *_args, **_kwargs):
+                return {"state": True, "data": {"list": [{"fid": "101"}, {"cid": "202"}]}}
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with app.db() as connection:
+            app.set_setting(connection, "p115_target_cid", "7788")
+        with patch.object(
+            app,
+            "dian_call",
+            return_value={"data": {"share_url": "https://115.com/s/example?password=abcd"}},
+        ) as dian:
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "星际穿越",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertTrue(result["ok"])
+        dian.assert_called_once_with("unlock", {"share_id": 11, "resource_id": 22})
+        self.assertEqual(client.received, {"file_id": "101,202", "cid": "7788"})
+
 
 if __name__ == "__main__":
     unittest.main()

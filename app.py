@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
 import sqlite3
 import time
+import base64
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock, Thread
@@ -16,6 +18,7 @@ import requests
 import uvicorn
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from dian115_openapi import Dian115OpenAPI, OpenAPIError
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -39,6 +42,21 @@ EMBY_LIBRARY_CACHE: dict[str, Any] = {
     "key": "",
     "expires": 0.0,
     "ids": set(),
+}
+QR_LOGIN_LOCK = Lock()
+QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
+P115_APPS = {
+    "alipaymini": "115生活_支付宝小程序端",
+    "wechatmini": "115生活_微信小程序端",
+    "qandroid": "115管理_安卓端",
+    "android": "115生活_安卓端",
+    "ios": "115生活_苹果端",
+    "ipad": "115生活_苹果平板端",
+    "os_windows": "115生活_Windows端",
+    "os_mac": "115生活_macOS端",
+    "os_linux": "115生活_Linux端",
+    "harmony": "115_鸿蒙端",
+    "tv": "115生活_电视端",
 }
 
 
@@ -141,6 +159,71 @@ def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, str(value or "").strip()),
     )
+
+
+def dian_client() -> Dian115OpenAPI:
+    with db() as connection:
+        base_url = setting(connection, "dian_base_url")
+        api_key = setting(connection, "dian_api_key")
+    if not base_url or not api_key:
+        raise HTTPException(503, "管理员还没有配置癫影 OpenAPI")
+    return Dian115OpenAPI(base_url, api_key)
+
+
+def dian_call(method: str, *args: Any) -> dict[str, Any]:
+    try:
+        result = getattr(dian_client(), method)(*args)
+        return result if isinstance(result, dict) else {"data": result}
+    except HTTPException:
+        raise
+    except OpenAPIError as error:
+        raise HTTPException(error.status or 502, f"癫影接口：{error}") from error
+    except (requests.RequestException, RuntimeError, ValueError, KeyError) as error:
+        raise HTTPException(502, f"暂时无法连接癫影：{error}") from error
+
+
+def perform_dian_signin(mode: str) -> dict[str, Any]:
+    if mode not in ("normal", "lucky"):
+        raise HTTPException(400, "签到模式无效")
+    result = dian_call("signin", mode)
+    with db() as connection:
+        set_setting(connection, "dian_last_signin_at", now_iso())
+        set_setting(connection, "dian_last_signin_day", datetime.now().date().isoformat())
+        set_setting(connection, "dian_last_signin_mode", mode)
+        set_setting(connection, "dian_last_signin_result", json.dumps(result, ensure_ascii=False))
+    return result
+
+
+def p115_cookie_path() -> Path:
+    return DATA_DIR / "115-cookies.txt"
+
+
+def p115_client(require_login: bool = True):
+    try:
+        from p115client import P115Client
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少 p115client") from error
+    path = p115_cookie_path()
+    if require_login and (not path.exists() or not path.read_text().strip()):
+        raise HTTPException(503, "115 尚未扫码登录")
+    return P115Client(path, console_qrcode=False)
+
+
+def response_ok(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("state", payload.get("success", True))) and not payload.get("errno")
+
+
+def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data", payload)
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("list", "items", "shares", "records", "data"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def session_user(token: Optional[str]) -> Optional[dict[str, Any]]:
@@ -525,12 +608,38 @@ def emby_sync_loop() -> None:
         time.sleep(300)
 
 
+def dian_signin_loop() -> None:
+    while True:
+        try:
+            now = datetime.now()
+            with db() as connection:
+                enabled = setting(connection, "dian_signin_enabled") == "1"
+                schedule = setting(connection, "dian_signin_time") or "08:30"
+                mode = setting(connection, "dian_signin_mode") or "normal"
+                last_day = setting(connection, "dian_last_signin_day")
+                configured = bool(
+                    setting(connection, "dian_api_key")
+                    and setting(connection, "dian_base_url")
+                )
+            if (
+                enabled
+                and configured
+                and last_day != now.date().isoformat()
+                and now.strftime("%H:%M") >= schedule
+            ):
+                perform_dian_signin(mode)
+        except Exception:
+            pass
+        time.sleep(30)
+
+
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
     Thread(target=configure_telegram_menu, name="telegram-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
+    Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
 
 
 @APP.get("/")
@@ -837,6 +946,72 @@ def media_details(
     return basic
 
 
+@APP.get("/api/dian/resources/{media_type}/{tmdb_id}")
+def dian_resources(
+    media_type: str,
+    tmdb_id: int,
+    season: int = 0,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if media_type not in ("movie", "tv") or tmdb_id <= 0:
+        raise HTTPException(400, "影片编号无效")
+    payload: dict[str, Any] = {
+        "tmdb_id": tmdb_id,
+        "media_type": media_type,
+        "page": 1,
+        "size": 30,
+        "sort": "hot",
+    }
+    if media_type == "tv":
+        payload["season"] = max(0, season)
+    result = dian_call("list_shares", payload)
+    return {"resources": extract_share_items(result)}
+
+
+@APP.post("/api/dian/transfer")
+async def dian_transfer(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    share_id = int(payload.get("share_id") or 0)
+    resource_id = int(payload.get("resource_id") or 0)
+    if share_id <= 0 or resource_id <= 0:
+        raise HTTPException(400, "资源信息无效")
+    unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
+    data = unlocked.get("data", unlocked)
+    share_url = str(
+        data.get("share_url") or data.get("url") or data.get("share_link") or ""
+    ).strip()
+    if not share_url:
+        raise HTTPException(502, "癫影没有返回可用的115分享链接")
+    client = p115_client()
+    snap = client.share_snap(0, share_url=share_url)
+    if not response_ok(snap):
+        raise HTTPException(502, str(snap.get("error") or snap.get("message") or "无法读取115分享"))
+    items = extract_share_items(snap)
+    file_ids = ",".join(
+        str(item.get("fid") or item.get("file_id") or item.get("cid"))
+        for item in items
+        if item.get("fid") or item.get("file_id") or item.get("cid")
+    )
+    if not file_ids:
+        raise HTTPException(502, "115分享中没有找到可转存内容")
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    received = client.share_receive(
+        {"file_id": file_ids, "cid": target_cid}, share_url=share_url
+    )
+    if not response_ok(received):
+        raise HTTPException(502, str(received.get("error") or received.get("message") or "115转存失败"))
+    send_telegram(
+        f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
+    )
+    return {"ok": True}
+
+
 @APP.get("/api/requests")
 def list_requests(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     user = require_user(movie_session)
@@ -1015,6 +1190,16 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         emby_url = setting(connection, "emby_url")
         emby_key = setting(connection, "emby_api_key")
         telegram_proxy = setting(connection, "telegram_proxy")
+        dian_base_url = setting(connection, "dian_base_url")
+        dian_key = setting(connection, "dian_api_key")
+        dian_signin_enabled = setting(connection, "dian_signin_enabled") == "1"
+        dian_signin_time = setting(connection, "dian_signin_time") or "08:30"
+        dian_signin_mode = setting(connection, "dian_signin_mode") or "normal"
+        dian_last_signin_at = setting(connection, "dian_last_signin_at")
+        dian_last_signin_mode = setting(connection, "dian_last_signin_mode") or ""
+        p115_app = setting(connection, "p115_app") or "alipaymini"
+        p115_target_cid = setting(connection, "p115_target_cid") or "0"
+        p115_target_name = setting(connection, "p115_target_name") or "根目录"
     return {
         "tmdb_configured": bool(tmdb),
         "telegram_configured": bool(telegram and chat_id),
@@ -1022,6 +1207,20 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "emby_configured": bool(emby_url and emby_key),
         "emby_url": emby_url,
         "telegram_proxy": telegram_proxy,
+        "dian_configured": bool(dian_base_url and dian_key),
+        "dian_base_url": dian_base_url,
+        "dian_key_prefix": f"{dian_key[:8]}***" if dian_key else "",
+        "dian_signin_enabled": dian_signin_enabled,
+        "dian_signin_time": dian_signin_time,
+        "dian_signin_mode": dian_signin_mode,
+        "dian_last_signin_at": dian_last_signin_at,
+        "dian_last_signin_mode": dian_last_signin_mode,
+        "p115_app": p115_app,
+        "p115_app_name": P115_APPS.get(p115_app, p115_app),
+        "p115_apps": P115_APPS,
+        "p115_configured": p115_cookie_path().exists(),
+        "p115_target_cid": p115_target_cid,
+        "p115_target_name": p115_target_name,
     }
 
 
@@ -1029,15 +1228,167 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
 async def update_settings(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
+    if payload.get("dian_signin_mode") not in (None, "", "normal", "lucky"):
+        raise HTTPException(400, "签到模式无效")
+    if payload.get("dian_signin_time"):
+        try:
+            datetime.strptime(str(payload["dian_signin_time"]), "%H:%M")
+        except ValueError as error:
+            raise HTTPException(400, "签到时间格式无效") from error
+    if payload.get("p115_app") and payload["p115_app"] not in P115_APPS:
+        raise HTTPException(400, "不支持这个115设备身份")
     with db() as connection:
         for key in (
             "tmdb_token", "telegram_token", "telegram_chat_id", "telegram_proxy",
-            "emby_url", "emby_api_key"
+            "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
+            "dian_signin_time", "dian_signin_mode", "p115_app",
+            "p115_target_cid", "p115_target_name"
         ):
             if key in payload and str(payload[key]).strip():
                 set_setting(connection, key, payload[key])
+        if "dian_signin_enabled" in payload:
+            set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
     configure_telegram_menu()
     return {"ok": True}
+
+
+@APP.post("/api/admin/dian-signin")
+async def dian_signin(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    with db() as connection:
+        mode = str(payload.get("mode") or setting(connection, "dian_signin_mode") or "normal")
+    result = perform_dian_signin(mode)
+    message = str(
+        (result.get("data") or {}).get("message")
+        or result.get("message")
+        or "癫影签到成功"
+    )
+    return {"ok": True, "message": message, "result": result}
+
+
+@APP.get("/api/admin/integrations")
+def integration_status(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    settings = get_settings(movie_session)
+    p115_online = False
+    if settings["p115_configured"]:
+        try:
+            p115_online = bool(p115_client().login_status())
+        except Exception:
+            pass
+    return {
+        **settings,
+        "p115_online": p115_online,
+        "p115_logged_in": p115_online,
+    }
+
+
+@APP.post("/api/admin/p115/qrcode")
+async def p115_qrcode(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    app_name = str(payload.get("app") or "alipaymini")
+    if app_name not in P115_APPS:
+        raise HTTPException(400, "不支持这个扫码设备")
+    try:
+        from p115client import P115Client
+        import qrcode
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少115扫码依赖") from error
+    token_response = P115Client.login_qrcode_token(app_name)
+    token_data = token_response.get("data") or {}
+    uid = str(token_data.get("uid") or "")
+    if not uid:
+        raise HTTPException(502, "115没有返回二维码")
+    qr_content = token_data.get("qrcode") or f"https://115.com/scan/dg-{uid}"
+    image = qrcode.make(qr_content)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    token_id = secrets.token_urlsafe(20)
+    with QR_LOGIN_LOCK:
+        QR_LOGIN_TOKENS[token_id] = {
+            "token": dict(token_data),
+            "app": app_name,
+            "created": time.time(),
+        }
+    return {
+        "token": token_id,
+        "token_id": token_id,
+        "image": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(),
+        "qr_image": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(),
+        "app_name": P115_APPS[app_name],
+    }
+
+
+@APP.get("/api/admin/p115/qrcode/{token_id}")
+def p115_qrcode_status(
+    token_id: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    try:
+        from p115client import P115Client
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少 p115client") from error
+    with QR_LOGIN_LOCK:
+        state = QR_LOGIN_TOKENS.get(token_id)
+    if not state or time.time() - state["created"] > 300:
+        raise HTTPException(410, "二维码已过期，请重新生成")
+    status_response = P115Client.login_qrcode_scan_status(state["token"])
+    status = int((status_response.get("data") or {}).get("status", 0))
+    if status != 2:
+        names = {-2: "canceled", -1: "expired", 0: "waiting", 1: "scanned"}
+        return {"status": names.get(status, "waiting"), "status_code": status}
+    result = P115Client.login_qrcode_scan_result(
+        state["token"]["uid"], app=state["app"]
+    )
+    cookie = (result.get("data") or {}).get("cookie") or {}
+    if not cookie:
+        raise HTTPException(502, "115登录成功但没有返回Cookie")
+    cookie_text = (
+        cookie
+        if isinstance(cookie, str)
+        else "; ".join(f"{key}={value}" for key, value in cookie.items())
+    )
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    p115_cookie_path().write_text(cookie_text)
+    p115_cookie_path().chmod(0o600)
+    with db() as connection:
+        set_setting(connection, "p115_app", state["app"])
+    with QR_LOGIN_LOCK:
+        QR_LOGIN_TOKENS.pop(token_id, None)
+    return {"status": "signed_in", "status_code": 2, "ok": True}
+
+
+@APP.get("/api/admin/p115/folders")
+def p115_folders(
+    cid: int = 0,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    result = p115_client().fs_files(
+        {"cid": max(0, cid), "limit": 200, "show_dir": 1, "cur": 1}
+    )
+    if not response_ok(result):
+        raise HTTPException(502, str(result.get("error") or result.get("message") or "无法读取115目录"))
+    items = extract_share_items(result)
+    folders = []
+    for item in items:
+        folder_id = item.get("cid") or item.get("file_id") or item.get("fid")
+        is_dir = bool(
+            item.get("is_dir")
+            or item.get("fc") in (0, "0")
+            or item.get("file_category") in (0, "0")
+        )
+        if folder_id and is_dir:
+            folders.append({"cid": str(folder_id), "name": item.get("n") or item.get("file_name") or item.get("name") or "目录"})
+    return {"folders": folders, "cid": str(cid)}
 
 
 @APP.post("/api/admin/telegram-test")
