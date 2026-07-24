@@ -445,8 +445,50 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(resource["hdr"], "HDR10")
         self.assertEqual(resource["size_gb"], 32.0)
         self.assertEqual(resource["files"], "全 8 集")
+        self.assertEqual(resource["episode_label"], "全 8 集")
         self.assertEqual(resource["hot"], 88)
         self.assertTrue(resource["chn_sub"])
+
+    def test_dian_resource_derives_episode_range_from_title_and_count(self):
+        resource = app.normalize_dian_resource(
+            {
+                "id": 11,
+                "resource": {
+                    "id": 22,
+                    "name": "百花杀.2026.S01E01.第1集.2160p",
+                    "file_count": 6,
+                },
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–6集")
+
+    def test_dian_resource_uses_openapi_v2_episode_csv_fields(self):
+        resource = app.normalize_dian_resource(
+            {
+                "id": 11,
+                "resource": {
+                    "id": 22,
+                    "name": "百花杀.2026.S01E01.2160p",
+                    "seasons_csv": "1",
+                    "episodes_csv": "1-6",
+                    "episode_count": 6,
+                },
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–6集")
+
+    def test_dian_resource_formats_multiple_openapi_v2_seasons(self):
+        resource = app.normalize_dian_resource(
+            {
+                "resource": {
+                    "name": "示例剧集",
+                    "seasons_csv": "1,2",
+                    "episodes_csv": "1-12",
+                    "episode_count": 24,
+                }
+            }
+        )
+        self.assertEqual(resource["episode_label"], "第1、2季 · 第1–12集")
 
     def test_dian_tv_resources_do_not_default_to_specials(self):
         with patch.object(app, "dian_call", return_value={"data": {"rows": []}}) as call:
@@ -464,7 +506,35 @@ class MovieRequestTests(unittest.TestCase):
                 app.dian_signin(FakeRequest({"mode": "lucky"}), self.token)
             )
         self.assertTrue(result["ok"])
-        signin.assert_called_once_with("lucky")
+        signin.assert_called_once_with("lucky", source="manual")
+
+    def test_dian_signin_sends_telegram_record(self):
+        with patch.object(app, "dian_call", return_value={"message": "获得 5 积分"}):
+            with patch.object(app, "send_telegram") as send:
+                result = app.perform_dian_signin("lucky", source="auto")
+        self.assertEqual(result["message"], "获得 5 积分")
+        self.assertIn("自动签到 · 运气签到", send.call_args.args[0])
+        self.assertIn("获得 5 积分", send.call_args.args[0])
+        with app.db() as connection:
+            self.assertEqual(app.setting(connection, "dian_last_signin_status"), "success")
+
+    def test_failed_dian_signin_sends_telegram_record_and_marks_day(self):
+        with patch.object(
+            app,
+            "dian_call",
+            side_effect=app.HTTPException(502, "接口不可用"),
+        ):
+            with patch.object(app, "send_telegram") as send:
+                with self.assertRaises(app.HTTPException):
+                    app.perform_dian_signin("normal", source="auto")
+        self.assertIn("癫影签到失败", send.call_args.args[0])
+        self.assertIn("接口不可用", send.call_args.args[0])
+        with app.db() as connection:
+            self.assertEqual(app.setting(connection, "dian_last_signin_status"), "failed")
+            self.assertEqual(
+                app.setting(connection, "dian_last_signin_day"),
+                datetime.now().date().isoformat(),
+            )
 
     def test_dian_settings_and_p115_target_are_persisted(self):
         payload = {
