@@ -213,6 +213,26 @@ def response_ok(payload: dict[str, Any]) -> bool:
     return bool(payload.get("state", payload.get("success", True))) and not payload.get("errno")
 
 
+def response_message(payload: dict[str, Any], fallback: str) -> str:
+    return str(
+        payload.get("error")
+        or payload.get("error_msg")
+        or payload.get("message")
+        or payload.get("msg")
+        or fallback
+    )
+
+
+def is_115_share_url(value: str) -> bool:
+    parsed = urlparse(value.strip())
+    host = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme in ("http", "https")
+        and (host == "115.com" or host.endswith(".115.com"))
+        and parsed.path.startswith("/s/")
+    )
+
+
 def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = payload.get("data", payload)
     if isinstance(data, list):
@@ -1095,16 +1115,55 @@ async def dian_transfer(
     if share_id <= 0 or resource_id <= 0:
         raise HTTPException(400, "资源信息无效")
     unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
-    data = unlocked.get("data", unlocked)
-    share_url = str(
-        data.get("share_url") or data.get("url") or data.get("share_link") or ""
-    ).strip()
-    if not share_url:
-        raise HTTPException(502, "癫影没有返回可用的115分享链接")
+    unlocked_data = unlocked.get("data", unlocked)
+    data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
+    raw_links = (
+        data.get("share_url")
+        or data.get("url")
+        or data.get("share_link")
+        or data.get("offline_url")
+        or data.get("offline_urls")
+        or data.get("download_url")
+        or data.get("urls")
+        or ""
+    )
+    if isinstance(raw_links, list):
+        links = [str(link).strip() for link in raw_links if str(link).strip()]
+    else:
+        links = [line.strip() for line in str(raw_links).splitlines() if line.strip()]
+    if not links:
+        raise HTTPException(502, "癫影没有返回可用的分享链接或离线地址")
+    share_url = links[0]
     client = p115_client()
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+
+    if not is_115_share_url(share_url):
+        if len(links) == 1:
+            queued = client.clouddownload_task_add_url(
+                {"url": share_url, "wp_path_id": target_cid}
+            )
+        else:
+            offline_payload = {
+                f"url[{index}]": link
+                for index, link in enumerate(links)
+            }
+            offline_payload["wp_path_id"] = target_cid
+            queued = client.clouddownload_task_add_urls(offline_payload)
+        if not response_ok(queued):
+            raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+        send_telegram(
+            f"☁️ 115离线任务已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
+        )
+        return {
+            "ok": True,
+            "mode": "offline",
+            "message": f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录",
+        }
+
     snap = client.share_snap(0, share_url=share_url)
     if not response_ok(snap):
-        raise HTTPException(502, str(snap.get("error") or snap.get("message") or "无法读取115分享"))
+        raise HTTPException(502, response_message(snap, "无法读取115分享"))
     items = extract_share_items(snap)
     file_ids = ",".join(
         str(item.get("fid") or item.get("file_id") or item.get("cid"))
@@ -1113,17 +1172,19 @@ async def dian_transfer(
     )
     if not file_ids:
         raise HTTPException(502, "115分享中没有找到可转存内容")
-    with db() as connection:
-        target_cid = setting(connection, "p115_target_cid") or "0"
     received = client.share_receive(
         {"file_id": file_ids, "cid": target_cid}, share_url=share_url
     )
     if not response_ok(received):
-        raise HTTPException(502, str(received.get("error") or received.get("message") or "115转存失败"))
+        raise HTTPException(502, response_message(received, "115转存失败"))
     send_telegram(
         f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
     )
-    return {"ok": True}
+    return {
+        "ok": True,
+        "mode": "share",
+        "message": "已转存到115所选目录",
+    }
 
 
 @APP.get("/api/requests")

@@ -538,8 +538,9 @@
       if(preview){button.disabled=true;button.textContent='已加入转存';return toast(`《${currentDetail.title}》的 ${resource.res} 版本已加入 115 转存队列`);}
       button.disabled=true; button.textContent='转存中…';
       try {
-        await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,title:currentDetail.title})});
-        button.textContent='已加入转存'; toast(`《${currentDetail.title}》已转存到 115`);
+        const result=await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,title:currentDetail.title})});
+        button.textContent=result.mode==='offline'?'离线下载中':'已完成转存';
+        toast(result.message||`《${currentDetail.title}》已提交到 115`);
       } catch(error) {button.disabled=false;button.textContent='重新转存';toast(error.message,true);}
     }
     function closeDetails() { detailLoadSequence++; $('detailOverlay').classList.add('hidden'); document.body.style.overflow=''; currentDetail=null; }

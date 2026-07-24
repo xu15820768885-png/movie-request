@@ -455,8 +455,92 @@ class MovieRequestTests(unittest.TestCase):
                         )
                     )
         self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "share")
         dian.assert_called_once_with("unlock", {"share_id": 11, "resource_id": 22})
         self.assertEqual(client.received, {"file_id": "101,202", "cid": "7788"})
+
+    def test_dian_transfer_submits_ed2k_as_offline_download(self):
+        class FakeP115:
+            def clouddownload_task_add_url(self, payload):
+                self.offline_payload = payload
+                return {"state": True, "info_hash": "abc123"}
+
+        client = FakeP115()
+        with app.db() as connection:
+            app.set_setting(connection, "p115_target_cid", "7788")
+        with patch.object(
+            app,
+            "dian_call",
+            return_value={"data": {"offline_url": "ed2k://|file|episode.mkv|123|hash|/"}},
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "鬼谜东宫",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "offline")
+        self.assertEqual(
+            client.offline_payload,
+            {
+                "url": "ed2k://|file|episode.mkv|123|hash|/",
+                "wp_path_id": "7788",
+            },
+        )
+
+    def test_dian_transfer_submits_multiple_offline_links(self):
+        class FakeP115:
+            def clouddownload_task_add_urls(self, payload):
+                self.offline_payload = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with app.db() as connection:
+            app.set_setting(connection, "p115_target_cid", "7788")
+        with patch.object(
+            app,
+            "dian_call",
+            return_value={
+                "data": {
+                    "offline_urls": [
+                        "ed2k://|file|episode01.mkv|123|hash1|/",
+                        "ed2k://|file|episode02.mkv|456|hash2|/",
+                    ]
+                }
+            },
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "鬼谜东宫",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertEqual(result["mode"], "offline")
+        self.assertEqual(
+            client.offline_payload,
+            {
+                "url[0]": "ed2k://|file|episode01.mkv|123|hash1|/",
+                "url[1]": "ed2k://|file|episode02.mkv|456|hash2|/",
+                "wp_path_id": "7788",
+            },
+        )
 
 
 if __name__ == "__main__":
