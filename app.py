@@ -219,7 +219,7 @@ def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
     if not isinstance(data, dict):
         return []
-    for key in ("list", "items", "shares", "records", "data"):
+    for key in ("list", "items", "shares", "records", "rows", "results", "resources", "data"):
         value = data.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -950,7 +950,7 @@ def media_details(
 def dian_resources(
     media_type: str,
     tmdb_id: int,
-    season: int = 0,
+    season: Optional[int] = None,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
     require_user(movie_session)
@@ -963,7 +963,9 @@ def dian_resources(
         "size": 30,
         "sort": "hot",
     }
-    if media_type == "tv":
+    # Dian treats season=0 as an explicit S0/specials filter, not "all seasons".
+    # Omit it for the normal title-level lookup and only send it when requested.
+    if media_type == "tv" and season is not None:
         payload["season"] = max(0, season)
     result = dian_call("list_shares", payload)
     return {"resources": extract_share_items(result)}

@@ -347,6 +347,16 @@ class MovieRequestTests(unittest.TestCase):
             },
         )
 
+    def test_dian_tv_resources_do_not_default_to_specials(self):
+        with patch.object(app, "dian_call", return_value={"data": {"rows": []}}) as call:
+            app.dian_resources("tv", 88416, None, self.token)
+        payload = call.call_args.args[1]
+        self.assertNotIn("season", payload)
+
+        with patch.object(app, "dian_call", return_value={"data": {"rows": []}}) as call:
+            app.dian_resources("tv", 88416, 2, self.token)
+        self.assertEqual(call.call_args.args[1]["season"], 2)
+
     def test_manual_dian_signin_accepts_selected_mode(self):
         with patch.object(app, "perform_dian_signin", return_value={"message": "签到成功"}) as signin:
             result = asyncio.run(
