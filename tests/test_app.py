@@ -22,7 +22,9 @@ class MovieRequestTests(unittest.TestCase):
     def setUp(self):
         with app.CACHE_LOCK:
             app.TMDB_RESPONSE_CACHE.clear()
-            app.EMBY_LIBRARY_CACHE.update({"key": "", "expires": 0.0, "ids": set()})
+            app.EMBY_LIBRARY_CACHE.update(
+                {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
+            )
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -218,7 +220,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(season_ended["series_status"], "season_ended")
         self.assertEqual(canceled["series_status_label"], "已取消")
 
-    def test_search_enriches_tv_completion_status(self):
+    def test_search_does_not_wait_for_each_tv_detail(self):
         def fake_tmdb(path, _params):
             if path == "/search/multi":
                 return {
@@ -227,21 +229,35 @@ class MovieRequestTests(unittest.TestCase):
                         {"id": 20, "media_type": "movie", "title": "电影"},
                     ]
                 }
-            if path == "/tv/10":
-                return {
-                    "id": 10,
-                    "status": "Returning Series",
-                    "last_episode_to_air": {"season_number": 1, "episode_number": 8},
-                    "next_episode_to_air": None,
-                    "seasons": [{"season_number": 1, "episode_count": 8}],
-                }
             self.fail(f"unexpected TMDB path: {path}")
 
-        with patch.object(app, "tmdb_get", side_effect=fake_tmdb):
-            with patch.object(app, "emby_library_tmdb_ids", return_value=set()):
+        with patch.object(app, "tmdb_get", side_effect=fake_tmdb) as tmdb:
+            with patch.object(app, "emby_library_tmdb_ids", return_value=set()) as emby:
                 result = app.search("测试", self.token)
-        self.assertEqual(result["results"][0]["series_status_label"], "第1季已完结")
+        self.assertEqual(tmdb.call_count, 1)
+        emby.assert_called_once_with(prefer_cached=True)
+        self.assertNotIn("series_status_label", result["results"][0])
         self.assertNotIn("series_status_label", result["results"][1])
+
+    def test_emby_fast_path_returns_stale_ids_and_refreshes_in_background(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://nas:8096")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+        cache_key = hashlib.sha256(b"http://nas:8096|emby-key").hexdigest()
+        with app.CACHE_LOCK:
+            app.EMBY_LIBRARY_CACHE.update(
+                {
+                    "key": cache_key,
+                    "expires": 0.0,
+                    "ids": {157336},
+                    "refreshing": False,
+                }
+            )
+        with patch.object(app, "Thread") as thread:
+            result = app.emby_library_tmdb_ids(prefer_cached=True)
+        self.assertEqual(result, {157336})
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["name"], "emby-cache-refresh")
 
     def test_douban_chart_is_marked_for_tmdb_resolution(self):
         payload = {

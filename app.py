@@ -44,6 +44,7 @@ EMBY_LIBRARY_CACHE: dict[str, Any] = {
     "key": "",
     "expires": 0.0,
     "ids": set(),
+    "refreshing": False,
 }
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
@@ -847,7 +848,10 @@ def emby_api_url(base_url: str, path: str) -> str:
     return f"{base}/emby/{path.lstrip('/')}"
 
 
-def emby_library_tmdb_ids(force: bool = False) -> set[int]:
+def emby_library_tmdb_ids(
+    force: bool = False,
+    prefer_cached: bool = False,
+) -> set[int]:
     with db() as connection:
         base_url = setting(connection, "emby_url")
         api_key = setting(connection, "emby_api_key")
@@ -862,6 +866,22 @@ def emby_library_tmdb_ids(force: bool = False) -> set[int]:
             and EMBY_LIBRARY_CACHE["expires"] > now
         ):
             return set(EMBY_LIBRARY_CACHE["ids"])
+        if not force and prefer_cached:
+            stale_ids = (
+                set(EMBY_LIBRARY_CACHE["ids"])
+                if EMBY_LIBRARY_CACHE["key"] == cache_key
+                else set()
+            )
+            should_refresh = not EMBY_LIBRARY_CACHE["refreshing"]
+            if should_refresh:
+                EMBY_LIBRARY_CACHE["refreshing"] = True
+            if should_refresh:
+                Thread(
+                    target=refresh_emby_library_cache,
+                    name="emby-cache-refresh",
+                    daemon=True,
+                ).start()
+            return stale_ids
     try:
         response = requests.get(
             emby_api_url(base_url, "/Items"),
@@ -891,6 +911,14 @@ def emby_library_tmdb_ids(force: bool = False) -> set[int]:
             if EMBY_LIBRARY_CACHE["key"] == cache_key:
                 return set(EMBY_LIBRARY_CACHE["ids"])
         return set()
+
+
+def refresh_emby_library_cache() -> None:
+    try:
+        emby_library_tmdb_ids(force=True)
+    finally:
+        with CACHE_LOCK:
+            EMBY_LIBRARY_CACHE["refreshing"] = False
 
 
 def sync_emby_requests(force: bool = False) -> int:
@@ -1394,12 +1422,14 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         "/search/multi",
         {"query": query, "language": "zh-CN", "include_adult": "false", "page": 1},
     )
-    library_ids = emby_library_tmdb_ids()
+    # Search must not wait for a full Emby library scan. The cached IDs are
+    # enough to paint results immediately; an expired cache refreshes behind
+    # the scenes.
+    library_ids = emby_library_tmdb_ids(prefer_cached=True)
     source_items = [
         item for item in data.get("results", [])
         if item.get("media_type") in ("movie", "tv")
     ][:20]
-    enrich_tmdb_tv_statuses(source_items)
     results = []
     for item in source_items:
         media_type = item.get("media_type")
@@ -1435,7 +1465,7 @@ def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None))
         raise HTTPException(404, "没有找到这个榜单")
     path, fixed_type, title = chart_config[chart_name]
     data = tmdb_get(path, {"language": "zh-CN", "page": 1})
-    library_ids = emby_library_tmdb_ids()
+    library_ids = emby_library_tmdb_ids(prefer_cached=True)
     results = []
     for item in data.get("results", []):
         media_type = fixed_type or item.get("media_type")
@@ -1542,7 +1572,7 @@ def media_details(
     )
     if int(data.get("id") or 0) != tmdb_id:
         raise HTTPException(404, "TMDB 没有找到这部影片")
-    library_ids = emby_library_tmdb_ids()
+    library_ids = emby_library_tmdb_ids(prefer_cached=True)
     basic = tmdb_media_item(data, media_type, library_ids)
     credits = data.get("credits") or {}
     cast = [
