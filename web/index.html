@@ -491,23 +491,24 @@
       catch(error){ $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><div class="detail-loading">${escapeHtml(error.message)}</div>`; bindDetailActions(); }
     }
     function normalizeResource(resource,index,item) {
-      const tags=resource.tags||resource.tag||{};
-      const rawSize=resource.size_gb??resource.size??resource.total_size_gb??'';
+      const details=resource.resource||resource.details||resource.metadata||{};
+      const tags=resource.tags||resource.tag||details.tags||details.tag||{};
+      const rawSize=resource.size_gb??details.size_gb??resource.size??details.size??resource.total_size_gb??details.total_size_gb??'';
       const size=typeof rawSize==='number'&&rawSize>1024*1024?Math.round(rawSize/1024/1024/1024*10)/10:rawSize;
       return {
         ...resource,
         share_id:resource.share_id??resource.share?.id??resource.id,
-        resource_id:resource.resource_id??resource.resource?.id??resource.id,
-        title:resource.title||resource.name||resource.display_name||`${item.title} 资源 ${index+1}`,
-        res:resource.res||resource.resolution||tags.res||'版本',
-        codec:resource.codec||tags.codec||'编码未知',
-        hdr:resource.hdr||tags.hdr||'',
-        audio:resource.audio||tags.audio||'音轨未知',
-        chn_sub:Boolean(resource.chn_sub??tags.chn_sub),
+        resource_id:resource.resource_id??details.id??resource.id,
+        title:resource.title||details.title||details.name||resource.name||resource.display_name||`${item.title} 资源 ${index+1}`,
+        res:resource.res||resource.resolution||details.res||details.resolution||details.quality||details.definition||tags.res||tags.resolution||'版本',
+        codec:resource.codec||resource.video_codec||details.codec||details.video_codec||details.vcodec||tags.codec||'编码未知',
+        hdr:resource.hdr||resource.video_hdr||details.hdr||details.video_hdr||details.dynamic_range||tags.hdr||'',
+        audio:resource.audio||resource.audio_info||details.audio||details.audio_info||details.audio_codec||tags.audio||'音轨未知',
+        chn_sub:Boolean(resource.chn_sub??details.chn_sub??details.chinese_subtitle??tags.chn_sub),
         size_gb:size||'未知',
-        source:resource.source||resource.source_tag||tags.source_tag||'115分享',
-        files:resource.files||resource.file_summary||resource.episode_summary||'点击后转存',
-        hot:resource.hot||resource.heat||resource.score||'-'
+        source:resource.source||resource.source_tag||details.source||details.source_tag||tags.source_tag||'115分享',
+        files:resource.files||resource.file_summary||resource.episode_summary||details.files||details.file_summary||details.episode_summary||details.file_count||'点击后转存',
+        hot:resource.hot||resource.heat||resource.score||details.hot||details.heat||details.score||'-'
       };
     }
     function renderDetails(item) {

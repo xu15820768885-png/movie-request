@@ -226,6 +226,113 @@ def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
+    """Flatten Dian's share wrapper into the fields used by the member UI."""
+    nested_resource = item.get("resource")
+    resource = nested_resource if isinstance(nested_resource, dict) else {}
+    nested_share = item.get("share")
+    share = nested_share if isinstance(nested_share, dict) else {}
+
+    dictionaries: list[dict[str, Any]] = [item, resource, share]
+    seen = {id(value) for value in dictionaries}
+    for value in list(item.values()) + list(resource.values()) + list(share.values()):
+        if isinstance(value, dict) and id(value) not in seen:
+            dictionaries.append(value)
+            seen.add(id(value))
+
+    def pick(*keys: str, sources: Optional[list[dict[str, Any]]] = None) -> Any:
+        for source in sources or dictionaries:
+            for key in keys:
+                value = source.get(key)
+                if value is not None and value != "":
+                    return value
+        return None
+
+    tag_values: list[str] = []
+    for source in dictionaries:
+        tags = source.get("tags", source.get("tag"))
+        if isinstance(tags, dict):
+            if id(tags) not in seen:
+                dictionaries.append(tags)
+                seen.add(id(tags))
+        elif isinstance(tags, list):
+            for tag in tags:
+                if isinstance(tag, dict):
+                    if id(tag) not in seen:
+                        dictionaries.append(tag)
+                        seen.add(id(tag))
+                elif tag:
+                    tag_values.append(str(tag))
+        elif tags:
+            tag_values.append(str(tags))
+    tag_text = " ".join(tag_values)
+
+    raw_size = pick("size_gb", "total_size_gb")
+    if raw_size is None:
+        raw_size = pick(
+            "size", "total_size", "size_bytes", "total_size_bytes",
+            "file_size", "bytes",
+        )
+        if isinstance(raw_size, (int, float)) and raw_size > 1024 * 1024:
+            raw_size = round(raw_size / 1024 / 1024 / 1024, 1)
+
+    subtitle_value = pick(
+        "chn_sub", "chinese_subtitle", "has_chinese_subtitle",
+        "subtitle_chinese", "is_chinese_subtitle",
+    )
+    if isinstance(subtitle_value, str):
+        has_chinese_subtitle = subtitle_value.strip().lower() in {
+            "1", "true", "yes", "y", "是", "有",
+        }
+    else:
+        has_chinese_subtitle = bool(subtitle_value)
+    if not has_chinese_subtitle and tag_text:
+        has_chinese_subtitle = any(
+            marker in tag_text.lower()
+            for marker in ("中字", "中文字幕", "简中", "繁中", "chinese sub")
+        )
+
+    # Share IDs live on the outer wrapper while media details commonly live
+    # inside ``resource``. Prefer the inner resource's descriptive title.
+    normalized = dict(item)
+    normalized.update(
+        {
+            "share_id": pick("share_id", sources=[item, share])
+            or pick("id", sources=[share, item]),
+            "resource_id": pick("resource_id", sources=[item, resource])
+            or pick("id", sources=[resource, item]),
+            "title": pick(
+                "title", "name", "display_name", "resource_name",
+                sources=[resource],
+            )
+            or pick("title", "name", "display_name", "resource_name"),
+            "res": pick(
+                "res", "resolution", "quality", "definition",
+                "video_resolution", "video_quality",
+            ),
+            "codec": pick(
+                "codec", "video_codec", "vcodec", "encode", "encoding",
+            ),
+            "hdr": pick("hdr", "video_hdr", "dynamic_range"),
+            "audio": pick(
+                "audio", "audio_info", "audio_codec", "audio_track",
+                "soundtrack",
+            ),
+            "chn_sub": has_chinese_subtitle,
+            "size_gb": raw_size,
+            "source": pick("source", "source_tag", "origin", "channel"),
+            "files": pick(
+                "files", "file_summary", "episode_summary", "file_count",
+                "episode_count",
+            ),
+            "hot": pick(
+                "hot", "heat", "hotness", "score", "views", "view_count",
+            ),
+        }
+    )
+    return normalized
+
+
 def session_user(token: Optional[str]) -> Optional[dict[str, Any]]:
     if not token:
         return None
@@ -968,7 +1075,12 @@ def dian_resources(
     if media_type == "tv" and season is not None:
         payload["season"] = max(0, season)
     result = dian_call("list_shares", payload)
-    return {"resources": extract_share_items(result)}
+    return {
+        "resources": [
+            normalize_dian_resource(item)
+            for item in extract_share_items(result)
+        ]
+    }
 
 
 @APP.post("/api/dian/transfer")

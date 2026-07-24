@@ -347,6 +347,44 @@ class MovieRequestTests(unittest.TestCase):
             },
         )
 
+    def test_dian_resources_flattens_nested_resource_details(self):
+        response = {
+            "data": {
+                "list": [
+                    {
+                        "id": 11,
+                        "title": "鬼谜东宫",
+                        "source": "user_upload",
+                        "resource": {
+                            "id": 22,
+                            "name": "鬼谜东宫 S01 2160p",
+                            "resolution": "4K",
+                            "video_codec": "HEVC",
+                            "audio_info": "韩语 Atmos",
+                            "dynamic_range": "HDR10",
+                            "size": 32 * 1024 * 1024 * 1024,
+                            "episode_summary": "全 8 集",
+                            "heat": 88,
+                            "tags": ["简中"],
+                        },
+                    }
+                ]
+            }
+        }
+        with patch.object(app, "dian_call", return_value=response):
+            resource = app.dian_resources("tv", 279323, None, self.token)["resources"][0]
+        self.assertEqual(resource["share_id"], 11)
+        self.assertEqual(resource["resource_id"], 22)
+        self.assertEqual(resource["title"], "鬼谜东宫 S01 2160p")
+        self.assertEqual(resource["res"], "4K")
+        self.assertEqual(resource["codec"], "HEVC")
+        self.assertEqual(resource["audio"], "韩语 Atmos")
+        self.assertEqual(resource["hdr"], "HDR10")
+        self.assertEqual(resource["size_gb"], 32.0)
+        self.assertEqual(resource["files"], "全 8 集")
+        self.assertEqual(resource["hot"], 88)
+        self.assertTrue(resource["chn_sub"])
+
     def test_dian_tv_resources_do_not_default_to_specials(self):
         with patch.object(app, "dian_call", return_value={"data": {"rows": []}}) as call:
             app.dian_resources("tv", 88416, None, self.token)
