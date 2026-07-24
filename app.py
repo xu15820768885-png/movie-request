@@ -371,6 +371,7 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
         "share_link", "offline_url", "offline_link", "download_url",
         "offline_urls", "offline_links", "ed2k_urls", "ed2k_links",
         "download_urls", "download_links", "urls", "links", "files",
+        "unlock",
     ):
         if key in data:
             add(data[key])
@@ -390,7 +391,7 @@ def dian_share_codes(data: dict[str, Any]) -> list[str]:
 
 
 def dian_receive_code(data: dict[str, Any]) -> str:
-    return str(
+    value = (
         data.get("receive_code")
         or data.get("receivecode")
         or data.get("receiveCode")
@@ -398,7 +399,16 @@ def dian_receive_code(data: dict[str, Any]) -> str:
         or data.get("password")
         or data.get("pwd")
         or ""
-    ).strip()
+    )
+    code = str(value).strip()
+    if code:
+        return code
+    unlock = data.get("unlock")
+    if isinstance(unlock, str):
+        unlock_code = unlock.strip()
+        if len(unlock_code) == 4 and "://" not in unlock_code:
+            return unlock_code
+    return ""
 
 
 def build_115_share_link(share_code: str, receive_code: str = "") -> str:

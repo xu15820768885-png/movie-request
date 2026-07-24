@@ -445,8 +445,13 @@ class MovieRequestTests(unittest.TestCase):
             "dian_call",
             return_value={
                 "data": {
-                    "share_code": "example115code",
-                    "receive_code": "abcd",
+                    "already": True,
+                    "code": "example115code",
+                    "new_balance": 10,
+                    "owner": False,
+                    "payload_token": "signed-token",
+                    "used": 0,
+                    "unlock": "abcd",
                 }
             },
         ) as dian:
@@ -551,6 +556,18 @@ class MovieRequestTests(unittest.TestCase):
                 "ed2k://|file|episode02.mkv|456|hash2|/",
             ],
         )
+
+    def test_dian_offline_links_are_extracted_from_unlock_payload(self):
+        links = app.extract_dian_transfer_links(
+            {
+                "code": "resource-code",
+                "unlock": [
+                    "ed2k://|file|episode01.mkv|123|hash1|/",
+                    "ed2k://|file|episode02.mkv|456|hash2|/",
+                ],
+            }
+        )
+        self.assertEqual(len(links), 2)
 
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
