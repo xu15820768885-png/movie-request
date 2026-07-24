@@ -445,15 +445,13 @@ class MovieRequestTests(unittest.TestCase):
             app,
             "dian_call",
             return_value={
-                "data": {
-                    "already": True,
-                    "code": "example115code",
-                    "new_balance": 10,
-                    "owner": False,
-                    "payload_token": "signed-token",
-                    "used": 0,
-                    "unlock": "abcd",
-                }
+                "already": True,
+                "code": "ok",
+                "new_balance": 10,
+                "owner": False,
+                "payload": "https://115cdn.com/s/example115code?password=abcd",
+                "token_used": False,
+                "unlock": True,
             },
         ) as dian:
             with patch.object(app, "p115_client", return_value=client):
@@ -479,7 +477,7 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(client.received, {"file_id": "101,202", "cid": "7788"})
 
-    def test_dian_transfer_fetches_link_after_unlock(self):
+    def test_dian_transfer_reads_payload_from_data_wrapper(self):
         class FakeP115:
             def fs_files(self, _payload):
                 items = [{"fid": "900", "n": "鬼谜东宫"}] if hasattr(self, "received") else []
@@ -496,14 +494,11 @@ class MovieRequestTests(unittest.TestCase):
         client = FakeP115()
 
         def fake_dian(method, payload):
-            if method == "unlock":
-                return {"data": {"share_code": "lookup-token"}}
-            self.assertEqual(method, "check_sharecode")
-            self.assertEqual(payload, "lookup-token")
+            self.assertEqual(method, "unlock")
+            self.assertEqual(payload, {"share_id": 11, "resource_id": 22})
             return {
                 "data": {
-                    "share_code": "example115code",
-                    "receive_code": "abcd",
+                    "payload": "https://115cdn.com/s/example115code?password=abcd",
                 }
             }
 
@@ -526,64 +521,6 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(
             client.share_url,
             "https://115cdn.com/s/example115code?password=abcd",
-        )
-
-    def test_dian_transfer_accepts_verified_share_without_password(self):
-        class FakeP115:
-            def fs_files(self, _payload):
-                items = [{"fid": "900", "n": "鬼谜东宫"}] if hasattr(self, "received") else []
-                return {"state": True, "data": {"list": items}}
-
-            def share_snap(self, *_args, **kwargs):
-                self.share_url = kwargs["share_url"]
-                return {"state": True, "data": {"list": [{"fid": "101"}]}}
-
-            def share_receive(self, payload, **_kwargs):
-                self.received = payload
-                return {"state": True}
-
-        client = FakeP115()
-
-        def fake_dian(method, payload):
-            if method == "unlock":
-                return {
-                    "data": {
-                        "already": True,
-                        "code": "example115code",
-                        "payload": True,
-                        "token_used": False,
-                        "unlock": True,
-                    }
-                }
-            self.assertEqual(method, "check_sharecode")
-            self.assertEqual(payload, "example115code")
-            return {
-                "data": {
-                    "code": "example115code",
-                    "exists": True,
-                    "share_id": 123,
-                }
-            }
-
-        with patch.object(app, "dian_call", side_effect=fake_dian):
-            with patch.object(app, "p115_client", return_value=client):
-                with patch.object(app, "send_telegram"):
-                    result = asyncio.run(
-                        app.dian_transfer(
-                            FakeRequest(
-                                {
-                                    "share_id": 11,
-                                    "resource_id": 22,
-                                    "title": "鬼谜东宫",
-                                }
-                            ),
-                            self.token,
-                        )
-                    )
-        self.assertEqual(result["mode"], "share")
-        self.assertEqual(
-            client.share_url,
-            "https://115cdn.com/s/example115code",
         )
 
     def test_115cdn_url_is_recognized_as_share(self):
@@ -627,20 +564,6 @@ class MovieRequestTests(unittest.TestCase):
             }
         )
         self.assertEqual(len(links), 2)
-
-    def test_dian_transfer_fields_are_found_in_nested_payload(self):
-        data = {
-            "code": "outer-status-code",
-            "payload": {
-                "result": {
-                    "share_code": "example115code",
-                    "receive_code": "abcd",
-                }
-            },
-            "unlock": True,
-        }
-        self.assertIn("example115code", app.dian_share_codes(data))
-        self.assertEqual(app.dian_receive_code(data), "abcd")
 
     def test_dian_transfer_links_are_found_in_nested_or_json_payload(self):
         nested = {
