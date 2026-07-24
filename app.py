@@ -339,22 +339,35 @@ def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
 def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
+    visited: set[int] = set()
 
     def add(value: Any) -> None:
         if isinstance(value, dict):
-            for key in (
-                "share_url", "url", "full_url", "complete_url", "link",
-                "share_link", "offline_url", "offline_link",
-                "download_url", "ed2k", "ed2k_url",
-            ):
-                if key in value:
-                    add(value[key])
+            identity = id(value)
+            if identity in visited:
+                return
+            visited.add(identity)
+            for nested in value.values():
+                add(nested)
             return
         if isinstance(value, list):
+            identity = id(value)
+            if identity in visited:
+                return
+            visited.add(identity)
             for item in value:
                 add(item)
             return
-        for line in str(value or "").splitlines():
+        text = str(value or "").strip()
+        if text.startswith(("{", "[")):
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                decoded = None
+            if isinstance(decoded, (dict, list)):
+                add(decoded)
+                return
+        for line in text.splitlines():
             link = line.strip()
             if (
                 link
@@ -366,41 +379,59 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
                 links.append(link)
                 seen.add(link)
 
-    for key in (
-        "share_url", "url", "full_url", "complete_url", "link",
-        "share_link", "offline_url", "offline_link", "download_url",
-        "offline_urls", "offline_links", "ed2k_urls", "ed2k_links",
-        "download_urls", "download_links", "urls", "links", "files",
-        "unlock",
-    ):
-        if key in data:
-            add(data[key])
+    add(data)
     return links
 
 
 def dian_share_codes(data: dict[str, Any]) -> list[str]:
     codes: list[str] = []
-    for key in (
+    keys = {
         "share_code", "sharecode", "shareCode",
         "unlock_code", "unlockCode", "code",
-    ):
-        value = str(data.get(key) or "").strip()
-        if value and value not in codes:
-            codes.append(value)
+    }
+
+    def add(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in keys and not isinstance(nested, (dict, list)):
+                    code = str(nested or "").strip()
+                    if code and code not in codes:
+                        codes.append(code)
+                if isinstance(nested, (dict, list)):
+                    add(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                add(nested)
+
+    add(data)
     return codes
 
 
 def dian_receive_code(data: dict[str, Any]) -> str:
-    value = (
-        data.get("receive_code")
-        or data.get("receivecode")
-        or data.get("receiveCode")
-        or data.get("access_code")
-        or data.get("password")
-        or data.get("pwd")
-        or ""
-    )
-    code = str(value).strip()
+    keys = {
+        "receive_code", "receivecode", "receiveCode",
+        "access_code", "password", "pwd",
+    }
+
+    def find(value: Any) -> str:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in keys and not isinstance(nested, (dict, list)):
+                    code = str(nested or "").strip()
+                    if code:
+                        return code
+            for nested in value.values():
+                result = find(nested)
+                if result:
+                    return result
+        elif isinstance(value, list):
+            for nested in value:
+                result = find(nested)
+                if result:
+                    return result
+        return ""
+
+    code = find(data)
     if code:
         return code
     unlock = data.get("unlock")
@@ -408,6 +439,10 @@ def dian_receive_code(data: dict[str, Any]) -> str:
         unlock_code = unlock.strip()
         if len(unlock_code) == 4 and "://" not in unlock_code:
             return unlock_code
+    if isinstance(unlock, dict):
+        nested_code = str(unlock.get("code") or "").strip()
+        if len(nested_code) == 4 and "://" not in nested_code:
+            return nested_code
     return ""
 
 
@@ -1327,6 +1362,14 @@ async def dian_transfer(
                     build_115_share_link(
                         checked_codes[0],
                         checked_receive_code,
+                    )
+                ]
+                break
+            if checked_data.get("exists"):
+                links = [
+                    build_115_share_link(
+                        code,
+                        checked_receive_code or initial_receive_code,
                     )
                 ]
                 break

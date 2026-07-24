@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -527,6 +528,64 @@ class MovieRequestTests(unittest.TestCase):
             "https://115cdn.com/s/example115code?password=abcd",
         )
 
+    def test_dian_transfer_accepts_verified_share_without_password(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                items = [{"fid": "900", "n": "鬼谜东宫"}] if hasattr(self, "received") else []
+                return {"state": True, "data": {"list": items}}
+
+            def share_snap(self, *_args, **kwargs):
+                self.share_url = kwargs["share_url"]
+                return {"state": True, "data": {"list": [{"fid": "101"}]}}
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+
+        def fake_dian(method, payload):
+            if method == "unlock":
+                return {
+                    "data": {
+                        "already": True,
+                        "code": "example115code",
+                        "payload": True,
+                        "token_used": False,
+                        "unlock": True,
+                    }
+                }
+            self.assertEqual(method, "check_sharecode")
+            self.assertEqual(payload, "example115code")
+            return {
+                "data": {
+                    "code": "example115code",
+                    "exists": True,
+                    "share_id": 123,
+                }
+            }
+
+        with patch.object(app, "dian_call", side_effect=fake_dian):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "鬼谜东宫",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertEqual(result["mode"], "share")
+        self.assertEqual(
+            client.share_url,
+            "https://115cdn.com/s/example115code",
+        )
+
     def test_115cdn_url_is_recognized_as_share(self):
         self.assertTrue(
             app.is_115_share_url(
@@ -568,6 +627,36 @@ class MovieRequestTests(unittest.TestCase):
             }
         )
         self.assertEqual(len(links), 2)
+
+    def test_dian_transfer_fields_are_found_in_nested_payload(self):
+        data = {
+            "code": "outer-status-code",
+            "payload": {
+                "result": {
+                    "share_code": "example115code",
+                    "receive_code": "abcd",
+                }
+            },
+            "unlock": True,
+        }
+        self.assertIn("example115code", app.dian_share_codes(data))
+        self.assertEqual(app.dian_receive_code(data), "abcd")
+
+    def test_dian_transfer_links_are_found_in_nested_or_json_payload(self):
+        nested = {
+            "payload": {
+                "result": {
+                    "content": "ed2k://|file|episode01.mkv|123|hash1|/",
+                }
+            }
+        }
+        encoded = {
+            "payload": json.dumps(
+                {"result": {"content": "https://115cdn.com/s/example115code"}}
+            )
+        }
+        self.assertEqual(len(app.extract_dian_transfer_links(nested)), 1)
+        self.assertEqual(len(app.extract_dian_transfer_links(encoded)), 1)
 
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
