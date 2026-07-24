@@ -181,6 +181,39 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(get.call_count, 1)
 
+    def test_tmdb_tv_status_is_normalized(self):
+        ended = app.tmdb_media_item(
+            {"id": 1, "name": "已播完", "status": "Ended"}, "tv", set()
+        )
+        ongoing = app.tmdb_media_item(
+            {"id": 2, "name": "连载中", "status": "Returning Series"}, "tv", set()
+        )
+        canceled = app.tmdb_media_item(
+            {"id": 3, "name": "已取消", "status": "Canceled"}, "tv", set()
+        )
+        self.assertEqual(ended["series_status_label"], "已完结")
+        self.assertEqual(ongoing["series_status_label"], "未完结")
+        self.assertEqual(canceled["series_status_label"], "已取消")
+
+    def test_search_enriches_tv_completion_status(self):
+        def fake_tmdb(path, _params):
+            if path == "/search/multi":
+                return {
+                    "results": [
+                        {"id": 10, "media_type": "tv", "name": "完结剧"},
+                        {"id": 20, "media_type": "movie", "title": "电影"},
+                    ]
+                }
+            if path == "/tv/10":
+                return {"id": 10, "status": "Ended"}
+            self.fail(f"unexpected TMDB path: {path}")
+
+        with patch.object(app, "tmdb_get", side_effect=fake_tmdb):
+            with patch.object(app, "emby_library_tmdb_ids", return_value=set()):
+                result = app.search("测试", self.token)
+        self.assertEqual(result["results"][0]["series_status_label"], "已完结")
+        self.assertNotIn("series_status_label", result["results"][1])
+
     def test_douban_chart_is_marked_for_tmdb_resolution(self):
         payload = {
             "subject_collection_items": [

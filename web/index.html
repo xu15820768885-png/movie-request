@@ -121,6 +121,14 @@
     .movie-title-button { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
     .movie-title-button:hover { color: var(--orange-2); }
     .movie-meta { margin: 6px 0 12px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .series-status { display: inline-flex; align-items: center; width: fit-content; margin: -4px 0 10px; padding: 4px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+    .series-status.ended { color: #b7f1d4; background: rgba(103,199,154,.14); }
+    .series-status.ongoing {
+      box-sizing: border-box; justify-content: center; width: 100%; padding: 8px 10px;
+      color: #ffd5c2; background: rgba(255,122,69,.2); border: 1px solid rgba(255,122,69,.38);
+      font-size: 12px;
+    }
+    .series-status.canceled { color: #d0c9c2; background: rgba(208,201,194,.1); }
     .detail-hint { margin: -5px 0 10px; color: var(--orange-2); font-size: 10px; }
     .movie-body .btn { width: 100%; }
     .empty {
@@ -388,9 +396,9 @@
     const demoMovies = [
       {tmdb_id:157336,media_type:'movie',title:'星际穿越',original_title:'Interstellar',year:'2014',rating:8.5,in_library:true,poster_path:'/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',overview:'一队探险家穿越虫洞，为人类寻找新的家园。'},
       {tmdb_id:27205,media_type:'movie',title:'盗梦空间',original_title:'Inception',year:'2010',rating:8.4,poster_path:'/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg',poster_url:'https://image.tmdb.org/t/p/w500/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg',overview:'潜入梦境窃取秘密的高手，接下了一个植入想法的任务。'},
-      {tmdb_id:1399,media_type:'tv',title:'权力的游戏',original_title:'Game of Thrones',year:'2011',rating:8.5,poster_path:'/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',overview:'九大家族争夺维斯特洛大陆最高权力的史诗故事。'},
+      {tmdb_id:1399,media_type:'tv',title:'权力的游戏',original_title:'Game of Thrones',year:'2011',rating:8.5,series_status:'ended',series_status_label:'已完结',poster_path:'/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg',overview:'九大家族争夺维斯特洛大陆最高权力的史诗故事。'},
       {tmdb_id:535167,media_type:'movie',title:'流浪地球',original_title:'The Wandering Earth',year:'2019',rating:6.6,poster_path:'/6lLxWq6lX1pQqgxGqj2ZJ7JkqQG.jpg',poster_url:'',overview:'人类开启“流浪地球”计划，试图带着地球逃离太阳系。'},
-      {tmdb_id:94997,media_type:'tv',title:'人生切割术',original_title:'Severance',year:'2022',rating:8.4,poster_path:'/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',poster_url:'https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',overview:'员工的工作记忆与生活记忆被彻底分离。'}
+      {tmdb_id:94997,media_type:'tv',title:'人生切割术',original_title:'Severance',year:'2022',rating:8.4,series_status:'ongoing',series_status_label:'未完结',poster_path:'/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',poster_url:'https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg',overview:'员工的工作记忆与生活记忆被彻底分离。'}
     ];
     const demoRequests = [
       {id:1,user_id:2,username:'mama',title:'沙丘2',year:'2024',media_type:'movie',tmdb_id:693134,status:'searching',status_name:'寻找中',admin_note:'正在找合适的 4K 国语字幕版',display_name:'妈妈',created_at:new Date().toISOString(),poster_url:'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg'},
@@ -441,7 +449,7 @@
     }
     function renderMovies(items,title='匹配结果') {
       const root=$('movieResults'); $('resultCount').textContent=`${items.length} 部`; $('resultTitle').textContent=title;
-      root.className='movie-grid'; root.innerHTML=items.map((item,index)=>{const admin=currentUser?.role==='admin';const isDouban=item.source==='douban';const label=isDouban?'匹配 TMDB':item.in_library?'已入库':admin?'未入库':'我想看';const disabled=!isDouban&&(item.in_library||admin);const actionAttribute=isDouban?`data-detail-index="${index}"`:`data-request-index="${index}"`;const sourceMeta=isDouban?`豆瓣 ${escapeHtml(item.douban_id)}`:`TMDB ${item.tmdb_id}`;const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'剧集');return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" aria-label="查看《${escapeHtml(item.title)}》详情">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${item.rating?`<span class="rating">★ ${item.rating}</span>`:''}</button><div class="movie-body"><button class="movie-title movie-title-button" data-detail-index="${index}">${escapeHtml(item.title)}</button><div class="movie-meta">${escapeHtml(item.year||'年份未知')} · ${sourceMeta}</div><div class="detail-hint">${isDouban?'打开时自动匹配 TMDB':'点击查看剧情与演职员'}</div><button class="btn ${disabled?'':'btn-primary'} btn-small" ${actionAttribute} ${disabled?'disabled':''}>${label}</button></div></article>`}).join('');
+      root.className='movie-grid'; root.innerHTML=items.map((item,index)=>{const admin=currentUser?.role==='admin';const isDouban=item.source==='douban';const isOngoing=item.series_status==='ongoing';const label=isDouban?'匹配 TMDB':item.in_library?'已入库':admin?'未入库':isOngoing?'提交求片需求':'我想看';const disabled=!isDouban&&(item.in_library||admin);const actionAttribute=isDouban?`data-detail-index="${index}"`:`data-request-index="${index}"`;const sourceMeta=isDouban?`豆瓣 ${escapeHtml(item.douban_id)}`:`TMDB ${item.tmdb_id}`;const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'剧集');const statusText=isOngoing?'未完结资源 · 直接提交求片需求':item.series_status_label;const seriesStatus=item.media_type==='tv'&&statusText?`<span class="series-status ${escapeHtml(item.series_status)}">${escapeHtml(statusText)}</span>`:'';return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" aria-label="查看《${escapeHtml(item.title)}》详情">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${item.rating?`<span class="rating">★ ${item.rating}</span>`:''}</button><div class="movie-body"><button class="movie-title movie-title-button" data-detail-index="${index}">${escapeHtml(item.title)}</button><div class="movie-meta">${escapeHtml(item.year||'年份未知')} · ${sourceMeta}</div>${seriesStatus}<div class="detail-hint">${isDouban?'打开时自动匹配 TMDB':isOngoing?'这类资源由管理员统一处理':'点击查看剧情与演职员'}</div><button class="btn ${disabled?'':'btn-primary'} btn-small" ${actionAttribute} ${disabled?'disabled':''}>${label}</button></div></article>`}).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)]));
       root.querySelectorAll('[data-request-index]').forEach(button=>button.onclick=()=>submitRequest(items[Number(button.dataset.requestIndex)],button));
     }
@@ -518,7 +526,7 @@
     function renderDetails(item) {
       const admin=currentUser?.role==='admin'; const disabled=item.in_library;
       const length=item.media_type==='movie'?(item.runtime?`${item.runtime} 分钟`:'时长未知'):(item.number_of_seasons?`${item.number_of_seasons} 季 · ${item.number_of_episodes} 集`:item.episode_runtime?`单集约 ${item.episode_runtime} 分钟`:'集数未知');
-      const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,length,...(item.genres||[])];
+      const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,...(item.series_status_label?[item.series_status_label]:[]),length,...(item.genres||[])];
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
       const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
       const resources=item.dian_resources||[];

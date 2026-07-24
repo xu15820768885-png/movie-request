@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import time
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock, Thread
@@ -658,7 +659,7 @@ def tmdb_media_item(
     original = item.get("original_title") or item.get("original_name") or ""
     poster_path = item.get("poster_path") or ""
     tmdb_id = int(item.get("id") or 0)
-    return {
+    result = {
         "tmdb_id": tmdb_id,
         "media_type": media_type,
         "title": title,
@@ -671,6 +672,44 @@ def tmdb_media_item(
         "vote_count": int(item.get("vote_count") or 0),
         "in_library": tmdb_id in library_ids,
     }
+    if media_type == "tv":
+        raw_status = str(item.get("status") or "").strip()
+        if raw_status == "Ended":
+            result.update({"series_status": "ended", "series_status_label": "已完结"})
+        elif raw_status == "Canceled":
+            result.update({"series_status": "canceled", "series_status_label": "已取消"})
+        elif raw_status:
+            result.update({"series_status": "ongoing", "series_status_label": "未完结"})
+    return result
+
+
+def enrich_tmdb_tv_statuses(items: list[dict[str, Any]]) -> None:
+    tv_items = [
+        item for item in items
+        if item.get("media_type") == "tv" and int(item.get("id") or 0) > 0
+    ]
+    if not tv_items:
+        return
+
+    def fetch(item: dict[str, Any]) -> tuple[int, str]:
+        tmdb_id = int(item.get("id") or 0)
+        try:
+            detail = tmdb_get(f"/tv/{tmdb_id}", {"language": "zh-CN"})
+            return tmdb_id, str(detail.get("status") or "")
+        except HTTPException:
+            return tmdb_id, ""
+
+    statuses: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(tv_items))) as executor:
+        futures = [executor.submit(fetch, item) for item in tv_items]
+        for future in as_completed(futures):
+            tmdb_id, status = future.result()
+            if status:
+                statuses[tmdb_id] = status
+    for item in tv_items:
+        status = statuses.get(int(item.get("id") or 0))
+        if status:
+            item["status"] = status
 
 
 def douban_get(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -1016,13 +1055,16 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         {"query": query, "language": "zh-CN", "include_adult": "false", "page": 1},
     )
     library_ids = emby_library_tmdb_ids()
+    source_items = [
+        item for item in data.get("results", [])
+        if item.get("media_type") in ("movie", "tv")
+    ][:20]
+    enrich_tmdb_tv_statuses(source_items)
     results = []
-    for item in data.get("results", []):
+    for item in source_items:
         media_type = item.get("media_type")
-        if media_type not in ("movie", "tv"):
-            continue
         results.append(tmdb_media_item(item, media_type, library_ids))
-    return {"results": results[:20]}
+    return {"results": results}
 
 
 @APP.get("/api/charts/{chart_name}")
