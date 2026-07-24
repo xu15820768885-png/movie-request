@@ -545,7 +545,7 @@
       button.disabled=true; button.textContent='转存中…';
       if(status){status.className='resource-transfer-status';status.textContent='正在连接癫影并验证115写入结果…';}
       try {
-        const result=await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,title:currentDetail.title})});
+        const result=await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',title:currentDetail.title})});
         button.textContent=result.mode==='offline'?'离线下载中':'已完成转存';
         if(status){status.className='resource-transfer-status success';status.textContent=result.message||'115已确认创建任务';}
         toast(result.message||`《${currentDetail.title}》已提交到 115`);

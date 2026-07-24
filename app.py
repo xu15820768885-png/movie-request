@@ -377,6 +377,37 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     return links
 
 
+def dian_share_codes(data: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    for key in (
+        "share_code", "sharecode", "shareCode",
+        "unlock_code", "unlockCode", "code",
+    ):
+        value = str(data.get(key) or "").strip()
+        if value and value not in codes:
+            codes.append(value)
+    return codes
+
+
+def dian_receive_code(data: dict[str, Any]) -> str:
+    return str(
+        data.get("receive_code")
+        or data.get("receivecode")
+        or data.get("receiveCode")
+        or data.get("access_code")
+        or data.get("password")
+        or data.get("pwd")
+        or ""
+    ).strip()
+
+
+def build_115_share_link(share_code: str, receive_code: str = "") -> str:
+    link = f"https://115cdn.com/s/{quote(share_code, safe='')}"
+    if receive_code:
+        link += f"?password={quote(receive_code, safe='')}"
+    return link
+
+
 def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
     """Flatten Dian's share wrapper into the fields used by the member UI."""
     nested_resource = item.get("resource")
@@ -478,6 +509,10 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
             ),
             "hot": pick(
                 "hot", "heat", "hotness", "score", "views", "view_count",
+            ),
+            "dian_share_code": pick(
+                "share_code", "sharecode", "shareCode",
+                "unlock_code", "unlockCode",
             ),
         }
     )
@@ -1249,28 +1284,50 @@ async def dian_transfer(
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
     links = extract_dian_transfer_links(data)
-    share_code = str(
-        data.get("share_code")
-        or data.get("sharecode")
-        or data.get("shareCode")
-        or ""
-    ).strip()
-    receive_code = str(
-        data.get("receive_code")
-        or data.get("receivecode")
-        or data.get("receiveCode")
-        or data.get("access_code")
-        or data.get("password")
-        or data.get("pwd")
-        or ""
-    ).strip()
-    if not links and share_code:
-        share_link = f"https://115cdn.com/s/{quote(share_code, safe='')}"
-        if receive_code:
-            share_link += f"?password={quote(receive_code, safe='')}"
-        links = [share_link]
+    code_candidates = dian_share_codes(data)
+    payload_code = str(payload.get("dian_share_code") or "").strip()
+    if payload_code and payload_code not in code_candidates:
+        code_candidates.append(payload_code)
+    checked_fields: list[str] = []
+    initial_receive_code = dian_receive_code(data)
+    if not links and code_candidates and initial_receive_code:
+        links = [
+            build_115_share_link(
+                code_candidates[0],
+                initial_receive_code,
+            )
+        ]
     if not links:
-        raise HTTPException(502, "癫影没有返回可用的分享链接或离线地址")
+        for code in code_candidates:
+            checked = dian_call("check_sharecode", code)
+            checked_data_value = checked.get("data", checked)
+            checked_data = (
+                checked_data_value
+                if isinstance(checked_data_value, dict)
+                else {"url": checked_data_value}
+            )
+            checked_fields.extend(str(key) for key in checked_data.keys())
+            links = extract_dian_transfer_links(checked_data)
+            if links:
+                break
+            checked_codes = dian_share_codes(checked_data)
+            checked_receive_code = dian_receive_code(checked_data)
+            if checked_codes and checked_receive_code:
+                links = [
+                    build_115_share_link(
+                        checked_codes[0],
+                        checked_receive_code,
+                    )
+                ]
+                break
+    if not links:
+        unlock_fields = ", ".join(sorted(str(key) for key in data.keys())) or "无"
+        checked_text = ", ".join(sorted(set(checked_fields))) or "未取得"
+        raise HTTPException(
+            502,
+            "癫影没有返回可用链接；"
+            f"解锁字段：{unlock_fields}；再次获取字段：{checked_text}",
+        )
     share_url = links[0]
     client = p115_client()
     with db() as connection:

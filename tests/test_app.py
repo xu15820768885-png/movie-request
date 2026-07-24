@@ -473,6 +473,55 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(client.received, {"file_id": "101,202", "cid": "7788"})
 
+    def test_dian_transfer_fetches_link_after_unlock(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                items = [{"fid": "900", "n": "鬼谜东宫"}] if hasattr(self, "received") else []
+                return {"state": True, "data": {"list": items}}
+
+            def share_snap(self, *_args, **kwargs):
+                self.share_url = kwargs["share_url"]
+                return {"state": True, "data": {"list": [{"fid": "101"}]}}
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+
+        def fake_dian(method, payload):
+            if method == "unlock":
+                return {"data": {"share_code": "lookup-token"}}
+            self.assertEqual(method, "check_sharecode")
+            self.assertEqual(payload, "lookup-token")
+            return {
+                "data": {
+                    "share_code": "example115code",
+                    "receive_code": "abcd",
+                }
+            }
+
+        with patch.object(app, "dian_call", side_effect=fake_dian):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "鬼谜东宫",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertEqual(result["mode"], "share")
+        self.assertEqual(
+            client.share_url,
+            "https://115cdn.com/s/example115code?password=abcd",
+        )
+
     def test_115cdn_url_is_recognized_as_share(self):
         self.assertTrue(
             app.is_115_share_url(
