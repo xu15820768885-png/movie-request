@@ -377,7 +377,9 @@
     let needsSetup = false;
     let requestsCache = [];
     let currentDetail = null;
+    let detailLoadSequence = 0;
     const detailCache = new Map();
+    const resourceCache = new Map();
     const statusOptions = {pending:'待处理', approved:'已收到', searching:'寻找中', available:'已入库', rejected:'暂时无法完成'};
     const demoMovies = [
       {tmdb_id:157336,media_type:'movie',title:'星际穿越',original_title:'Interstellar',year:'2014',rating:8.5,in_library:true,poster_path:'/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',overview:'一队探险家穿越虫洞，为人类寻找新的家园。'},
@@ -455,23 +457,36 @@
       return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','悬疑'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?52:0,number_of_seasons:item.media_type==='tv'?3:0,number_of_episodes:item.media_type==='tv'?24:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',dian_resources:previewResources(item),recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
     }
     async function openDetails(item) {
-      currentDetail=null; $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden'; $('detailCard').innerHTML='<div class="detail-loading">正在读取 TMDB 影片详情…</div>';
+      const loadId=++detailLoadSequence;
+      currentDetail=null; $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
+      renderDetails({...item,genres:[],directors:[],cast:[],recommendations:[],dian_resources:[],dian_loading:true,details_loading:true});
       try {
         const requestedKey=item.source==='douban'?`douban:${item.media_type}:${item.douban_id}`:`tmdb:${item.media_type}:${item.tmdb_id}`;
-        if(detailCache.has(requestedKey)){currentDetail=detailCache.get(requestedKey);renderDetails(currentDetail);return;}
         let resolved=item;
         if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};}
         const tmdbKey=`tmdb:${resolved.media_type}:${resolved.tmdb_id}`;
-        let detail;
-        if(preview) detail=previewDetails(resolved);
-        else {
-          const [detailResult,resourceResult]=await Promise.all([
-            detailCache.has(tmdbKey)?Promise.resolve(detailCache.get(tmdbKey)):api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`),
-            api(`/api/dian/resources/${resolved.media_type}/${resolved.tmdb_id}`).catch(error=>({resources:[],error:error.message}))
-          ]);
-          detail={...detailResult,dian_resources:(resourceResult.resources||[]).map((resource,index)=>normalizeResource(resource,index,resolved)),dian_error:resourceResult.error||''};
+        if(preview){
+          const detail=previewDetails(resolved);
+          detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);
+          if(loadId!==detailLoadSequence)return;
+          currentDetail=detail;renderDetails(detail);return;
         }
+        const cachedResources=resourceCache.get(tmdbKey);
+        const resourcePromise=cachedResources
+          ? Promise.resolve(cachedResources)
+          : api(`/api/dian/resources/${resolved.media_type}/${resolved.tmdb_id}`)
+              .then(result=>({resources:(result.resources||[]).map((resource,index)=>normalizeResource(resource,index,resolved)),error:''}))
+              .catch(error=>({resources:[],error:error.message}));
+        const detailResult=detailCache.get(requestedKey)||detailCache.get(tmdbKey)||await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`);
+        if(loadId!==detailLoadSequence)return;
+        const detail={...detailResult,dian_resources:cachedResources?.resources||[],dian_error:cachedResources?.error||'',dian_loading:!cachedResources,details_loading:false};
         detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail);
+        resourcePromise.then(resourceResult=>{
+          if(resourceResult.error==='')resourceCache.set(tmdbKey,resourceResult);
+          if(loadId!==detailLoadSequence||!currentDetail)return;
+          const complete={...currentDetail,dian_resources:resourceResult.resources,dian_error:resourceResult.error,dian_loading:false};
+          detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);
+        });
       }
       catch(error){ $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><div class="detail-loading">${escapeHtml(error.message)}</div>`; bindDetailActions(); }
     }
@@ -496,16 +511,19 @@
       };
     }
     function renderDetails(item) {
-      const admin=currentUser?.role==='admin'; const disabled=item.in_library||admin; const requestLabel=item.in_library?'已入库':admin?'管理员仅查看':'我想看';
+      const admin=currentUser?.role==='admin'; const disabled=item.in_library;
       const length=item.media_type==='movie'?(item.runtime?`${item.runtime} 分钟`:'时长未知'):(item.number_of_seasons?`${item.number_of_seasons} 季 · ${item.number_of_episodes} 集`:item.episode_runtime?`单集约 ${item.episode_runtime} 分钟`:'集数未知');
       const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,length,...(item.genres||[])];
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
       const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
       const resources=item.dian_resources||[];
       const resourceCards=resources.map((resource,index)=>`<article class="resource-card"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="resource-tags"><span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)} · ${escapeHtml(resource.size_gb)} GB<br>${escapeHtml(resource.files)} · 热度 ${escapeHtml(resource.hot)}</div></div><button class="btn btn-primary" data-transfer-index="${index}">转存这个版本</button></article>`).join('');
-      const dianSection=!admin&&!item.in_library?`<section class="dian-section"><div class="dian-head"><div><h3>${resources.length?`癫影找到 ${resources.length} 个可转存版本`:'癫影暂时没有合适资源'}</h3><div class="dian-source">${resources.length?'先看清晰度、音轨、字幕和大小，再决定是否转存。':item.dian_error?escapeHtml(item.dian_error):'你仍然可以提交求片，由管理员去其他资源网站寻找。'}</div></div><div class="dian-source">按影片编号精确匹配</div></div>${resourceCards?`<div class="resource-list">${resourceCards}</div><div class="transfer-note">转存目录由管理员在“癫影与 115”中设置</div>`:''}</section>`:'';
-      const fallbackLabel=item.in_library?'已入库':admin?'管理员仅查看':resources.length?'没有合适版本，仍然求片':'癫影暂无资源，提交求片';
-      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div></div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'TMDB 暂无剧情简介。')}</p><div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||'TMDB 暂无资料')}</p></div><div class="detail-block"><h3>主要演员</h3><p>${cast}</p></div></div>${dianSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button></div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
+      const dianTitle=item.dian_loading?'正在读取癫影资源…':resources.length?`癫影找到 ${resources.length} 个可转存版本`:'癫影暂时没有合适资源';
+      const dianHint=item.dian_loading?'影片详情已经显示，资源列表会在读取完成后自动出现。':resources.length?'先看清晰度、音轨、字幕和大小，再决定是否转存。':item.dian_error?escapeHtml(item.dian_error):admin?'当前没有匹配到可转存版本。':'你仍然可以提交求片，由管理员去其他资源网站寻找。';
+      const dianSection=(admin||!item.in_library)?`<section class="dian-section"><div class="dian-head"><div><h3>${dianTitle}</h3><div class="dian-source">${dianHint}</div></div><div class="dian-source">按影片编号精确匹配</div></div>${resourceCards?`<div class="resource-list">${resourceCards}</div><div class="transfer-note">转存目录由管理员在“癫影与 115”中设置</div>`:''}</section>`:'';
+      const fallbackLabel=item.in_library?'已入库':resources.length?'没有合适版本，仍然求片':'癫影暂无资源，提交求片';
+      const requestAction=admin?'':`<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button>`;
+      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p><div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${dianSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}${requestAction}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
     }
@@ -523,7 +541,7 @@
         button.textContent='已加入转存'; toast(`《${currentDetail.title}》已转存到 115`);
       } catch(error) {button.disabled=false;button.textContent='重新转存';toast(error.message,true);}
     }
-    function closeDetails() { $('detailOverlay').classList.add('hidden'); document.body.style.overflow=''; currentDetail=null; }
+    function closeDetails() { detailLoadSequence++; $('detailOverlay').classList.add('hidden'); document.body.style.overflow=''; currentDetail=null; }
     async function submitRequest(item,button) {
       if(preview){ toast(`已选择《${item.title}》，正式版会提交给管理员`); return; }
       button.disabled=true; button.textContent='提交中…';
@@ -623,7 +641,7 @@
       } catch(error){toast(error.message,true);}
     }
     $('authForm').onsubmit=async event=>{event.preventDefault(); try { const path=needsSetup?'/api/bootstrap':'/api/login'; const body={username:$('username').value,password:$('password').value,display_name:$('displayName').value,tmdb_token:$('tmdbToken').value}; await api(path,{method:'POST',body:JSON.stringify(body)}); location.reload(); } catch(error){toast(error.message,true);} };
-    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); renderMovies(items.length?items:(preview?demoMovies:[]),`“${query}”的搜索结果`); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
+    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); renderMovies(items.length?items:(preview?demoMovies:[]),`“${query}”的搜索结果`); switchView('discover'); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
     $('detailOverlay').onclick=event=>{if(event.target===$('detailOverlay'))closeDetails();};
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});
