@@ -186,13 +186,36 @@ class MovieRequestTests(unittest.TestCase):
             {"id": 1, "name": "已播完", "status": "Ended"}, "tv", set()
         )
         ongoing = app.tmdb_media_item(
-            {"id": 2, "name": "连载中", "status": "Returning Series"}, "tv", set()
+            {
+                "id": 2,
+                "name": "连载中",
+                "status": "Returning Series",
+                "last_episode_to_air": {"season_number": 2, "episode_number": 5},
+                "next_episode_to_air": {"season_number": 2, "episode_number": 6},
+                "seasons": [{"season_number": 2, "episode_count": 10}],
+            },
+            "tv",
+            set(),
+        )
+        season_ended = app.tmdb_media_item(
+            {
+                "id": 4,
+                "name": "本季播完",
+                "status": "Returning Series",
+                "last_episode_to_air": {"season_number": 1, "episode_number": 9},
+                "next_episode_to_air": None,
+                "seasons": [{"season_number": 1, "episode_count": 9}],
+            },
+            "tv",
+            set(),
         )
         canceled = app.tmdb_media_item(
             {"id": 3, "name": "已取消", "status": "Canceled"}, "tv", set()
         )
-        self.assertEqual(ended["series_status_label"], "已完结")
-        self.assertEqual(ongoing["series_status_label"], "未完结")
+        self.assertEqual(ended["series_status_label"], "全剧已完结")
+        self.assertEqual(ongoing["series_status_label"], "第2季未完结")
+        self.assertEqual(season_ended["series_status_label"], "第1季已完结")
+        self.assertEqual(season_ended["series_status"], "season_ended")
         self.assertEqual(canceled["series_status_label"], "已取消")
 
     def test_search_enriches_tv_completion_status(self):
@@ -205,13 +228,19 @@ class MovieRequestTests(unittest.TestCase):
                     ]
                 }
             if path == "/tv/10":
-                return {"id": 10, "status": "Ended"}
+                return {
+                    "id": 10,
+                    "status": "Returning Series",
+                    "last_episode_to_air": {"season_number": 1, "episode_number": 8},
+                    "next_episode_to_air": None,
+                    "seasons": [{"season_number": 1, "episode_count": 8}],
+                }
             self.fail(f"unexpected TMDB path: {path}")
 
         with patch.object(app, "tmdb_get", side_effect=fake_tmdb):
             with patch.object(app, "emby_library_tmdb_ids", return_value=set()):
                 result = app.search("测试", self.token)
-        self.assertEqual(result["results"][0]["series_status_label"], "已完结")
+        self.assertEqual(result["results"][0]["series_status_label"], "第1季已完结")
         self.assertNotIn("series_status_label", result["results"][1])
 
     def test_douban_chart_is_marked_for_tmdb_resolution(self):

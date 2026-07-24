@@ -675,11 +675,40 @@ def tmdb_media_item(
     if media_type == "tv":
         raw_status = str(item.get("status") or "").strip()
         if raw_status == "Ended":
-            result.update({"series_status": "ended", "series_status_label": "已完结"})
+            result.update({"series_status": "ended", "series_status_label": "全剧已完结"})
         elif raw_status == "Canceled":
             result.update({"series_status": "canceled", "series_status_label": "已取消"})
         elif raw_status:
-            result.update({"series_status": "ongoing", "series_status_label": "未完结"})
+            last_episode = item.get("last_episode_to_air") or {}
+            season_number = int(last_episode.get("season_number") or 0)
+            last_episode_number = int(last_episode.get("episode_number") or 0)
+            season_episode_count = 0
+            for season in item.get("seasons") or []:
+                if int(season.get("season_number") or 0) == season_number:
+                    season_episode_count = int(season.get("episode_count") or 0)
+                    break
+            next_episode = item.get("next_episode_to_air") or {}
+            next_is_same_season = (
+                season_number > 0
+                and int(next_episode.get("season_number") or 0) == season_number
+            )
+            if (
+                season_number > 0
+                and season_episode_count > 0
+                and last_episode_number >= season_episode_count
+                and not next_is_same_season
+            ):
+                result.update(
+                    {
+                        "series_status": "season_ended",
+                        "series_status_label": f"第{season_number}季已完结",
+                    }
+                )
+            else:
+                label = f"第{season_number}季未完结" if season_number > 0 else "未完结"
+                result.update(
+                    {"series_status": "ongoing", "series_status_label": label}
+                )
     return result
 
 
@@ -691,25 +720,30 @@ def enrich_tmdb_tv_statuses(items: list[dict[str, Any]]) -> None:
     if not tv_items:
         return
 
-    def fetch(item: dict[str, Any]) -> tuple[int, str]:
+    def fetch(item: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         tmdb_id = int(item.get("id") or 0)
         try:
             detail = tmdb_get(f"/tv/{tmdb_id}", {"language": "zh-CN"})
-            return tmdb_id, str(detail.get("status") or "")
+            return tmdb_id, {
+                "status": detail.get("status"),
+                "last_episode_to_air": detail.get("last_episode_to_air"),
+                "next_episode_to_air": detail.get("next_episode_to_air"),
+                "seasons": detail.get("seasons") or [],
+            }
         except HTTPException:
-            return tmdb_id, ""
+            return tmdb_id, {}
 
-    statuses: dict[int, str] = {}
+    statuses: dict[int, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(6, len(tv_items))) as executor:
         futures = [executor.submit(fetch, item) for item in tv_items]
         for future in as_completed(futures):
-            tmdb_id, status = future.result()
-            if status:
-                statuses[tmdb_id] = status
+            tmdb_id, status_fields = future.result()
+            if status_fields.get("status"):
+                statuses[tmdb_id] = status_fields
     for item in tv_items:
-        status = statuses.get(int(item.get("id") or 0))
-        if status:
-            item["status"] = status
+        status_fields = statuses.get(int(item.get("id") or 0))
+        if status_fields:
+            item.update(status_fields)
 
 
 def douban_get(path: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
