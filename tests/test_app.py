@@ -425,6 +425,10 @@ class MovieRequestTests(unittest.TestCase):
 
     def test_dian_transfer_unlocks_and_receives_share(self):
         class FakeP115:
+            def fs_files(self, _payload):
+                items = [{"fid": "900", "n": "星际穿越"}] if hasattr(self, "received") else []
+                return {"state": True, "data": {"list": items}}
+
             def share_snap(self, *_args, **_kwargs):
                 return {"state": True, "data": {"list": [{"fid": "101"}, {"cid": "202"}]}}
 
@@ -461,6 +465,14 @@ class MovieRequestTests(unittest.TestCase):
 
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                tasks = (
+                    [{"info_hash": "abc123", "name": "episode.mkv"}]
+                    if hasattr(self, "offline_payload")
+                    else []
+                )
+                return {"state": True, "tasks": tasks}
+
             def clouddownload_task_add_url(self, payload):
                 self.offline_payload = payload
                 return {"state": True, "info_hash": "abc123"}
@@ -499,6 +511,14 @@ class MovieRequestTests(unittest.TestCase):
 
     def test_dian_transfer_submits_multiple_offline_links(self):
         class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                tasks = (
+                    [{"info_hash": "abc123", "name": "鬼谜东宫"}]
+                    if hasattr(self, "offline_payload")
+                    else []
+                )
+                return {"state": True, "tasks": tasks}
+
             def clouddownload_task_add_urls(self, payload):
                 self.offline_payload = payload
                 return {"state": True}
@@ -541,6 +561,37 @@ class MovieRequestTests(unittest.TestCase):
                 "wp_path_id": "7788",
             },
         )
+
+    def test_dian_transfer_rejects_false_positive_from_115(self):
+        class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                return {"state": True, "tasks": []}
+
+            def clouddownload_task_add_url(self, _payload):
+                return {"state": True, "info_hash": "abc123"}
+
+        with patch.object(
+            app,
+            "dian_call",
+            return_value={"data": {"offline_url": "ed2k://|file|episode.mkv|123|hash|/"}},
+        ):
+            with patch.object(app, "p115_client", return_value=FakeP115()):
+                with patch.object(app, "wait_for_p115_change", return_value=False):
+                    with self.assertRaises(app.HTTPException) as raised:
+                        asyncio.run(
+                            app.dian_transfer(
+                                FakeRequest(
+                                    {
+                                        "share_id": 11,
+                                        "resource_id": 22,
+                                        "title": "鬼谜东宫",
+                                    }
+                                ),
+                                self.token,
+                            )
+                        )
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertIn("没有创建云下载任务", raised.exception.detail)
 
 
 if __name__ == "__main__":

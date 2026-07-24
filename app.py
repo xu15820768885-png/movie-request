@@ -223,6 +223,24 @@ def response_message(payload: dict[str, Any], fallback: str) -> str:
     )
 
 
+def response_summary(payload: dict[str, Any]) -> str:
+    allowed = (
+        "state", "success", "errno", "errNo", "errcode", "code",
+        "error", "error_msg", "message", "msg", "task_id", "info_hash",
+    )
+    summary = {
+        key: payload[key]
+        for key in allowed
+        if key in payload and payload[key] not in (None, "")
+    }
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("task_id", "info_hash", "count", "file_id", "cid"):
+            if key in data and data[key] not in (None, ""):
+                summary[f"data.{key}"] = data[key]
+    return json.dumps(summary, ensure_ascii=False) if summary else "无状态字段"
+
+
 def is_115_share_url(value: str) -> bool:
     parsed = urlparse(value.strip())
     host = (parsed.hostname or "").lower()
@@ -239,11 +257,60 @@ def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
     if not isinstance(data, dict):
         return []
-    for key in ("list", "items", "shares", "records", "rows", "results", "resources", "data"):
+    for key in (
+        "list", "items", "shares", "records", "rows", "results",
+        "resources", "tasks", "data",
+    ):
         value = data.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
     return []
+
+
+def p115_folder_snapshot(client: Any, cid: str) -> set[tuple[str, str, str]]:
+    result = client.fs_files(
+        {
+            "cid": cid,
+            "limit": 200,
+            "show_dir": 1,
+            "cur": 1,
+            "o": "user_ptime",
+            "asc": 0,
+        }
+    )
+    if not response_ok(result):
+        raise HTTPException(502, response_message(result, "无法验证115目标目录"))
+    return {
+        (
+            str(item.get("fid") or item.get("file_id") or item.get("cid") or ""),
+            str(item.get("n") or item.get("file_name") or item.get("name") or ""),
+            str(item.get("s") or item.get("file_size") or item.get("size") or ""),
+        )
+        for item in extract_share_items(result)
+    }
+
+
+def p115_offline_snapshot(client: Any) -> set[tuple[str, str, str]]:
+    result = client.clouddownload_task_list({"page": 1, "page_size": 100})
+    if not response_ok(result):
+        raise HTTPException(502, response_message(result, "无法验证115云下载任务"))
+    return {
+        (
+            str(item.get("info_hash") or item.get("task_id") or item.get("id") or ""),
+            str(item.get("url") or item.get("name") or item.get("file_name") or ""),
+            str(item.get("status") or item.get("stat") or ""),
+        )
+        for item in extract_share_items(result)
+    }
+
+
+def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
+    for _ in range(4):
+        after = snapshot()
+        if after - before:
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
@@ -1139,6 +1206,7 @@ async def dian_transfer(
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
+        before_tasks = p115_offline_snapshot(client)
         if len(links) == 1:
             queued = client.clouddownload_task_add_url(
                 {"url": share_url, "wp_path_id": target_cid}
@@ -1152,6 +1220,14 @@ async def dian_transfer(
             queued = client.clouddownload_task_add_urls(offline_payload)
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+        if not wait_for_p115_change(
+            lambda: p115_offline_snapshot(client),
+            before_tasks,
+        ):
+            raise HTTPException(
+                502,
+                "115接口没有创建云下载任务；返回：" + response_summary(queued),
+            )
         send_telegram(
             f"☁️ 115离线任务已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
         )
@@ -1161,6 +1237,7 @@ async def dian_transfer(
             "message": f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录",
         }
 
+    before_files = p115_folder_snapshot(client, target_cid)
     snap = client.share_snap(0, share_url=share_url)
     if not response_ok(snap):
         raise HTTPException(502, response_message(snap, "无法读取115分享"))
@@ -1177,6 +1254,14 @@ async def dian_transfer(
     )
     if not response_ok(received):
         raise HTTPException(502, response_message(received, "115转存失败"))
+    if not wait_for_p115_change(
+        lambda: p115_folder_snapshot(client, target_cid),
+        before_files,
+    ):
+        raise HTTPException(
+            502,
+            "115接口没有把文件写入目标目录；返回：" + response_summary(received),
+        )
     send_telegram(
         f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
     )
