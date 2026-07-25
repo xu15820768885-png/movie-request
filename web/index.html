@@ -171,10 +171,14 @@
     label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
     .stack { display: grid; gap: 12px; }
     .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .user-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+    .user-row { display: grid; grid-template-columns: minmax(130px,.5fr) minmax(0,2.2fr); align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
     .user-row:last-child { border: 0; }
     .user-name { font-weight: 700; }
     .user-login { margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .user-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .user-editor { display: grid; grid-template-columns: minmax(110px,.7fr) minmax(130px,1fr) minmax(150px,1fr) auto auto; gap: 8px; align-items: center; }
+    .user-editor input { min-width: 0; }
+    .user-editor .btn { min-width: 56px; white-space: nowrap; }
     .detail-overlay { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 18px; background: rgba(5,4,3,.82); backdrop-filter: blur(14px); }
     .detail-card { position: relative; width: min(900px,100%); max-height: calc(100vh - 36px); overflow: auto; border: 1px solid #4a433c; border-radius: 24px; background: #171513; box-shadow: var(--shadow); }
     .detail-close { position: sticky; z-index: 4; top: 14px; float: right; width: 42px; height: 42px; margin: 14px 14px -56px 0; padding: 0; border: 1px solid rgba(255,255,255,.18); border-radius: 50%; color: white; background: rgba(10,9,8,.78); font-size: 22px; }
@@ -291,6 +295,9 @@
       .request-controls .btn { min-height: 40px; padding-inline: 14px; }
       .admin-request-actions { grid-template-columns: 1fr; }
       .admin-request-actions .btn { min-height: 42px; }
+      .user-row { grid-template-columns: 1fr; }
+      .user-editor { grid-template-columns: 1fr; }
+      .user-editor .btn { min-height: 42px; }
       .inline { grid-template-columns: 1fr; }
     }
   </style>
@@ -615,8 +622,36 @@
       catch(error){ toast(error.message,true); button.disabled=false; }
     }
     async function loadUsers() {
-      if(preview){ $('userList').innerHTML='<h3>已有成员</h3><div class="user-row"><div><div class="user-name">妈妈</div><div class="user-login">账号 mama · 正常使用</div></div><span class="badge badge-available">正常</span></div><div class="user-row"><div><div class="user-name">管理员</div><div class="user-login">账号 admin</div></div><span class="badge badge-approved">管理员</span></div>'; return; }
-      const users=(await api('/api/admin/users')).users; $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div>`).join('');
+      const users=preview
+        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1}]
+        : (await api('/api/admin/users')).users;
+      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div>${user.role==='admin'?'<div class="muted" style="font-size:12px">管理员账号不可在这里删除</div>':`<div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button><button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button></div>`}</div>`).join('');
+      $('userList').querySelectorAll('[data-user-save]').forEach(button=>button.onclick=()=>saveUser(Number(button.dataset.userSave),button));
+      $('userList').querySelectorAll('[data-user-delete]').forEach(button=>button.onclick=()=>deleteUser(Number(button.dataset.userDelete),button.dataset.userLabel,button));
+    }
+    async function saveUser(id,button) {
+      const display_name=document.querySelector(`[data-user-name="${id}"]`).value.trim();
+      const username=document.querySelector(`[data-user-login="${id}"]`).value.trim();
+      const password=document.querySelector(`[data-user-password="${id}"]`).value;
+      if(!display_name||!username)return toast('显示名称和登录账号不能为空',true);
+      if(password&&password.length<8)return toast('新密码至少需要 8 位',true);
+      if(preview){toast('预览模式：成员账号已更新');return;}
+      button.disabled=true;
+      try {
+        await api(`/api/admin/users/${id}`,{method:'PATCH',body:JSON.stringify({display_name,username,password})});
+        toast(password?'账号和密码已更新，成员需要重新登录':'成员账号已更新');
+        await loadUsers();
+      } catch(error){toast(error.message,true);button.disabled=false;}
+    }
+    async function deleteUser(id,label,button) {
+      if(!confirm(`确定永久删除“${label}”的账号吗？该成员的求片记录也会一起删除，无法恢复。`))return;
+      if(preview){toast('预览模式：成员账号已删除');return;}
+      button.disabled=true;
+      try {
+        await api(`/api/admin/users/${id}`,{method:'DELETE'});
+        toast('成员账号已删除');
+        await Promise.all([loadUsers(),loadRequests()]);
+      } catch(error){toast(error.message,true);button.disabled=false;}
     }
     async function loadSettings() {
       if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }

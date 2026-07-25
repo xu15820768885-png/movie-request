@@ -1921,20 +1921,54 @@ async def update_user(user_id: int, request: Request, movie_session: Optional[st
     if user_id == admin["id"] and payload.get("active") is False:
         raise HTTPException(400, "不能停用当前管理员")
     fields, values = [], []
+    if "username" in payload:
+        fields.append("username = ?")
+        values.append(clean_username(payload["username"]))
     if "display_name" in payload:
+        display_name = str(payload["display_name"]).strip()[:40]
+        if not display_name:
+            raise HTTPException(400, "显示名称不能为空")
         fields.append("display_name = ?")
-        values.append(str(payload["display_name"]).strip()[:40])
+        values.append(display_name)
     if "active" in payload:
         fields.append("active = ?")
         values.append(1 if payload["active"] else 0)
+    password_changed = False
     if payload.get("password"):
         fields.append("password_hash = ?")
         values.append(hash_password(clean_password(payload["password"])))
+        password_changed = True
     if not fields:
         return {"ok": True}
     values.append(user_id)
+    try:
+        with db() as connection:
+            existing = connection.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not existing:
+                raise HTTPException(404, "没有找到这个账号")
+            connection.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+            if password_changed:
+                connection.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(409, "这个账号已经存在") from error
+    return {"ok": True}
+
+
+@APP.delete("/api/admin/users/{user_id}")
+def delete_user(user_id: int, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    admin = require_admin(movie_session)
+    if user_id == admin["id"]:
+        raise HTTPException(400, "不能删除当前管理员")
     with db() as connection:
-        connection.execute(f"UPDATE users SET {', '.join(fields)} WHERE id = ?", values)
+        user = connection.execute(
+            "SELECT id, role FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if not user:
+            raise HTTPException(404, "没有找到这个账号")
+        if user["role"] == "admin":
+            raise HTTPException(400, "不能删除管理员账号")
+        connection.execute("DELETE FROM movie_requests WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
     return {"ok": True}
 
 
