@@ -363,6 +363,71 @@ class MovieRequestTests(unittest.TestCase):
             remaining = connection.execute("SELECT COUNT(*) FROM movie_requests").fetchone()[0]
         self.assertEqual(remaining, 0)
 
+    def test_admin_can_update_member_login_password_and_delete_account(self):
+        member_token = "member-session-token"
+        with app.db() as connection:
+            member_id = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                "VALUES('member', '旧名称', ?, 'member', ?)",
+                (app.hash_password("password123"), app.now_iso()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES(?, ?, ?)",
+                (
+                    hashlib.sha256(member_token.encode()).hexdigest(),
+                    member_id,
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                ),
+            )
+            timestamp = app.now_iso()
+            connection.execute(
+                "INSERT INTO movie_requests(user_id, tmdb_id, media_type, title, year, created_at, updated_at) "
+                "VALUES(?, 1, 'movie', '待清理影片', '2026', ?, ?)",
+                (member_id, timestamp, timestamp),
+            )
+
+        result = asyncio.run(
+            app.update_user(
+                member_id,
+                FakeRequest({
+                    "username": "new-member",
+                    "display_name": "新名称",
+                    "password": "newpassword123",
+                }),
+                self.token,
+            )
+        )
+        self.assertTrue(result["ok"])
+        with app.db() as connection:
+            member = connection.execute(
+                "SELECT username, display_name, password_hash FROM users WHERE id = ?",
+                (member_id,),
+            ).fetchone()
+            sessions = connection.execute(
+                "SELECT COUNT(*) FROM sessions WHERE user_id = ?", (member_id,)
+            ).fetchone()[0]
+        self.assertEqual(member["username"], "new-member")
+        self.assertEqual(member["display_name"], "新名称")
+        self.assertTrue(app.verify_password("newpassword123", member["password_hash"]))
+        self.assertEqual(sessions, 0)
+
+        self.assertTrue(app.delete_user(member_id, self.token)["ok"])
+        with app.db() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM users WHERE id = ?", (member_id,)).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM movie_requests WHERE user_id = ?", (member_id,)).fetchone()[0],
+                0,
+            )
+
+    def test_admin_cannot_delete_admin_account(self):
+        admin_id = app.session_user(self.token)["id"]
+        with self.assertRaises(app.HTTPException) as error:
+            app.delete_user(admin_id, self.token)
+        self.assertEqual(error.exception.status_code, 400)
+
     def test_telegram_messages_remove_old_reply_keyboard(self):
         with app.db() as connection:
             app.set_setting(connection, "telegram_token", "bot-token")
