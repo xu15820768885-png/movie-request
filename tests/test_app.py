@@ -657,14 +657,27 @@ class MovieRequestTests(unittest.TestCase):
         signin.assert_called_once_with("lucky", source="manual")
 
     def test_dian_signin_sends_telegram_record(self):
-        with patch.object(app, "dian_call", return_value={"message": "获得 5 积分"}):
+        signin_result = {
+            "message": "签到成功",
+            "data": {"signin_points": 5, "total_points": 128},
+        }
+        with patch.object(app, "dian_call", return_value=signin_result):
             with patch.object(app, "send_telegram") as send:
                 result = app.perform_dian_signin("lucky", source="auto")
-        self.assertEqual(result["message"], "获得 5 积分")
+        self.assertEqual(result["message"], "签到成功")
         self.assertIn("自动签到 · 运气签到", send.call_args.args[0])
-        self.assertIn("获得 5 积分", send.call_args.args[0])
+        self.assertIn("本次签到积分：5", send.call_args.args[0])
+        self.assertIn("当前总积分：128", send.call_args.args[0])
         with app.db() as connection:
             self.assertEqual(app.setting(connection, "dian_last_signin_status"), "success")
+
+    def test_dian_signin_extracts_points_from_message(self):
+        result = {"message": "签到成功，获得 8 积分，当前总积分 236"}
+        self.assertEqual(app.signin_points(result), ("8", "236"))
+
+    def test_dian_signin_supports_result_and_points_response(self):
+        result = {"data": {"result": 6, "points": 242}}
+        self.assertEqual(app.signin_points(result), (6, 242))
 
     def test_failed_dian_signin_sends_telegram_record_and_marks_day(self):
         with patch.object(

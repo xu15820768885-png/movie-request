@@ -194,6 +194,89 @@ def signin_result_message(result: dict[str, Any], default: str) -> str:
     )
 
 
+def signin_points(result: dict[str, Any]) -> tuple[Any, Any]:
+    """Extract the points earned and current total from Dian response variants."""
+    earned_keys = (
+        "earned_points", "points_earned", "reward_points", "signin_points",
+        "sign_in_points", "added_points", "add_points", "gain_points",
+        "result_points", "score_earned", "reward_score", "signin_score",
+        "result_score",
+        "签到积分", "获得积分",
+    )
+    total_keys = (
+        "total_points", "total_point", "points_total", "current_points",
+        "user_points", "point_balance", "points_balance", "total_score",
+        "score_total", "current_score", "user_score", "score_balance",
+        "balance_points", "总积分", "当前积分", "积分余额",
+    )
+
+    objects: list[dict[str, Any]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            objects.append(value)
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    def pick(keys: tuple[str, ...]) -> Any:
+        for item in objects:
+            for key in keys:
+                value = item.get(key)
+                if value is not None and not isinstance(value, (dict, list, bool)):
+                    text = str(value).strip()
+                    if text:
+                        return value
+        return None
+
+    collect(result)
+    earned = pick(earned_keys)
+    total = pick(total_keys)
+    if earned is None:
+        # Some Dian versions return the random check-in result separately and
+        # use ``points``/``score`` for the account balance.
+        signin_result = pick(("signin_result", "sign_in_result", "result"))
+        balance = pick(("points", "point", "score"))
+        if signin_result is not None and balance is not None:
+            earned, total = signin_result, total if total is not None else balance
+        else:
+            earned = balance
+    message = signin_result_message(result, "")
+    if earned is None:
+        match = re.search(
+            r"(?:获得|增加|奖励|本次(?:签到)?)[^\d+-]*([+-]?\d+(?:\.\d+)?)\s*积分",
+            message,
+        )
+        if match:
+            earned = match.group(1).lstrip("+")
+    if total is None:
+        match = re.search(
+            r"(?:总积分|当前积分|积分余额)[^\d+-]*([+-]?\d+(?:\.\d+)?)",
+            message,
+        )
+        if match:
+            total = match.group(1)
+    return earned, total
+
+
+def signin_notification(result: dict[str, Any], source_label: str, mode_label: str) -> str:
+    message = signin_result_message(result, "签到成功")
+    earned, total = signin_points(result)
+    lines = [
+        "✅ 癫影签到成功",
+        "",
+        f"{source_label} · {mode_label}",
+        f"结果：{message}",
+    ]
+    if earned is not None:
+        lines.append(f"本次签到积分：{earned}")
+    if total is not None:
+        lines.append(f"当前总积分：{total}")
+    return "\n".join(lines)
+
+
 def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
     if mode not in ("normal", "lucky"):
         raise HTTPException(400, "签到模式无效")
@@ -222,9 +305,7 @@ def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
         set_setting(connection, "dian_last_signin_status", "success")
         set_setting(connection, "dian_last_signin_message", message)
         set_setting(connection, "dian_last_signin_result", json.dumps(result, ensure_ascii=False))
-    send_telegram(
-        f"✅ 癫影签到成功\n\n{source_label} · {mode_label}\n结果：{message}"
-    )
+    send_telegram(signin_notification(result, source_label, mode_label))
     return result
 
 
