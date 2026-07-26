@@ -659,7 +659,12 @@ class MovieRequestTests(unittest.TestCase):
     def test_dian_signin_sends_telegram_record(self):
         signin_result = {
             "message": "签到成功",
-            "data": {"signin_points": 5, "total_points": 128},
+            "data": {
+                "mode": "lucky",
+                "award": 5,
+                "new_balance": 128,
+                "lucky_tier": "normal",
+            },
         }
         with patch.object(app, "dian_call", return_value=signin_result):
             with patch.object(app, "send_telegram") as send:
@@ -670,6 +675,16 @@ class MovieRequestTests(unittest.TestCase):
         self.assertIn("当前总积分：128", send.call_args.args[0])
         with app.db() as connection:
             self.assertEqual(app.setting(connection, "dian_last_signin_status"), "success")
+
+    def test_dian_signin_keeps_zero_or_negative_award(self):
+        self.assertEqual(
+            app.signin_points({"data": {"award": 0, "new_balance": 128}}),
+            (0, 128),
+        )
+        self.assertEqual(
+            app.signin_points({"data": {"award": -2, "new_balance": 126}}),
+            (-2, 126),
+        )
 
     def test_dian_signin_extracts_points_from_message(self):
         result = {"message": "签到成功，获得 8 积分，当前总积分 236"}

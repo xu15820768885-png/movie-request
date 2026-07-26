@@ -197,14 +197,14 @@ def signin_result_message(result: dict[str, Any], default: str) -> str:
 def signin_points(result: dict[str, Any]) -> tuple[Any, Any]:
     """Extract the points earned and current total from Dian response variants."""
     earned_keys = (
-        "earned_points", "points_earned", "reward_points", "signin_points",
+        "award", "earned_points", "points_earned", "reward_points", "signin_points",
         "sign_in_points", "added_points", "add_points", "gain_points",
         "result_points", "score_earned", "reward_score", "signin_score",
         "result_score",
         "签到积分", "获得积分",
     )
     total_keys = (
-        "total_points", "total_point", "points_total", "current_points",
+        "new_balance", "total_points", "total_point", "points_total", "current_points",
         "user_points", "point_balance", "points_balance", "total_score",
         "score_total", "current_score", "user_score", "score_balance",
         "balance_points", "总积分", "当前积分", "积分余额",
