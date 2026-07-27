@@ -25,6 +25,7 @@ class MovieRequestTests(unittest.TestCase):
             app.EMBY_LIBRARY_CACHE.update(
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
+            app.EMBY_EPISODE_CACHE.clear()
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -106,6 +107,71 @@ class MovieRequestTests(unittest.TestCase):
             "http://nas:8096/emby/Items",
         )
 
+    def test_emby_series_episode_progress_reads_latest_real_episode(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://nas:8096")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        responses = [
+            FakeResponse(
+                {
+                    "Items": [
+                        {
+                            "Id": "series-101172",
+                            "ProviderIds": {"Tmdb": "101172"},
+                        }
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "Items": [
+                        {"ParentIndexNumber": 1, "IndexNumber": 232},
+                        {"ParentIndexNumber": 1, "IndexNumber": 233},
+                        {
+                            "ParentIndexNumber": 1,
+                            "IndexNumber": 234,
+                            "IsMissing": True,
+                        },
+                    ]
+                }
+            ),
+        ]
+        with patch.object(app.requests, "get", side_effect=responses) as get:
+            result = app.emby_series_episode_progress(101172)
+
+        self.assertEqual(result["emby_latest_episode_number"], 233)
+        self.assertEqual(result["emby_episode_label"], "已入库至第233集")
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(
+            get.call_args_list[0].kwargs["params"]["AnyProviderIdEquals"],
+            "tmdb.101172",
+        )
+
+    def test_emby_episode_progress_has_a_separate_nonblocking_endpoint(self):
+        with patch.object(app, "emby_library_tmdb_ids", return_value={101172}):
+            with patch.object(
+                app,
+                "emby_series_episode_progress",
+                return_value={
+                    "emby_latest_episode_number": 232,
+                    "emby_episode_label": "已入库至第232集",
+                },
+            ) as progress:
+                result = app.emby_episode_progress(101172, self.token)
+        self.assertEqual(result["emby_latest_episode_number"], 232)
+        progress.assert_called_once_with(101172, known_in_library=True)
+
     def test_request_rejected_when_already_in_emby(self):
         canonical = {
             "id": 157336,
@@ -155,6 +221,33 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["cast"][0]["character"], "库珀")
         self.assertEqual(result["recommendations"][0]["title"], "盗梦空间")
         self.assertIn("youtube.com", result["trailer_url"])
+
+    def test_tv_details_do_not_wait_for_emby_episode_scan(self):
+        details = {
+            "id": 101172,
+            "name": "吞噬星空",
+            "first_air_date": "2020-11-29",
+            "status": "Returning Series",
+            "last_episode_to_air": {"season_number": 1, "episode_number": 233},
+            "next_episode_to_air": {
+                "season_number": 1,
+                "episode_number": 234,
+                "air_date": "2026-08-03",
+            },
+            "seasons": [{"season_number": 1, "episode_count": 234}],
+            "credits": {"cast": [], "crew": []},
+            "videos": {"results": []},
+            "recommendations": {"results": []},
+        }
+        with patch.object(app, "tmdb_get", return_value=details):
+            with patch.object(
+                app,
+                "emby_series_episode_progress",
+                side_effect=AssertionError("详情主请求不应扫描 Emby 剧集"),
+            ):
+                result = app.media_details("tv", 101172, self.token)
+        self.assertEqual(result["latest_episode_label"], "更新至第233集")
+        self.assertNotIn("emby_episode_label", result)
 
     def test_tmdb_chart_filters_people_and_normalizes_media(self):
         payload = {
@@ -216,6 +309,8 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(ended["series_status_label"], "全剧已完结")
         self.assertEqual(ongoing["series_status_label"], "第2季未完结")
+        self.assertEqual(ongoing["latest_episode_label"], "更新至第2季第5集")
+        self.assertEqual(ongoing["next_episode_label"], "下一集为第2季第6集")
         self.assertEqual(season_ended["series_status_label"], "第1季已完结")
         self.assertEqual(season_ended["series_status"], "season_ended")
         self.assertEqual(canceled["series_status_label"], "已取消")
