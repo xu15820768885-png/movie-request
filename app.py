@@ -46,6 +46,7 @@ EMBY_LIBRARY_CACHE: dict[str, Any] = {
     "ids": set(),
     "refreshing": False,
 }
+EMBY_EPISODE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 P115_APPS = {
@@ -929,6 +930,116 @@ def emby_api_url(base_url: str, path: str) -> str:
     return f"{base}/emby/{path.lstrip('/')}"
 
 
+def episode_progress_label(
+    season_number: int,
+    episode_number: int,
+    prefix: str,
+) -> str:
+    if episode_number <= 0:
+        return ""
+    if season_number > 1:
+        return f"{prefix}第{season_number}季第{episode_number}集"
+    return f"{prefix}第{episode_number}集"
+
+
+def emby_series_episode_progress(
+    tmdb_id: int,
+    known_in_library: bool = False,
+) -> dict[str, Any]:
+    with db() as connection:
+        base_url = setting(connection, "emby_url")
+        api_key = setting(connection, "emby_api_key")
+    if not base_url or not api_key or tmdb_id <= 0:
+        return {}
+
+    cache_key = hashlib.sha256(
+        f"{base_url}|{api_key}|tv|{tmdb_id}".encode()
+    ).hexdigest()
+    now = time.monotonic()
+    with CACHE_LOCK:
+        cached = EMBY_EPISODE_CACHE.get(cache_key)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+
+    headers = {"X-Emby-Token": api_key, "Accept": "application/json"}
+    series_params: dict[str, Any] = {
+        "Recursive": "true",
+        "IncludeItemTypes": "Series",
+        "Fields": "ProviderIds",
+        "AnyProviderIdEquals": f"tmdb.{tmdb_id}",
+        "Limit": 10,
+    }
+    try:
+        series_response = requests.get(
+            emby_api_url(base_url, "/Items"),
+            headers=headers,
+            params=series_params,
+            timeout=20,
+        )
+        series_response.raise_for_status()
+        series_items = series_response.json().get("Items", [])
+        if not series_items and known_in_library:
+            series_params.pop("AnyProviderIdEquals", None)
+            series_params["Limit"] = 10000
+            series_response = requests.get(
+                emby_api_url(base_url, "/Items"),
+                headers=headers,
+                params=series_params,
+                timeout=20,
+            )
+            series_response.raise_for_status()
+            series_items = series_response.json().get("Items", [])
+
+        series_id = ""
+        for item in series_items:
+            provider_ids = item.get("ProviderIds") or {}
+            raw_id = provider_ids.get("Tmdb") or provider_ids.get("TMDB")
+            if str(raw_id or "") == str(tmdb_id):
+                series_id = str(item.get("Id") or item.get("id") or "")
+                break
+        if not series_id:
+            return {}
+
+        episodes_response = requests.get(
+            emby_api_url(base_url, f"/Shows/{quote(series_id, safe='')}/Episodes"),
+            headers=headers,
+            params={
+                "Fields": "ParentIndexNumber,IndexNumber,IsMissing,LocationType",
+                "IsMissing": "false",
+            },
+            timeout=20,
+        )
+        episodes_response.raise_for_status()
+        latest_season = 0
+        latest_episode = 0
+        for episode in episodes_response.json().get("Items", []):
+            if episode.get("IsMissing") is True or episode.get("LocationType") == "Virtual":
+                continue
+            season_number = int(episode.get("ParentIndexNumber") or 0)
+            episode_number = int(episode.get("IndexNumber") or 0)
+            if episode_number > 0 and (season_number, episode_number) > (
+                latest_season,
+                latest_episode,
+            ):
+                latest_season, latest_episode = season_number, episode_number
+        if latest_episode <= 0:
+            return {}
+        result = {
+            "emby_latest_season_number": latest_season,
+            "emby_latest_episode_number": latest_episode,
+            "emby_episode_label": episode_progress_label(
+                latest_season,
+                latest_episode,
+                "已入库至",
+            ),
+        }
+        with CACHE_LOCK:
+            EMBY_EPISODE_CACHE[cache_key] = (now + 300, dict(result))
+        return result
+    except (requests.RequestException, ValueError, TypeError):
+        return {}
+
+
 def emby_library_tmdb_ids(
     force: bool = False,
     prefer_cached: bool = False,
@@ -1088,24 +1199,46 @@ def tmdb_media_item(
         "in_library": tmdb_id in library_ids,
     }
     if media_type == "tv":
+        last_episode = item.get("last_episode_to_air") or {}
+        last_season_number = int(last_episode.get("season_number") or 0)
+        last_episode_number = int(last_episode.get("episode_number") or 0)
+        next_episode = item.get("next_episode_to_air") or {}
+        next_season_number = int(next_episode.get("season_number") or 0)
+        next_episode_number = int(next_episode.get("episode_number") or 0)
+        result.update(
+            {
+                "last_aired_season_number": last_season_number,
+                "last_aired_episode_number": last_episode_number,
+                "latest_episode_label": episode_progress_label(
+                    last_season_number,
+                    last_episode_number,
+                    "更新至",
+                ),
+                "next_episode_season_number": next_season_number,
+                "next_episode_number": next_episode_number,
+                "next_episode_air_date": str(next_episode.get("air_date") or ""),
+                "next_episode_label": episode_progress_label(
+                    next_season_number,
+                    next_episode_number,
+                    "下一集为",
+                ),
+            }
+        )
         raw_status = str(item.get("status") or "").strip()
         if raw_status == "Ended":
             result.update({"series_status": "ended", "series_status_label": "全剧已完结"})
         elif raw_status == "Canceled":
             result.update({"series_status": "canceled", "series_status_label": "已取消"})
         elif raw_status:
-            last_episode = item.get("last_episode_to_air") or {}
-            season_number = int(last_episode.get("season_number") or 0)
-            last_episode_number = int(last_episode.get("episode_number") or 0)
+            season_number = last_season_number
             season_episode_count = 0
             for season in item.get("seasons") or []:
                 if int(season.get("season_number") or 0) == season_number:
                     season_episode_count = int(season.get("episode_count") or 0)
                     break
-            next_episode = item.get("next_episode_to_air") or {}
             next_is_same_season = (
                 season_number > 0
-                and int(next_episode.get("season_number") or 0) == season_number
+                and next_season_number == season_number
             )
             if (
                 season_number > 0
@@ -1705,6 +1838,21 @@ def media_details(
         }
     )
     return basic
+
+
+@APP.get("/api/emby/episode-progress/{tmdb_id}")
+def emby_episode_progress(
+    tmdb_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if tmdb_id <= 0:
+        raise HTTPException(400, "剧集编号无效")
+    library_ids = emby_library_tmdb_ids(prefer_cached=True)
+    return emby_series_episode_progress(
+        tmdb_id,
+        known_in_library=tmdb_id in library_ids,
+    )
 
 
 @APP.get("/api/dian/resources/{media_type}/{tmdb_id}")
