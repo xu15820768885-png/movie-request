@@ -110,13 +110,14 @@
       background: var(--panel); box-shadow: 0 16px 38px rgba(0,0,0,.16);
     }
     .poster { position: relative; aspect-ratio: 2/3; background: linear-gradient(150deg,#302c28,#191715); overflow: hidden; }
-    .poster-open { display: block; width: 100%; padding: 0; border: 0; border-radius: 0; color: inherit; text-align: left; }
+    .poster-open { display: block; width: 100%; padding: 0; border: 0; border-radius: 0; color: inherit; text-align: left; cursor: pointer; }
+    .poster-open:focus-visible { outline: 3px solid var(--orange); outline-offset: -3px; }
     .poster img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .3s ease; }
     .movie-card:hover .poster img { transform: scale(1.025); }
     .poster::after {
       content: ""; position: absolute; inset: 0; pointer-events: none;
       background: linear-gradient(to top,rgba(8,7,7,.94),transparent 52%);
-      opacity: .2; transition: opacity .2s ease;
+      opacity: .72; transition: opacity .2s ease;
     }
     .movie-card:hover .poster::after, .movie-card:focus-within .poster::after { opacity: 1; }
     .poster-empty { height: 100%; display: grid; place-items: center; color: #7d746c; font-size: 36px; }
@@ -129,25 +130,19 @@
       box-shadow: 0 4px 15px rgba(0,0,0,.35);
     }
     .poster-caption {
-      position: absolute; z-index: 2; left: 12px; right: 12px; bottom: 48px;
-      color: white; text-align: left; opacity: 0; transform: translateY(6px);
-      transition: opacity .2s ease,transform .2s ease;
+      position: absolute; z-index: 2; left: 12px; right: 12px; bottom: 12px;
+      color: white; text-align: left; opacity: 1;
     }
-    .movie-card:hover .poster-caption, .movie-card:focus-within .poster-caption { opacity: 1; transform: none; }
     .poster-caption strong { display: block; font-size: 15px; line-height: 1.35; }
     .poster-caption span { display: block; margin-top: 4px; color: #d9d4ce; font-size: 10px; line-height: 1.45; }
-    .poster-tools {
-      position: absolute; z-index: 4; left: 10px; right: 10px; bottom: 10px;
-      display: flex; align-items: center; justify-content: space-between; gap: 8px;
-      opacity: 0; transform: translateY(5px); transition: opacity .2s ease,transform .2s ease;
+    .poster-follow {
+      width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 9px 12px; border: 0; border-top: 1px solid var(--line);
+      color: #ffd6c4; background: rgba(255,122,69,.13); font-size: 13px; font-weight: 900;
     }
-    .movie-card:hover .poster-tools, .movie-card:focus-within .poster-tools { opacity: 1; transform: none; }
-    .poster-tool {
-      width: 35px; height: 35px; display: grid; place-items: center; padding: 0;
-      border: 1px solid rgba(255,255,255,.45); border-radius: 50%;
-      color: white; background: rgba(10,9,8,.72); font-size: 19px;
-    }
-    .poster-tool:hover, .poster-tool.active { color: #ff8554; border-color: #ff8554; background: rgba(35,19,13,.92); }
+    .poster-follow:hover { color: white; background: rgba(255,122,69,.25); }
+    .poster-follow.active { color: #b7f1d4; background: rgba(50,199,131,.14); }
+    .poster-follow small { color: var(--muted); font-size: 9px; font-weight: 700; }
     .movie-body { padding: 13px; }
     .movie-title { min-height: 42px; margin: 0; font-size: 14px; line-height: 1.45; font-weight: 800; }
     .movie-title-button { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
@@ -364,10 +359,7 @@
       .user-editor .btn { min-height: 42px; }
       .inline { grid-template-columns: 1fr; }
     }
-    @media (hover: none), (pointer: coarse) {
-      .poster::after { opacity: 1; }
-      .poster-caption, .poster-tools { opacity: 1; transform: none; }
-    }
+    @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
   </style>
 </head>
 <body>
@@ -420,7 +412,7 @@
         <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
         <div id="movieResults" class="empty">输入片名后，会显示准确匹配的海报、年份和类型。<br>这样就不会找错版本。</div>
       </section>
-      <section id="followView" class="view hidden"><div class="section-head"><div><h2>电视剧追更</h2><span>管理员可绑定影巢长期资源；更新通知仍经过集数识别、重复保护和115预检</span></div></div><div id="followList" class="follow-grid"></div></section>
+      <section id="followView" class="view hidden"><div class="section-head"><div><h2>电视剧追更</h2><span id="followHelp">查看追更进度、自动补集结果和最后一次转存状态</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
@@ -503,7 +495,7 @@
       {id:3,user_id:3,username:'baba',title:'疾速追杀4',year:'2023',media_type:'movie',tmdb_id:603692,status:'pending',status_name:'待处理',admin_note:'',display_name:'爸爸',created_at:new Date(Date.now()-3600000).toISOString(),poster_url:'https://image.tmdb.org/t/p/w500/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg'}
     ];
     const demoFollows = [
-      {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'等待第233集资源',active:true}
+      {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'影巢原生订阅已开启，等待第233集资源',active:true,hdhive_subscribed:true,hdhive_subscription_id:9001}
     ];
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -538,6 +530,8 @@
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
       const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
+      $('followTab').classList.remove('hidden');
+      $('followHelp').textContent=admin?'查看全部成员的追更进度、自动补集结果和转存状态':'这里只显示你自己的追更、最新集数和自动转存结果';
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
       $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
@@ -555,10 +549,10 @@
         const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'电视剧');
         const summary=[item.year||'年份未知',item.latest_episode_label||item.series_status_label||''].filter(Boolean).join(' · ');
         const check=item.in_library?'<span class="library-check" title="已在 Emby 片库">✓</span>':(item.rating?`<span class="rating">★ ${item.rating}</span>`:'');
-        const follow=isOngoing?`<button class="poster-tool ${item.is_following?'active':''}" data-follow-index="${index}" title="${item.is_following?'已追更':'订阅追更'}" aria-label="订阅追更">${item.is_following?'♥':'♡'}</button>`:'<span></span>';
-        return `<article class="movie-card"><div class="poster">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div><div class="poster-tools"><button class="poster-tool" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索资源">⌕</button>${follow}</div></div></article>`;
+        const follow=isOngoing?`<button class="poster-follow ${item.is_following?'active':''}" data-follow-index="${index}" title="${item.is_following?'已追更':'订阅追更'}" aria-label="${item.is_following?'已追更':'订阅追更'}"><span>${item.is_following?'♥ 已追更':'♡ 追更'}</span><small>影巢原生订阅</small></button>`:'';
+        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${follow}</article>`;
       }).join('');
-      root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)]));
+      root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)],true));
       root.querySelectorAll('[data-follow-index]').forEach(button=>button.onclick=()=>createFollow(items[Number(button.dataset.followIndex)],button,items,title));
     }
     function previewResources(item) {
@@ -576,18 +570,20 @@
     function previewHDHiveResources(item) {
       if(item.media_type!=='tv')return previewResources(item).slice(0,2).map((resource,index)=>({...resource,provider:'hdhive',slug:`preview-movie-${index}`,share_type_label:'115',unlock_points:index?2:0}));
       return [
-        {provider:'hdhive',slug:'preview-233',title:`${item.title} S01E233 2160p WEB-DL`,episode_label:'第1季 · 第233集',episode_numbers:[233],season_number:1,safe_single_episode:true,is_pack:false,res:'4K',codec:'编码待解锁后确认',audio:'音轨待解锁后确认',chn_sub:true,size_gb:'1.5G',source:'WEB-DL',share_type_label:'115',unlock_points:0,files:'第1季 · 第233集'},
+        {provider:'hdhive',slug:'preview-233',title:`${item.title} S01E233 2160p WEB-DL`,episode_label:'第1季 · 第233集',episode_numbers:[233],season_number:1,safe_single_episode:true,is_pack:false,res:'4K',codec:'编码待解锁后确认',audio:'音轨待解锁后确认',chn_sub:true,size_gb:'1.5G',source:'WEB-DL',share_type_label:'115',unlock_points:0,is_official_group:true,vip_free:true,files:'第1季 · 第233集'},
         {provider:'hdhive',slug:'preview-pack',title:`${item.title} 1-233不缺集 长期更新`,episode_label:'第1–233集',episode_numbers:Array.from({length:233},(_,i)=>i+1),season_number:1,safe_single_episode:false,is_pack:true,res:'4K',codec:'编码待解锁后确认',audio:'音轨待解锁后确认',chn_sub:true,size_gb:'255G',source:'WEB-DL',share_type_label:'115',unlock_points:12,files:'第1–233集'}
       ];
     }
     function previewDetails(item) {
       return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','动画','科幻'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?22:0,number_of_seasons:item.media_type==='tv'?1:0,number_of_episodes:item.media_type==='tv'?234:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',hdhive_resources:previewHDHiveResources(item),dian_resources:previewResources(item),recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
     }
-    async function openDetails(item) {
+    async function openDetails(item,resourcesFirst=false) {
       const loadId=++detailLoadSequence;
+      const focusResources=()=>{if(resourcesFirst)requestAnimationFrame(()=>{const section=$('detailResources');if(section)$('detailCard').scrollTop=Math.max(0,section.offsetTop-18);});};
       activeResourceProvider='hdhive';
       currentDetail=null; $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
       renderDetails({...item,genres:[],directors:[],cast:[],recommendations:[],hdhive_resources:[],dian_resources:[],hdhive_loading:true,dian_loading:true,details_loading:true});
+      focusResources();
       try {
         const requestedKey=item.source==='douban'?`douban:${item.media_type}:${item.douban_id}`:`tmdb:${item.media_type}:${item.tmdb_id}`;
         let resolved=item;
@@ -597,7 +593,7 @@
           const detail=previewDetails(resolved);
           detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);
           if(loadId!==detailLoadSequence)return;
-          currentDetail=detail;renderDetails(detail);return;
+          currentDetail=detail;renderDetails(detail);focusResources();return;
         }
         const cachedResources=resourceCache.get(tmdbKey);
         const resourcePromise=cachedResources
@@ -616,17 +612,17 @@
         const detailResult=detailCache.get(requestedKey)||detailCache.get(tmdbKey)||await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`);
         if(loadId!==detailLoadSequence)return;
         const detail={...resolved,...detailResult,hdhive_resources:cachedResources?.hdhive?.resources||[],hdhive_error:cachedResources?.hdhive?.error||'',hdhive_loading:!cachedResources,dian_resources:cachedResources?.dian?.resources||[],dian_error:cachedResources?.dian?.error||'',dian_loading:!cachedResources,details_loading:false,emby_progress_loading:resolved.media_type==='tv'};
-        detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail);
+        detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail);focusResources();
         episodeProgressPromise.then(progress=>{
           if(loadId!==detailLoadSequence||!currentDetail)return;
           const complete={...currentDetail,...progress,emby_progress_loading:false};
-          detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);
+          detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);focusResources();
         });
         resourcePromise.then(resourceResult=>{
           if(resourceResult.hdhive.error===''||resourceResult.dian.error==='')resourceCache.set(tmdbKey,resourceResult);
           if(loadId!==detailLoadSequence||!currentDetail)return;
           const complete={...currentDetail,hdhive_resources:resourceResult.hdhive.resources,hdhive_error:resourceResult.hdhive.error,hdhive_loading:false,dian_resources:resourceResult.dian.resources,dian_error:resourceResult.dian.error,dian_loading:false};
-          detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);
+          detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);focusResources();
         });
       }
       catch(error){ $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><div class="detail-loading">${escapeHtml(error.message)}</div>`; bindDetailActions(); }
@@ -678,11 +674,12 @@
         const scope=item.media_type!=='tv'?'single':hasLocal?'missing':resource.is_pack?'whole':'single';
         const actionLabel=scope==='whole'?'转存整部剧':scope==='missing'?'安全转存缺失集':'转存这个版本';
         const points=provider==='hdhive'&&resource.unlock_points!=null?`<span class="resource-tag">${escapeHtml(resource.unlock_points)} 积分</span>`:'';
-        return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${resource.episode_label?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div><div class="resource-tags">${resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:''}<span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}${points}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)} · ${escapeHtml(resource.size_gb)}<br>${escapeHtml(resource.files)}${provider==='dian'?` · 热度 ${escapeHtml(resource.hot)}`:''}</div></div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${index}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${index}"></div></div></article>`;
+        const official=provider==='hdhive'&&resource.is_official_group?'<span class="resource-tag accent">官组 · VIP免积分</span>':provider==='hdhive'&&resource.vip_free?'<span class="resource-tag accent">当前账号免积分</span>':'';
+        return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${resource.episode_label?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div><div class="resource-tags">${official}${resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:''}<span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}${points}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)} · ${escapeHtml(resource.size_gb)}<br>${escapeHtml(resource.files)}${provider==='dian'?` · 热度 ${escapeHtml(resource.hot)}`:''}</div></div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${index}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${index}"></div></div></article>`;
       }).join('');
       const sourcePanel=(provider,label,resources,loading,error)=>`<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${loading?'<div class="dian-source">后台读取中，不影响影片详情显示。</div>':resources.length?`<div class="resource-list">${resourceCards(resources,provider)}</div>`:`<div class="empty">${escapeHtml(error||`${label}暂时没有匹配资源`)}</div>`}</section>`;
       const totalResources=hdhiveResources.length+dianResources.length;
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">追更会绑定影巢原生订阅；收到更新后自动计算 Emby 缺集，多集资源优先，同一集选择最大文件。</div></section>`:'';
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">追更会绑定影巢原生订阅；收到更新后自动计算 Emby 缺集，多集资源优先，同一集选择最大文件。</div></section>`:'';
       const fallbackLabel=item.in_library?'已入库':totalResources?'没有合适版本，仍然求片':'两个资源源暂无资源，提交求片';
       const requestAction=admin?'':`<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button>`;
       const followAction=item.media_type==='tv'&&item.series_status==='ongoing'?`<button id="detailFollow" class="btn btn-primary" ${item.is_following?'disabled':''}>${item.is_following?'已绑定影巢追更':'♡ 订阅追更'}</button>`:'';

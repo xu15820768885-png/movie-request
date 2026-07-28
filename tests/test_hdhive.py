@@ -199,6 +199,36 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(resource["title"], "仙逆 S01E150-S01E151 4K WEB-DL")
         self.assertEqual(resource["episode_numbers"], [150, 151])
 
+    def test_hdhive_official_group_is_preferred_before_size(self):
+        official = app.normalize_hdhive_resource(
+            {
+                "slug": "official",
+                "title": "第233集",
+                "share_size": "1.5G",
+                "unlock_points": 0,
+                "user": {"group_name": "影巢官组"},
+            }
+        )
+        large_user_share = app.normalize_hdhive_resource(
+            {
+                "slug": "large",
+                "title": "第233集",
+                "share_size": "20G",
+                "unlock_points": 2,
+                "user": {"group_name": "普通用户"},
+            }
+        )
+
+        ordered = sorted(
+            [large_user_share, official],
+            key=app.hdhive_resource_priority,
+            reverse=True,
+        )
+
+        self.assertTrue(official["is_official_group"])
+        self.assertTrue(official["vip_free"])
+        self.assertEqual(ordered[0]["slug"], "official")
+
 
 class HDHiveFollowRouteTests(unittest.TestCase):
     def setUp(self):
