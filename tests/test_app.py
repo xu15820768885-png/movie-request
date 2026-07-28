@@ -557,8 +557,56 @@ class MovieRequestTests(unittest.TestCase):
         with patch.object(app, "telegram_request") as telegram:
             app.configure_telegram_menu()
         commands = telegram.call_args.args[1]["commands"]
+        self.assertIn({"command": "hdhive", "description": "影巢账号"}, commands)
         self.assertIn({"command": "notice", "description": "发布片库公告"}, commands)
         self.assertIn({"command": "clear_notice", "description": "清除片库公告"}, commands)
+
+    def test_hdhive_account_summary_contains_points_and_quotas(self):
+        responses = {
+            "me": {
+                "data": {
+                    "id": 58395,
+                    "level": "forever_vip",
+                    "username": "sakura",
+                    "checked_in_today": True,
+                    "points": 7156,
+                    "signin_days_total": 90,
+                    "share_num": 3,
+                    "weekly_free_quota": 400,
+                    "weekly_free_quota_remaining": 400,
+                    "weekly_free_quota_unlimited": False,
+                    "bonus_quota": 0,
+                    "is_blocked": False,
+                }
+            },
+            "quota": {
+                "data": {
+                    "endpoint_limit": 1000,
+                    "endpoint_remaining": 988,
+                }
+            },
+        }
+        with patch.object(
+            app,
+            "hdhive_call",
+            side_effect=lambda method, *args, **kwargs: responses[method],
+        ):
+            summary = app.hdhive_account_summary()
+        self.assertIn("sakura · ID 58395", summary)
+        self.assertIn("永久 VIP", summary)
+        self.assertIn("积分：7,156", summary)
+        self.assertIn("周免费额度：400/400", summary)
+        self.assertIn("OpenAPI 额度：988/1,000", summary)
+
+    def test_telegram_hdhive_command_sends_account_summary(self):
+        with patch.object(
+            app,
+            "hdhive_account_summary",
+            return_value="🟠 影巢账号\n积分：7,156",
+        ):
+            with patch.object(app, "send_telegram") as telegram:
+                self.assertTrue(app.handle_telegram_message("/hdhive"))
+        telegram.assert_called_once_with("🟠 影巢账号\n积分：7,156")
 
     def test_dian_resources_query_uses_tmdb_identity(self):
         response = {
