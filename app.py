@@ -536,6 +536,18 @@ def perform_hdhive_signin(mode: str, source: str = "manual") -> dict[str, Any]:
             f"❌ 影巢签到失败\n\n{source_label} · {mode_label}\n原因：{message}"
         )
         raise
+    try:
+        profile = hdhive_response_data(hdhive_call("me"))
+        if isinstance(profile, dict) and profile.get("points") is not None:
+            data = result.get("data")
+            if not isinstance(data, dict):
+                data = {}
+                result["data"] = data
+            data["total_points"] = profile["points"]
+    except HTTPException:
+        # The check-in itself succeeded. Account detail lookup is optional and
+        # must not turn it into a failed sign-in notification.
+        pass
     message = signin_result_message(result, "签到成功")
     with db() as connection:
         set_setting(connection, "hdhive_last_signin_at", attempted_at)
@@ -1979,6 +1991,7 @@ def configure_telegram_menu() -> None:
             "commands": [
                 {"command": "requests", "description": "求片需求"},
                 {"command": "completed", "description": "完成情况"},
+                {"command": "hdhive", "description": "影巢账号"},
                 {"command": "notice", "description": "发布片库公告"},
                 {"command": "clear_notice", "description": "清除片库公告"},
                 {"command": "menu", "description": "显示菜单"},
@@ -2031,6 +2044,89 @@ def telegram_request_summary(completed: bool) -> str:
     return "\n".join(lines)
 
 
+def display_number(value: Any, fallback: str = "未知") -> str:
+    if value is None or isinstance(value, bool):
+        return fallback
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or fallback
+
+
+def hdhive_account_summary() -> str:
+    profile = hdhive_response_data(hdhive_call("me"))
+    if not isinstance(profile, dict):
+        raise HTTPException(502, "影巢没有返回账号信息")
+    try:
+        quota = hdhive_response_data(hdhive_call("quota"))
+    except HTTPException:
+        quota = {}
+    if not isinstance(quota, dict):
+        quota = {}
+
+    level = str(profile.get("level") or "").lower()
+    level_label = {
+        "normal": "普通用户",
+        "vip": "VIP",
+        "forever_vip": "永久 VIP",
+    }.get(level, str(profile.get("level") or "未知"))
+    username = str(
+        profile.get("username")
+        or profile.get("nickname")
+        or "未返回"
+    )
+    nickname = str(profile.get("nickname") or "").strip()
+    account_name = (
+        f"{nickname}（{username}）"
+        if nickname and nickname != username
+        else username
+    )
+    user_id = profile.get("id")
+    if user_id is not None:
+        account_name += f" · ID {user_id}"
+
+    checked = "今日已签" if profile.get("checked_in_today") else "今日未签"
+    weekly_unlimited = bool(profile.get("weekly_free_quota_unlimited"))
+    weekly_total = profile.get("weekly_free_quota")
+    weekly_remaining = profile.get("weekly_free_quota_remaining")
+    weekly_label = (
+        "不限额"
+        if weekly_unlimited or weekly_remaining == -1
+        else (
+            f"{display_number(weekly_remaining)}/{display_number(weekly_total)}"
+            if weekly_total is not None
+            else display_number(weekly_remaining)
+        )
+    )
+    endpoint_limit = quota.get("endpoint_limit")
+    endpoint_remaining = quota.get("endpoint_remaining")
+    api_quota = (
+        f"{display_number(endpoint_remaining)}/{display_number(endpoint_limit)}"
+        if endpoint_limit is not None
+        else "平台动态分配"
+    )
+    status = "已封禁" if profile.get("is_blocked") else "正常"
+    return "\n".join(
+        [
+            "🟠 影巢账号",
+            "",
+            f"账号：{account_name}",
+            f"等级：{level_label}",
+            f"状态：{status}",
+            f"积分：{display_number(profile.get('points'))}",
+            (
+                f"签到：{checked} · 累计 "
+                f"{display_number(profile.get('signin_days_total'), '0')} 天"
+            ),
+            f"分享数：{display_number(profile.get('share_num'), '0')}",
+            f"周免费额度：{weekly_label}（剩余/总额）",
+            f"奖励额度：{display_number(profile.get('bonus_quota'), '0')}",
+            f"OpenAPI 额度：{api_quota}（剩余/上限）",
+        ]
+    )
+
+
 def handle_telegram_message(text: str) -> bool:
     text = str(text or "").strip()
     if not text:
@@ -2044,6 +2140,11 @@ def handle_telegram_message(text: str) -> bool:
     elif text == "完成情况" or command == "/completed":
         sync_emby_requests()
         send_telegram(telegram_request_summary(True))
+    elif text == "影巢账号" or command == "/hdhive":
+        try:
+            send_telegram(hdhive_account_summary())
+        except HTTPException as error:
+            send_telegram(f"❌ 影巢账号读取失败\n\n原因：{error.detail}")
     elif command == "/notice":
         if argument:
             notice = argument[:240]
@@ -2062,7 +2163,8 @@ def handle_telegram_message(text: str) -> bool:
         send_telegram("✅ 片库公告已清除")
     elif command in ("/start", "/menu"):
         send_telegram(
-            "请点击左下角“菜单”，可以查看求片需求、完成情况，或发布片库公告。"
+            "请点击左下角“菜单”，可以查看求片需求、完成情况、影巢账号，"
+            "或发布片库公告。"
         )
     elif not text.startswith("/"):
         with db() as connection:

@@ -317,14 +317,28 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 "points": 8,
             },
         }
-        with patch.object(app, "hdhive_call", return_value=result) as call:
+        def fake_hdhive_call(method, *args, **kwargs):
+            if method == "checkin":
+                return result
+            if method == "me":
+                return {"data": {"points": 7164}}
+            self.fail(f"unexpected HDHive call: {method}")
+
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call) as call:
             with patch.object(app, "send_telegram") as telegram:
                 returned = app.perform_hdhive_signin("lucky", source="auto")
         self.assertEqual(returned, result)
-        call.assert_called_once_with("checkin", is_gambler=True)
+        self.assertEqual(
+            call.call_args_list,
+            [
+                unittest.mock.call("checkin", is_gambler=True),
+                unittest.mock.call("me"),
+            ],
+        )
         self.assertIn("影巢签到成功", telegram.call_args.args[0])
         self.assertIn("自动签到 · 运气签到", telegram.call_args.args[0])
         self.assertIn("本次签到积分：8", telegram.call_args.args[0])
+        self.assertIn("当前总积分：7164", telegram.call_args.args[0])
         with app.db() as connection:
             self.assertEqual(
                 app.setting(connection, "hdhive_last_signin_status"),
