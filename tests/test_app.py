@@ -152,6 +152,7 @@ class MovieRequestTests(unittest.TestCase):
 
         self.assertEqual(result["emby_latest_episode_number"], 233)
         self.assertEqual(result["emby_episode_label"], "已入库至第233集")
+        self.assertEqual(result["emby_episode_numbers"], {"1": [232, 233]})
         self.assertEqual(get.call_count, 2)
         self.assertEqual(
             get.call_args_list[0].kwargs["params"]["AnyProviderIdEquals"],
