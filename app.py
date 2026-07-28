@@ -201,6 +201,16 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS tv_follow_resource_time_idx
                 ON tv_follow_resources(follow_id, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS hdhive_media_targets (
+                media_type TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                target_key TEXT NOT NULL,
+                media_url TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(media_type, tmdb_id)
+            );
             """
         )
         follow_columns = {
@@ -380,6 +390,20 @@ def hdhive_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise HTTPException(error.status or 502, f"影巢接口：{error}") from error
     except (requests.RequestException, RuntimeError, ValueError, KeyError) as error:
         raise HTTPException(502, f"暂时无法连接影巢：{error}") from error
+
+
+def hdhive_media_page(media_url: str) -> str:
+    try:
+        return hdhive_client().media_page(media_url)
+    except HTTPException:
+        raise
+    except HDHiveOpenAPIError as error:
+        raise HTTPException(
+            error.status or 502,
+            f"影巢影片页面：{error}",
+        ) from error
+    except (requests.RequestException, RuntimeError, ValueError) as error:
+        raise HTTPException(502, f"暂时无法读取影巢影片页面：{error}") from error
 
 
 def dian_client() -> Dian115OpenAPI:
@@ -1367,6 +1391,148 @@ def hdhive_subscription_target(
             or "影巢影片资源"
         ).strip(),
     }
+
+
+def hdhive_subscription_target_from_page(
+    page_html: str,
+    expected_tmdb_id: int,
+    expected_media_type: str,
+    title: str = "",
+) -> dict[str, Any]:
+    normalized = str(page_html or "").replace('\\"', '"')
+    if not re.search(
+        rf'"tmdb_id"\s*:\s*"?{int(expected_tmdb_id)}"?',
+        normalized,
+    ):
+        raise HTTPException(502, "影巢影片页面与当前 TMDB 影片不一致")
+
+    for match in re.finditer(
+        r'\{[^{}]{0,800}"target_type"\s*:\s*"media_resource"[^{}]{0,800}\}',
+        normalized,
+    ):
+        try:
+            candidate = json.loads(match.group(0))
+            target_id = int(candidate.get("target_id") or 0)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        target_key = str(candidate.get("target_key") or "").strip().lower()
+        key_match = re.fullmatch(r"(movie|tv):(\d+)", target_key)
+        if (
+            target_id > 0
+            and key_match
+            and key_match.group(1) == expected_media_type
+            and int(key_match.group(2)) == target_id
+        ):
+            return {
+                "target_type": "media_resource",
+                "target_id": target_id,
+                "target_key": target_key,
+                "title": str(title or "影巢影片资源").strip(),
+            }
+    raise HTTPException(502, "影巢影片页面没有返回可用的原生订阅目标")
+
+
+def cached_hdhive_media_target(
+    media_type: str,
+    tmdb_id: int,
+) -> Optional[dict[str, Any]]:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM hdhive_media_targets "
+            "WHERE media_type = ? AND tmdb_id = ?",
+            (media_type, tmdb_id),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "target_type": "media_resource",
+        "target_id": int(row["target_id"]),
+        "target_key": str(row["target_key"]),
+        "title": str(row["title"] or "影巢影片资源"),
+        "media_url": str(row["media_url"] or ""),
+    }
+
+
+def cache_hdhive_media_target(
+    media_type: str,
+    tmdb_id: int,
+    target: dict[str, Any],
+    media_url: str = "",
+) -> None:
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO hdhive_media_targets("
+            "media_type, tmdb_id, target_id, target_key, media_url, title, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(media_type, tmdb_id) DO UPDATE SET "
+            "target_id = excluded.target_id, target_key = excluded.target_key, "
+            "media_url = excluded.media_url, title = excluded.title, "
+            "updated_at = excluded.updated_at",
+            (
+                media_type,
+                tmdb_id,
+                int(target["target_id"]),
+                str(target["target_key"]),
+                str(media_url or ""),
+                str(target.get("title") or ""),
+                now_iso(),
+            ),
+        )
+
+
+def hdhive_media_page_url(
+    resource: dict[str, Any],
+    share_result: dict[str, Any],
+    expected_media_type: str,
+) -> str:
+    values: list[str] = [str(resource.get("media_url") or "").strip()]
+    resource_media_slug = str(resource.get("media_slug") or "").strip()
+    if resource_media_slug:
+        values.append(f"/{expected_media_type}/{resource_media_slug}")
+
+    data = hdhive_response_data(share_result)
+    media = data.get("media") if isinstance(data, dict) else None
+    if isinstance(media, dict):
+        values.extend(
+            str(media.get(key) or "").strip()
+            for key in ("media_url", "url", "href")
+        )
+        media_slug = str(
+            media.get("media_slug") or media.get("slug") or ""
+        ).strip()
+        if media_slug:
+            values.append(f"/{expected_media_type}/{media_slug}")
+
+    for value in values:
+        if not value:
+            continue
+        parsed = urlparse(value)
+        page_path = parsed.path if parsed.scheme or parsed.netloc else value
+        if re.fullmatch(
+            rf"/{re.escape(expected_media_type)}/[A-Za-z0-9_-]+/?",
+            page_path,
+        ):
+            return value
+    return ""
+
+
+def cached_hdhive_follow_resource(
+    follow_id: int,
+    slug: str,
+) -> dict[str, Any]:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM tv_follow_resources "
+            "WHERE follow_id = ? AND source = 'hdhive' AND resource_key = ?",
+            (follow_id, slug),
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["payload_json"])
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def hdhive_created_subscription_id(
@@ -3736,7 +3902,11 @@ async def create_follow(
         )
         if not selected:
             raise HTTPException(404, "影巢暂时没有可订阅的可播放资源")
-        row = bind_hdhive_follow_subscription(int(row["id"]), selected["slug"])
+        row = bind_hdhive_follow_subscription(
+            int(row["id"]),
+            selected["slug"],
+            selected,
+        )
         if media_type == "tv":
             Thread(
                 target=auto_replenish_hdhive_follow,
@@ -3770,6 +3940,7 @@ async def create_follow(
 def bind_hdhive_follow_subscription(
     follow_id: int,
     slug: str,
+    resource: Optional[dict[str, Any]] = None,
 ) -> sqlite3.Row:
     slug = str(slug or "").strip()
     if not slug:
@@ -3782,18 +3953,69 @@ def bind_hdhive_follow_subscription(
     if not follow:
         raise HTTPException(404, "没有找到这条有效追更")
 
-    share_result = hdhive_call("share", slug)
-    target = hdhive_subscription_target(
-        share_result,
-        int(follow["tmdb_id"]),
-        str(follow["media_type"] or "tv"),
-    )
+    tmdb_id = int(follow["tmdb_id"])
+    media_type = str(follow["media_type"] or "tv")
+    target = cached_hdhive_media_target(media_type, tmdb_id)
+    resolved_media_url = str((target or {}).get("media_url") or "")
+    target_was_cached = target is not None
+    if target is None:
+        share_result = hdhive_call("share", slug)
+        try:
+            target = hdhive_subscription_target(
+                share_result,
+                tmdb_id,
+                media_type,
+            )
+        except HTTPException as error:
+            if str(error.detail) != "影巢分享详情缺少影片内部编号，无法创建订阅":
+                raise
+            selected = resource or cached_hdhive_follow_resource(follow_id, slug)
+            media_url = hdhive_media_page_url(selected, share_result, media_type)
+            if not media_url:
+                resources_result = hdhive_call("resources", media_type, tmdb_id)
+                resources = [
+                    normalize_hdhive_resource(item)
+                    for item in extract_share_items(resources_result)
+                ]
+                cache_follow_resources(follow_id, "hdhive", resources)
+                selected = next(
+                    (
+                        item
+                        for item in resources
+                        if str(item.get("slug") or "") == slug
+                    ),
+                    {},
+                )
+                media_url = hdhive_media_page_url(
+                    selected,
+                    share_result,
+                    media_type,
+                )
+            if not media_url:
+                raise HTTPException(
+                    502,
+                    "影巢资源没有返回影片页面，无法解析原生订阅目标",
+                ) from error
+            target = hdhive_subscription_target_from_page(
+                hdhive_media_page(media_url),
+                tmdb_id,
+                media_type,
+                str(follow["title"] or ""),
+            )
+            resolved_media_url = media_url
     created = hdhive_call(
         "create_subscription",
         target_type=target["target_type"],
         target_id=target["target_id"],
         target_key=target["target_key"],
     )
+    if not target_was_cached:
+        cache_hdhive_media_target(
+            media_type,
+            tmdb_id,
+            target,
+            resolved_media_url,
+        )
     subscription_id = hdhive_created_subscription_id(created, target["target_key"])
 
     previous_id = int(follow["hdhive_subscription_id"] or 0)

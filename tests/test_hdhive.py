@@ -11,11 +11,12 @@ from hdhive_openapi import HDHiveOpenAPI
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200, headers=None):
+    def __init__(self, payload, status=200, headers=None, text=""):
         self.payload = payload
         self.status_code = status
         self.headers = headers or {}
         self.ok = 200 <= status < 300
+        self.text = text
 
     def json(self):
         return self.payload
@@ -155,6 +156,45 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(result["data"]["media"]["id"], 77)
         self.assertTrue(session.calls[0][1].endswith("/api/open/shares/abc"))
 
+    def test_client_reads_same_origin_media_page_through_fixed_proxy(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {},
+                    text='<script>"target_key":"tv:5670"</script>',
+                )
+            ]
+        )
+        client = HDHiveOpenAPI(
+            api_key="secret",
+            access_token="access",
+            proxy_url="http://38.55.106.163:3128",
+            session=session,
+        )
+        page = client.media_page(
+            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003"
+        )
+        self.assertIn("tv:5670", page)
+        self.assertEqual(
+            session.calls[0][1],
+            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003",
+        )
+        self.assertEqual(
+            session.calls[0][2]["proxies"]["https"],
+            "http://38.55.106.163:3128",
+        )
+
+    def test_client_rejects_external_media_page(self):
+        session = FakeSession([])
+        client = HDHiveOpenAPI(
+            api_key="secret",
+            access_token="access",
+            session=session,
+        )
+        with self.assertRaises(ValueError):
+            client.media_page("https://example.com/tv/not-hdhive")
+        self.assertEqual(session.calls, [])
+
     def test_client_checkin_maps_normal_and_lucky_modes(self):
         session = FakeSession(
             [
@@ -235,6 +275,37 @@ class HDHiveFoundationTests(unittest.TestCase):
         )
         self.assertEqual(target["target_id"], 81)
         self.assertEqual(target["target_key"], "movie:81")
+
+    def test_subscription_target_reads_server_rendered_media_page(self):
+        page_html = (
+            '<script>self.__next_f.push([1,"'
+            '\\"target\\":{\\"target_type\\":\\"media_resource\\",'
+            '\\"target_id\\":5670,\\"target_key\\":\\"tv:5670\\"},'
+            '\\"item\\":{\\"media_type\\":\\"tv\\",'
+            '\\"tv_id\\":5670,\\"tmdb_id\\":\\"223911\\"}'
+            '"])</script>'
+        )
+        target = app.hdhive_subscription_target_from_page(
+            page_html,
+            223911,
+            "tv",
+            "仙逆",
+        )
+        self.assertEqual(target["target_id"], 5670)
+        self.assertEqual(target["target_key"], "tv:5670")
+        self.assertEqual(target["title"], "仙逆")
+
+    def test_subscription_target_rejects_wrong_tmdb_media_page(self):
+        page_html = (
+            '{"target_type":"media_resource","target_id":5670,'
+            '"target_key":"tv:5670","tmdb_id":"999"}'
+        )
+        with self.assertRaisesRegex(Exception, "TMDB"):
+            app.hdhive_subscription_target_from_page(
+                page_html,
+                223911,
+                "tv",
+            )
 
     def test_hdhive_official_group_is_preferred_before_size(self):
         official = app.normalize_hdhive_resource(
@@ -409,6 +480,96 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "create_subscription")
         self.assertEqual(calls[1][2]["target_type"], "media_resource")
         self.assertEqual(calls[1][2]["target_key"], "tv:77")
+
+    def test_native_subscription_resolves_media_page_target_and_caches_it(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 132, 132, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+        app.cache_follow_resources(
+            follow_id,
+            "hdhive",
+            [
+                {
+                    "slug": "resource-slug",
+                    "media_url": (
+                        "https://hdhive.com/tv/"
+                        "f84222db3d0e11eea73a0242ac1b0003"
+                    ),
+                    "media_slug": "f84222db3d0e11eea73a0242ac1b0003",
+                }
+            ],
+        )
+
+        calls = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method == "share":
+                return {
+                    "data": {
+                        "slug": "resource-slug",
+                        "media": {
+                            "type": "tv",
+                            "tmdb_id": 223911,
+                            "name": "仙逆",
+                        },
+                    }
+                }
+            if method == "create_subscription":
+                self.assertEqual(kwargs["target_id"], 5670)
+                self.assertEqual(kwargs["target_key"], "tv:5670")
+                return {"data": {"id": 55, "target_key": "tv:5670"}}
+            raise AssertionError(method)
+
+        page_html = (
+            '<script>self.__next_f.push([1,"'
+            '\\"target\\":{\\"target_type\\":\\"media_resource\\",'
+            '\\"target_id\\":5670,\\"target_key\\":\\"tv:5670\\"},'
+            '\\"item\\":{\\"media_type\\":\\"tv\\",'
+            '\\"tv_id\\":5670,\\"tmdb_id\\":\\"223911\\"}'
+            '"])</script>'
+        )
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(
+                app,
+                "hdhive_media_page",
+                return_value=page_html,
+            ) as media_page:
+                result = asyncio.run(
+                    app.create_hdhive_follow_subscription(
+                        follow_id,
+                        FakeRequest({"slug": "resource-slug"}),
+                        self.admin_token,
+                    )
+                )
+                app.bind_hdhive_follow_subscription(
+                    follow_id,
+                    "resource-slug",
+                )
+
+        self.assertTrue(result["follow"]["hdhive_subscribed"])
+        media_page.assert_called_once_with(
+            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003"
+        )
+        self.assertEqual(
+            [method for method, _args, _kwargs in calls].count("share"),
+            1,
+        )
+        with app.db() as connection:
+            cached = connection.execute(
+                "SELECT target_id, target_key FROM hdhive_media_targets "
+                "WHERE media_type = 'tv' AND tmdb_id = 223911"
+            ).fetchone()
+        self.assertEqual(cached["target_id"], 5670)
+        self.assertEqual(cached["target_key"], "tv:5670")
 
     def test_removed_follow_is_not_returned_in_watchlist(self):
         with app.db() as connection:

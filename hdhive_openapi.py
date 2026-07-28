@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import json
 import secrets
 from typing import Any, Callable, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -173,6 +173,53 @@ class HDHiveOpenAPI:
             "GET",
             f"/api/open/shares/{slug.strip()}",
         )
+
+    def media_page(self, media_url: str) -> str:
+        """Read a same-origin movie/TV page to resolve its subscription target."""
+
+        clean = str(media_url or "").strip()
+        parsed = urlparse(clean)
+        base = urlparse(self.base_url)
+        if parsed.scheme or parsed.netloc:
+            if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+                raise ValueError("media_url must use the configured HDHive origin")
+            page_path = parsed.path
+        else:
+            page_path = parsed.path or clean
+        if not page_path.startswith("/"):
+            page_path = f"/{page_path}"
+        parts = [value for value in page_path.split("/") if value]
+        if (
+            len(parts) != 2
+            or parts[0] not in ("movie", "tv")
+            or not parts[1].replace("-", "").replace("_", "").isalnum()
+        ):
+            raise ValueError("media_url must be an HDHive movie or TV page")
+
+        proxies = (
+            {"http": self.proxy_url, "https": self.proxy_url}
+            if self.proxy_url
+            else None
+        )
+        try:
+            response = self.session.request(
+                "GET",
+                self.base_url + page_path,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "User-Agent": "movie-request-hdhive/1.0",
+                },
+                timeout=self.timeout,
+                proxies=proxies,
+            )
+        except requests.RequestException as error:
+            raise HDHiveOpenAPIError(f"无法连接影巢：{error}") from error
+        if not response.ok:
+            raise HDHiveOpenAPIError(
+                f"影片页面 HTTP {response.status_code}",
+                status=response.status_code,
+            )
+        return str(response.text or "")
 
     def subscriptions(self, **params: Any) -> dict[str, Any]:
         return self._request("GET", "/api/open/subscriptions", params=params)
