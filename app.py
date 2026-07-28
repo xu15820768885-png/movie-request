@@ -1281,14 +1281,58 @@ def hdhive_subscription_target(
     if not isinstance(media, dict):
         raise HTTPException(502, "这个影巢资源没有关联可订阅的电视剧")
 
+    # The OpenAPI contract requires an integer target_id and a matching
+    # movie:{id}/tv:{id} target_key. Share details document `data.media`, but
+    # deployments have returned the relationship ID at different levels.
+    # Prefer the explicit subscription contract, then media-specific IDs.
+    candidates: list[dict[str, Any]] = [media, data]
+    for parent in (media, data):
+        for key in (
+            expected_media_type,
+            "media_resource",
+            "resource",
+            "share",
+        ):
+            nested = parent.get(key)
+            if isinstance(nested, dict) and nested not in candidates:
+                candidates.append(nested)
+
     target_id = 0
-    for key in ("id", "tv_id", "media_id"):
+    target_key = ""
+    for candidate in candidates:
+        value = str(candidate.get("target_key") or "").strip().lower()
+        match = re.fullmatch(r"(movie|tv):(\d+)", value)
+        if match and match.group(1) == expected_media_type:
+            target_id = int(match.group(2))
+            target_key = f"{expected_media_type}:{target_id}"
+            break
+
+    id_keys = (
+        ("tv_id", "tvId", "series_id", "seriesId")
+        if expected_media_type == "tv"
+        else ("movie_id", "movieId", "film_id", "filmId")
+    )
+    if target_id <= 0:
+        for candidate in candidates:
+            for key in (*id_keys, "media_id", "mediaId", "target_id"):
+                try:
+                    target_id = int(candidate.get(key) or 0)
+                except (TypeError, ValueError):
+                    target_id = 0
+                if target_id > 0:
+                    break
+            if target_id > 0:
+                break
+
+    # A generic media.id is valid only on the documented media object. The
+    # top-level data.id is the share ID and must never be used as a target.
+    if target_id <= 0:
         try:
-            target_id = int(media.get(key) or 0)
+            target_id = int(media.get("id") or 0)
         except (TypeError, ValueError):
             target_id = 0
-        if target_id > 0:
-            break
+    if target_id > 0 and not target_key:
+        target_key = f"{expected_media_type}:{target_id}"
 
     media_type = str(
         media.get("media_type")
@@ -1315,7 +1359,7 @@ def hdhive_subscription_target(
     return {
         "target_type": "media_resource",
         "target_id": target_id,
-        "target_key": f"{expected_media_type}:{target_id}",
+        "target_key": target_key,
         "title": str(
             media.get("title")
             or media.get("name")
@@ -3582,8 +3626,10 @@ def list_follows(
         )
         values: tuple[Any, ...] = ()
         if user["role"] != "admin":
-            query += "WHERE f.user_id = ? "
+            query += "WHERE f.active = 1 AND f.user_id = ? "
             values = (user["id"],)
+        else:
+            query += "WHERE f.active = 1 "
         query += "ORDER BY f.active DESC, f.updated_at DESC"
         rows = connection.execute(query, values).fetchall()
     return {"follows": [serialize_follow(row) for row in rows]}

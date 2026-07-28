@@ -199,6 +199,43 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(resource["title"], "仙逆 S01E150-S01E151 4K WEB-DL")
         self.assertEqual(resource["episode_numbers"], [150, 151])
 
+    def test_subscription_target_accepts_documented_root_tv_id(self):
+        target = app.hdhive_subscription_target(
+            {
+                "data": {
+                    "tv_id": 77,
+                    "media": {
+                        "type": "tv",
+                        "tmdb_id": 223911,
+                        "name": "仙逆",
+                    },
+                }
+            },
+            223911,
+            "tv",
+        )
+        self.assertEqual(target["target_id"], 77)
+        self.assertEqual(target["target_key"], "tv:77")
+
+    def test_subscription_target_accepts_explicit_target_key(self):
+        target = app.hdhive_subscription_target(
+            {
+                "data": {
+                    "target_id": 81,
+                    "target_key": "movie:81",
+                    "media": {
+                        "type": "movie",
+                        "tmdb_id": 550,
+                        "name": "搏击俱乐部",
+                    },
+                }
+            },
+            550,
+            "movie",
+        )
+        self.assertEqual(target["target_id"], 81)
+        self.assertEqual(target["target_key"], "movie:81")
+
     def test_hdhive_official_group_is_preferred_before_size(self):
         official = app.normalize_hdhive_resource(
             {
@@ -372,6 +409,24 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "create_subscription")
         self.assertEqual(calls[1][2]["target_type"], "media_resource")
         self.assertEqual(calls[1][2]["target_key"], "tv:77")
+
+    def test_removed_follow_is_not_returned_in_watchlist(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        result = app.delete_follow(follow_id, self.token)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(app.list_follows(self.token)["follows"], [])
+        self.assertEqual(app.list_follows(self.admin_token)["follows"], [])
 
     def test_member_cannot_bind_native_subscription_directly(self):
         with app.db() as connection:

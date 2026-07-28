@@ -784,9 +784,15 @@
       button.disabled=true;try{await api(`/api/follows/${follow.id}/hdhive-subscription`,{method:'DELETE'});toast('已取消影巢原生订阅，本地追更仍保留');loadFollows();}catch(error){button.disabled=false;toast(error.message,true);}
     }
     async function deleteFollow(id,button) {
-      if(!confirm('确定移出想看吗？已经转存的文件不会删除。'))return;
       if(preview){const index=demoFollows.findIndex(item=>item.id===id);if(index>=0)demoFollows.splice(index,1);toast('已移出想看');return loadFollows();}
-      button.disabled=true;try{await api(`/api/follows/${id}`,{method:'DELETE'});toast('已移出想看');loadFollows();}catch(error){button.disabled=false;toast(error.message,true);}
+      const card=button.closest('[data-follow-card]');
+      button.disabled=true;
+      try {
+        await api(`/api/follows/${id}`,{method:'DELETE'});
+        if(card)card.remove();
+        toast('已移出想看');
+        await loadFollows();
+      } catch(error){button.disabled=false;toast(error.message,true);}
     }
     async function loadRequests() {
       const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
