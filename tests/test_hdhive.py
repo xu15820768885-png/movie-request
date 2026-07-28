@@ -783,6 +783,55 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 400)
         self.assertIn("已有到第232集", error.exception.detail)
 
+    def test_admin_can_confirm_whole_transfer_with_existing_episodes(self):
+        class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                return {"state": True, "tasks": []}
+
+            def clouddownload_task_add_url(self, _payload):
+                return {"state": True, "task_id": "offline-1"}
+
+        with app.db() as connection:
+            admin_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 132, 132, ?, ?)",
+                (admin_id, app.now_iso(), app.now_iso()),
+            )
+
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"url": "magnet:?xt=urn:btih:whole-pack"}},
+        ):
+            with patch.object(app, "p115_client", return_value=FakeP115()):
+                with patch.object(app, "wait_for_p115_change", return_value=True):
+                    with patch.object(app, "send_telegram"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(
+                                FakeRequest(
+                                    {
+                                        "slug": "whole-pack",
+                                        "tmdb_id": 223911,
+                                        "media_type": "tv",
+                                        "title": "仙逆",
+                                        "resource_title": "仙逆 S01E01-E149",
+                                        "transfer_scope": "whole",
+                                        "confirm_whole": True,
+                                        "allow_existing": True,
+                                    }
+                                ),
+                                self.admin_token,
+                            )
+                        )
+
+        self.assertEqual(result["mode"], "offline")
+        self.assertEqual(result["message"], "已加入115离线下载")
+
 
 if __name__ == "__main__":
     unittest.main()

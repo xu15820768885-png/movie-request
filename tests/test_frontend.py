@@ -9,9 +9,11 @@ class FollowResourceActionsTest(unittest.TestCase):
         )
 
         self.assertIn('data-follow-transfer="${follow.id}"', html)
-        self.assertIn(">转存此资源</button>", html)
+        self.assertIn("resource.is_pack?'转存整包'", html)
+        self.assertIn("`转存第${episodes[0]}集`:'转存此资源'", html)
         self.assertIn("transferFollowResource(follow", html)
         self.assertIn("await api('/api/hdhive/transfer'", html)
+        self.assertIn("allow_existing:scope==='whole'&&hasLocal", html)
         self.assertNotIn(">更换为此资源</button>", html)
 
 

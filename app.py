@@ -4241,10 +4241,15 @@ async def hdhive_transfer(
                 progress.get("emby_latest_episode_number") or 0
             )
         if transfer_scope == "whole":
-            if baseline_episode > 0:
+            allow_existing = (
+                user["role"] == "admin"
+                and payload.get("allow_existing") is True
+                and payload.get("confirm_whole") is True
+            )
+            if baseline_episode > 0 and not allow_existing:
                 raise HTTPException(
                     400,
-                    f"Emby 已有到第{baseline_episode}集，不能再次整部转存；请选择缺失单集",
+                    f"Emby 已有到第{baseline_episode}集；管理员确认后才能转存整包",
                 )
             if payload.get("confirm_whole") is not True:
                 raise HTTPException(400, "转存整部剧需要再次确认")
