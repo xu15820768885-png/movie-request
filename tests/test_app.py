@@ -188,6 +188,59 @@ class MovieRequestTests(unittest.TestCase):
             get.call_args_list[0].kwargs["params"]["AnyProviderIdEquals"],
             "tmdb.101172",
         )
+        self.assertEqual(
+            get.call_args_list[1].kwargs["params"]["StartIndex"],
+            0,
+        )
+        self.assertEqual(
+            get.call_args_list[1].kwargs["params"]["Limit"],
+            10000,
+        )
+
+    def test_emby_episode_progress_keeps_real_gaps_beyond_default_page_size(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://nas:8096")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        missing = {7, 18, 29, 41, 55, 68, 79, 93, 108, 121}
+        existing = [
+            {
+                "ParentIndexNumber": 1,
+                "IndexNumber": episode,
+            }
+            for episode in range(1, 133)
+            if episode not in missing
+        ]
+        responses = [
+            FakeResponse(
+                {
+                    "Items": [
+                        {
+                            "Id": "series-223911",
+                            "ProviderIds": {"Tmdb": "223911"},
+                        }
+                    ]
+                }
+            ),
+            FakeResponse({"Items": existing, "TotalRecordCount": len(existing)}),
+        ]
+        with patch.object(app.requests, "get", side_effect=responses) as get:
+            result = app.emby_series_episode_progress(223911)
+
+        present = set(result["emby_episode_numbers"]["1"])
+        self.assertEqual(len(present), 122)
+        self.assertEqual(set(range(1, 133)) - present, missing)
+        self.assertEqual(get.call_args_list[1].kwargs["params"]["Limit"], 10000)
 
     def test_emby_episode_progress_has_a_separate_nonblocking_endpoint(self):
         with patch.object(app, "emby_library_tmdb_ids", return_value={101172}):
