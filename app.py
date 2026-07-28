@@ -1227,8 +1227,8 @@ def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int, i
         else 1
         if resource.get("vip_free")
         else 0,
-        1 if resource.get("is_pack") or episode_count > 1 else 0,
         resource_size_bytes(resource.get("size_gb")),
+        1 if resource.get("is_pack") or episode_count > 1 else 0,
         episode_count,
     )
 
@@ -2533,7 +2533,8 @@ def auto_replenish_hdhive_follow(
     used_resources: list[str] = []
 
     # Limit the number of possible unlocks for a single notification. Official
-    # group/VIP-free resources are preferred, then packs and larger shares.
+    # group/VIP-free resources are preferred, then larger shares. Pack status
+    # only breaks a size tie.
     for resource in ordered[:12]:
         slug = str(resource.get("slug") or "").strip()
         if not slug:
@@ -2661,7 +2662,7 @@ def auto_replenish_hdhive_follow(
             f"剧集：{follow['title']}\n"
             f"补齐：第{compact_episode_numbers(transferred)}集\n"
             f"季数：第{season_number}季\n"
-            f"规则：官组/免积分优先 → 多集包 → 文件最大\n"
+            f"规则：官组优先 → 当前账号免积分 → 文件最大\n"
             f"资源：\n{resource_summary}\n"
             f"115：已确认转存完成"
         )

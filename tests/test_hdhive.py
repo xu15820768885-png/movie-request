@@ -229,6 +229,33 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertTrue(official["vip_free"])
         self.assertEqual(ordered[0]["slug"], "official")
 
+    def test_hdhive_size_is_preferred_before_pack_within_same_tier(self):
+        larger_single = app.normalize_hdhive_resource(
+            {
+                "slug": "larger-single",
+                "title": "第233集",
+                "share_size": "20G",
+                "unlock_points": 2,
+            }
+        )
+        smaller_pack = app.normalize_hdhive_resource(
+            {
+                "slug": "smaller-pack",
+                "title": "第220-233集",
+                "share_size": "10G",
+                "unlock_points": 2,
+            }
+        )
+
+        ordered = sorted(
+            [smaller_pack, larger_single],
+            key=app.hdhive_resource_priority,
+            reverse=True,
+        )
+
+        self.assertTrue(smaller_pack["is_pack"])
+        self.assertEqual(ordered[0]["slug"], "larger-single")
+
 
 class HDHiveFollowRouteTests(unittest.TestCase):
     def setUp(self):
