@@ -14,9 +14,14 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertNotIn('id="detailFollow"', html)
         self.assertNotIn("showApp();loadSiteNotice();loadRequests();loadFollows()", html)
         self.assertIn(
-            "请手动选择需要的资源版本，转存前会检查 Emby 入库进度。",
+            "点击按钮会完整转存你选择的资源，不再自动筛选缺集。",
             html,
         )
+        self.assertIn("const scope='manual'", html)
+        self.assertIn("const actionLabel='转存此资源'", html)
+        self.assertNotIn("安全转存缺失集", html)
+        self.assertNotIn("115安全预检", html)
+        self.assertNotIn("confirm_whole:", html)
 
 
 if __name__ == "__main__":

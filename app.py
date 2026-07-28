@@ -4399,50 +4399,9 @@ async def hdhive_transfer(
     slug = str(payload.get("slug") or "").strip()
     tmdb_id = int(payload.get("tmdb_id") or 0)
     media_type = str(payload.get("media_type") or "")
-    transfer_scope = str(payload.get("transfer_scope") or "single")
+    transfer_scope = "manual"
     if not slug or media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影巢资源信息无效")
-    if transfer_scope not in ("single", "missing", "whole"):
-        raise HTTPException(400, "转存范围无效")
-    if transfer_completed("hdhive", slug, transfer_scope):
-        raise HTTPException(409, "这个影巢资源已经成功转存过，无需重复添加")
-
-    baseline_episode = 0
-    follow_id: Optional[int] = None
-    if media_type == "tv":
-        with db() as connection:
-            follow = connection.execute(
-                "SELECT * FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
-                "AND active = 1",
-                (user["id"], tmdb_id),
-            ).fetchone()
-        if follow:
-            follow_id = int(follow["id"])
-            follow = refresh_follow_emby_baseline(follow_id)
-            baseline_episode = int(follow["baseline_episode"])
-        else:
-            progress = emby_series_episode_progress(
-                tmdb_id,
-                known_in_library=tmdb_id in emby_library_tmdb_ids(
-                    prefer_cached=True
-                ),
-            )
-            baseline_episode = int(
-                progress.get("emby_latest_episode_number") or 0
-            )
-        if transfer_scope == "whole":
-            allow_existing = (
-                user["role"] == "admin"
-                and payload.get("allow_existing") is True
-                and payload.get("confirm_whole") is True
-            )
-            if baseline_episode > 0 and not allow_existing:
-                raise HTTPException(
-                    400,
-                    f"Emby 已有到第{baseline_episode}集；管理员确认后才能转存整包",
-                )
-            if payload.get("confirm_whole") is not True:
-                raise HTTPException(400, "转存整部剧需要再次确认")
 
     unlocked = hdhive_call("unlock", slug)
     data = unlocked.get("data", unlocked)
@@ -4457,27 +4416,9 @@ async def hdhive_transfer(
 
     title_spec = parse_episode_spec(payload.get("resource_title"))
     wanted_episodes = set(title_spec["episode_numbers"])
-    selected_episode_numbers: list[int] = []
+    selected_episode_numbers = sorted(wanted_episodes)
 
     if not is_115_share_url(share_url):
-        if media_type == "tv" and transfer_scope == "missing":
-            safe_numbers = sorted(
-                number
-                for number in wanted_episodes
-                if number > baseline_episode
-            )
-            if len(safe_numbers) != 1 or title_spec["is_pack"]:
-                raise HTTPException(
-                    400,
-                    "这个离线资源无法在转存前查看文件列表，不能安全地从整包中只选缺失集",
-                )
-            selected_episode_numbers = safe_numbers
-            if completed_episode_numbers(
-                tmdb_id,
-                int(title_spec["season_number"]),
-                set(selected_episode_numbers),
-            ):
-                raise HTTPException(409, "这个单集已经成功转存过，无需重复添加")
         before_tasks = p115_offline_snapshot(client)
         queued = p115_call(
             "提交115离线任务失败",
@@ -4494,48 +4435,19 @@ async def hdhive_transfer(
         message = "已加入115离线下载"
     else:
         before_files = p115_folder_snapshot(client, target_cid)
-        if media_type == "tv" and transfer_scope in ("missing", "single"):
-            tree = p115_share_tree(client, share_url)
-            selected = select_missing_episode_files(
-                tree,
-                baseline_episode=baseline_episode,
-                wanted_episodes=wanted_episodes or None,
-            )
-            if not selected:
-                raise HTTPException(
-                    400,
-                    f"115分享中没有找到高于第{baseline_episode}集的明确单集文件，未执行转存",
-                )
-            selected_ids = [item["_share_id"] for item in selected]
-            for item in selected:
-                selected_episode_numbers.extend(
-                    parse_episode_spec(item["_share_name"])["episode_numbers"]
-                )
-            duplicates = completed_episode_numbers(
-                tmdb_id,
-                int(title_spec["season_number"]),
-                set(selected_episode_numbers),
-            )
-            if duplicates:
-                raise HTTPException(
-                    409,
-                    f"第{compact_episode_numbers(duplicates)}集已经成功转存过，未重复添加",
-                )
-        else:
-            snap = p115_call(
-                "读取115分享失败",
-                client.share_snap,
-                0,
-                share_url=share_url,
-            )
-            if not response_ok(snap):
-                raise HTTPException(502, response_message(snap, "无法读取115分享"))
-            selected_ids = [
-                p115_share_item_id(item)
-                for item in extract_share_items(snap)
-                if p115_share_item_id(item)
-            ]
-            selected_episode_numbers = sorted(wanted_episodes)
+        snap = p115_call(
+            "读取115分享失败",
+            client.share_snap,
+            0,
+            share_url=share_url,
+        )
+        if not response_ok(snap):
+            raise HTTPException(502, response_message(snap, "无法读取115分享"))
+        selected_ids = [
+            p115_share_item_id(item)
+            for item in extract_share_items(snap)
+            if p115_share_item_id(item)
+        ]
         if not selected_ids:
             raise HTTPException(502, "115分享中没有找到可转存内容")
         received = p115_call(
@@ -4551,11 +4463,7 @@ async def hdhive_transfer(
         ):
             raise HTTPException(502, "115接口没有把文件写入目标目录")
         mode = "share"
-        message = (
-            f"已安全选择 {len(selected_ids)} 个缺失单集文件"
-            if media_type == "tv" and transfer_scope in ("missing", "single")
-            else "已按你的确认转存整部资源"
-        )
+        message = "已手动转存所选资源"
 
     record_transfer(
         user_id=int(user["id"]),
@@ -4565,20 +4473,9 @@ async def hdhive_transfer(
         transfer_scope=transfer_scope,
         status="success",
         detail=message,
-        follow_id=follow_id,
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
-    if follow_id and selected_episode_numbers:
-        latest = max(selected_episode_numbers)
-        with db() as connection:
-            connection.execute(
-                "UPDATE tv_follows SET last_transferred_episode = "
-                "MAX(last_transferred_episode, ?), last_seen_episode = "
-                "MAX(last_seen_episode, ?), last_message = ?, updated_at = ? "
-                "WHERE id = ?",
-                (latest, latest, message, now_iso(), follow_id),
-            )
     send_telegram(
         f"☁️ 影巢资源已转存\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
@@ -4599,29 +4496,10 @@ async def dian_transfer(
     resource_key = f"{share_id}:{resource_id}"
     media_type = str(payload.get("media_type") or "")
     tmdb_id = int(payload.get("tmdb_id") or 0)
-    transfer_scope = str(payload.get("transfer_scope") or "manual")
-    if transfer_scope not in ("manual", "single", "missing", "whole"):
-        raise HTTPException(400, "转存范围无效")
-    if transfer_completed("dian", resource_key, transfer_scope):
-        raise HTTPException(409, "这个癫影资源已经成功转存过，无需重复添加")
-    baseline_episode = 0
+    transfer_scope = "manual"
     title_spec = parse_episode_spec(payload.get("resource_title"))
     wanted_episodes = set(title_spec["episode_numbers"])
-    selected_episode_numbers: list[int] = []
-    if media_type == "tv" and tmdb_id > 0:
-        progress = emby_series_episode_progress(
-            tmdb_id,
-            known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
-        )
-        baseline_episode = int(progress.get("emby_latest_episode_number") or 0)
-        if transfer_scope == "whole":
-            if baseline_episode > 0:
-                raise HTTPException(
-                    400,
-                    f"Emby 已有到第{baseline_episode}集，不能再次整部转存；请选择缺失单集",
-                )
-            if payload.get("confirm_whole") is not True:
-                raise HTTPException(400, "转存整部剧需要再次确认")
+    selected_episode_numbers = sorted(wanted_episodes)
     unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
@@ -4645,22 +4523,6 @@ async def dian_transfer(
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
-        if media_type == "tv" and transfer_scope == "missing":
-            safe_numbers = sorted(
-                number for number in wanted_episodes if number > baseline_episode
-            )
-            if len(safe_numbers) != 1 or title_spec["is_pack"]:
-                raise HTTPException(
-                    400,
-                    "这个离线资源无法在转存前查看文件列表，不能安全地从整包中只选缺失集",
-                )
-            selected_episode_numbers = safe_numbers
-            if completed_episode_numbers(
-                tmdb_id,
-                int(title_spec["season_number"]),
-                set(selected_episode_numbers),
-            ):
-                raise HTTPException(409, "这个单集已经成功转存过，无需重复添加")
         before_tasks = p115_offline_snapshot(client)
         if len(links) == 1:
             queued = p115_call(
@@ -4710,49 +4572,20 @@ async def dian_transfer(
         }
 
     before_files = p115_folder_snapshot(client, target_cid)
-    if media_type == "tv" and transfer_scope in ("missing", "single"):
-        tree = p115_share_tree(client, share_url)
-        selected = select_missing_episode_files(
-            tree,
-            baseline_episode=baseline_episode,
-            wanted_episodes=wanted_episodes or None,
-        )
-        if not selected:
-            raise HTTPException(
-                400,
-                f"115分享中没有找到高于第{baseline_episode}集的明确单集文件，未执行转存",
-            )
-        file_ids = ",".join(item["_share_id"] for item in selected)
-        for item in selected:
-            selected_episode_numbers.extend(
-                parse_episode_spec(item["_share_name"])["episode_numbers"]
-            )
-        duplicates = completed_episode_numbers(
-            tmdb_id,
-            int(title_spec["season_number"]),
-            set(selected_episode_numbers),
-        )
-        if duplicates:
-            raise HTTPException(
-                409,
-                f"第{compact_episode_numbers(duplicates)}集已经成功转存过，未重复添加",
-            )
-    else:
-        snap = p115_call(
-            "读取115分享失败",
-            client.share_snap,
-            0,
-            share_url=share_url,
-        )
-        if not response_ok(snap):
-            raise HTTPException(502, response_message(snap, "无法读取115分享"))
-        items = extract_share_items(snap)
-        file_ids = ",".join(
-            str(item.get("fid") or item.get("file_id") or item.get("cid"))
-            for item in items
-            if item.get("fid") or item.get("file_id") or item.get("cid")
-        )
-        selected_episode_numbers = sorted(wanted_episodes)
+    snap = p115_call(
+        "读取115分享失败",
+        client.share_snap,
+        0,
+        share_url=share_url,
+    )
+    if not response_ok(snap):
+        raise HTTPException(502, response_message(snap, "无法读取115分享"))
+    items = extract_share_items(snap)
+    file_ids = ",".join(
+        str(item.get("fid") or item.get("file_id") or item.get("cid"))
+        for item in items
+        if item.get("fid") or item.get("file_id") or item.get("cid")
+    )
     if not file_ids:
         raise HTTPException(502, "115分享中没有找到可转存内容")
     received = p115_call(
@@ -4781,11 +4614,7 @@ async def dian_transfer(
         tmdb_id=tmdb_id,
         transfer_scope=transfer_scope,
         status="success",
-        detail=(
-            f"已安全选择缺失单集文件"
-            if media_type == "tv" and transfer_scope in ("missing", "single")
-            else "已转存到115所选目录"
-        ),
+        detail="已手动转存所选资源",
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )

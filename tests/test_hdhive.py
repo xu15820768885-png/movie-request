@@ -821,7 +821,14 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         read_call = next(call for call in calls if call[0] == "mark_messages_read")
         self.assertEqual(read_call[1][0], [9001])
 
-    def test_whole_transfer_is_rejected_when_library_already_has_episodes(self):
+    def test_manual_transfer_ignores_existing_library_episode_rules(self):
+        class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                return {"state": True, "tasks": []}
+
+            def clouddownload_task_add_url(self, _payload):
+                return {"state": True, "task_id": "offline-1"}
+
         with app.db() as connection:
             user_id = connection.execute(
                 "SELECT id FROM users WHERE username = 'member'"
@@ -833,23 +840,92 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 ") VALUES(?, 101172, '吞噬星空', 232, 232, ?, ?)",
                 (user_id, app.now_iso(), app.now_iso()),
             )
-        with self.assertRaises(app.HTTPException) as error:
-            asyncio.run(
-                app.hdhive_transfer(
-                    FakeRequest(
-                        {
-                            "slug": "resource-slug",
-                            "tmdb_id": 101172,
-                            "media_type": "tv",
-                            "transfer_scope": "whole",
-                            "confirm_whole": True,
-                        }
-                    ),
-                    self.token,
-                )
-            )
-        self.assertEqual(error.exception.status_code, 400)
-        self.assertIn("已有到第232集", error.exception.detail)
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"url": "magnet:?xt=urn:btih:manual-pack"}},
+        ):
+            with patch.object(app, "p115_client", return_value=FakeP115()):
+                with patch.object(app, "wait_for_p115_change", return_value=True):
+                    with patch.object(app, "send_telegram"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(
+                                FakeRequest(
+                                    {
+                                        "slug": "resource-slug",
+                                        "tmdb_id": 101172,
+                                        "media_type": "tv",
+                                        "resource_title": "吞噬星空 S01E01-E233",
+                                    }
+                                ),
+                                self.token,
+                            )
+                        )
+
+        self.assertEqual(result["mode"], "offline")
+        self.assertEqual(result["message"], "已加入115离线下载")
+
+    def test_manual_transfer_receives_full_share_and_allows_retry(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                return {"state": True, "data": {"list": []}}
+
+            def share_snap(self, *_args, **_kwargs):
+                return {
+                    "state": True,
+                    "data": {"list": [{"fid": "101"}, {"cid": "202"}]},
+                }
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+        app.record_transfer(
+            user_id=user_id,
+            source="hdhive",
+            resource_key="retry-share",
+            tmdb_id=223911,
+            transfer_scope="manual",
+            status="success",
+            detail="此前已转存",
+        )
+
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={
+                "data": {
+                    "url": "https://115.com/s/retryshare?password=abcd"
+                }
+            },
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "wait_for_p115_change", return_value=True):
+                    with patch.object(app, "send_telegram"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(
+                                FakeRequest(
+                                    {
+                                        "slug": "retry-share",
+                                        "tmdb_id": 223911,
+                                        "media_type": "tv",
+                                        "resource_title": "仙逆 S01E01-E149",
+                                    }
+                                ),
+                                self.token,
+                            )
+                        )
+
+        self.assertEqual(result["mode"], "share")
+        self.assertEqual(
+            client.received,
+            {"file_id": "101,202", "cid": "0"},
+        )
 
     def test_follow_baseline_is_cleared_after_series_is_removed_from_emby(self):
         with app.db() as connection:
