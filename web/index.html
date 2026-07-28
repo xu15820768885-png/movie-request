@@ -618,7 +618,7 @@
         detailCache.set(requestedKey,detail);detailCache.set(tmdbKey,detail);currentDetail=detail;renderDetails(detail);focusResources();
         episodeProgressPromise.then(progress=>{
           if(loadId!==detailLoadSequence||!currentDetail)return;
-          const complete={...currentDetail,...progress,emby_progress_loading:false};
+          const complete={...currentDetail,in_library:false,emby_latest_season_number:0,emby_latest_episode_number:0,emby_episode_label:'',emby_episode_numbers:{},...progress,emby_progress_loading:false};
           detailCache.set(requestedKey,complete);detailCache.set(tmdbKey,complete);currentDetail=complete;renderDetails(complete);focusResources();
         });
         resourcePromise.then(resourceResult=>{

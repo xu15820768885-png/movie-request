@@ -3469,11 +3469,20 @@ def emby_episode_progress(
     require_user(movie_session)
     if tmdb_id <= 0:
         raise HTTPException(400, "剧集编号无效")
-    library_ids = emby_library_tmdb_ids(prefer_cached=True)
-    return emby_series_episode_progress(
+    library_ids = emby_library_tmdb_ids(force=True)
+    progress = emby_series_episode_progress(
         tmdb_id,
         known_in_library=tmdb_id in library_ids,
+        force=True,
     )
+    return {
+        "in_library": bool(progress.get("emby_latest_episode_number")),
+        "emby_latest_season_number": 0,
+        "emby_latest_episode_number": 0,
+        "emby_episode_label": "",
+        "emby_episode_numbers": {},
+        **progress,
+    }
 
 
 def hdhive_public_status() -> dict[str, Any]:

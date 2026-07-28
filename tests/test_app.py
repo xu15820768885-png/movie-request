@@ -254,7 +254,32 @@ class MovieRequestTests(unittest.TestCase):
             ) as progress:
                 result = app.emby_episode_progress(101172, self.token)
         self.assertEqual(result["emby_latest_episode_number"], 232)
-        progress.assert_called_once_with(101172, known_in_library=True)
+        self.assertTrue(result["in_library"])
+        progress.assert_called_once_with(
+            101172,
+            known_in_library=True,
+            force=True,
+        )
+
+    def test_emby_episode_progress_explicitly_clears_removed_series(self):
+        with patch.object(app, "emby_library_tmdb_ids", return_value=set()) as library:
+            with patch.object(
+                app,
+                "emby_series_episode_progress",
+                return_value={},
+            ) as progress:
+                result = app.emby_episode_progress(223911, self.token)
+
+        self.assertFalse(result["in_library"])
+        self.assertEqual(result["emby_latest_episode_number"], 0)
+        self.assertEqual(result["emby_episode_label"], "")
+        self.assertEqual(result["emby_episode_numbers"], {})
+        library.assert_called_once_with(force=True)
+        progress.assert_called_once_with(
+            223911,
+            known_in_library=False,
+            force=True,
+        )
 
     def test_request_rejected_when_already_in_emby(self):
         canonical = {
