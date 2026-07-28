@@ -400,7 +400,7 @@
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
-        <button id="followTab" class="tab" data-view="follow">我的想看 <span id="followCount"></span></button>
+        <button id="followTab" class="tab hidden" data-view="follow">我的想看 <span id="followCount"></span></button>
         <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
         <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
         <button id="storageTab" class="tab hidden" data-view="storage">资源与 115</button>
@@ -428,8 +428,8 @@
           <div class="inline"><label>Client ID<input id="hdhiveClientId" placeholder="审核通过后填写"></label><label>App Secret<input id="hdhiveAppSecret" type="password" placeholder="留空表示不修改"></label></div>
           <label>固定 Redirect URI<input id="hdhiveRedirectUri" placeholder="https://你的域名/api/hdhive/oauth/callback"></label>
           <label>云服务器固定出口代理<input id="hdhiveProxyUrl" type="password" placeholder="例如：http://用户名:密码@38.55.106.163:3128"></label>
-          <label>申请权限<input id="hdhiveScopes" value="meta query unlock write subscription messages vip"></label>
-          <div class="inline"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto" checked>启用低频追更消息检查</label></div>
+          <label>申请权限<input id="hdhiveScopes" value="meta query unlock write vip"></label>
+          <div class="inline hidden"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">启用低频追更消息检查</label></div>
           <div class="inline"><label>影巢自动签到时间<input id="hdhiveSigninTime" type="time" value="08:35"></label><label>影巢签到模式<select id="hdhiveSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
           <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveSigninEnabled" type="checkbox" style="width:auto">启用影巢每日自动签到</label>
           <div id="hdhiveCheckinResult" class="checkin-result">影巢尚未执行签到</div>
@@ -530,8 +530,7 @@
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
       const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
-      $('followTab').classList.remove('hidden');
-      $('followHelp').textContent=admin?'查看全部成员的影视想看、追更进度和转存状态':'这里只显示你自己的电影订阅、电视剧追更和自动转存结果';
+      $('followTab').classList.add('hidden');
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
       $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
@@ -548,15 +547,12 @@
       const root=$('movieResults'); $('resultCount').textContent=`${items.length} 部`; $('resultTitle').textContent=title;
       root.className='movie-grid'; root.innerHTML=items.map((item,index)=>{
         const isDouban=item.source==='douban';
-        const canFollow=isWatchableMedia(item);
         const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'电视剧');
         const summary=[item.year||'年份未知',item.latest_episode_label||item.series_status_label||''].filter(Boolean).join(' · ');
         const check=item.in_library?'<span class="library-check" title="已在 Emby 片库">✓</span>':(item.rating?`<span class="rating">★ ${item.rating}</span>`:'');
-        const follow=canFollow?`<button class="poster-follow ${item.is_following?'active':''}" data-follow-index="${index}" title="${item.is_following?'已想看':'加入想看'}" aria-label="${item.is_following?'已想看':'加入想看'}"><span>${item.is_following?'♥ 已想看':'♡ 想看'}</span><small>${item.media_type==='movie'?'最大可播放版本':'影巢订阅追更'}</small></button>`:'';
-        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${follow}</article>`;
+        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button></article>`;
       }).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)],true));
-      root.querySelectorAll('[data-follow-index]').forEach(button=>button.onclick=()=>createFollow(items[Number(button.dataset.followIndex)],button,items,title));
     }
     function previewResources(item) {
       if(item.tmdb_id===535167)return [];
@@ -682,11 +678,10 @@
       }).join('');
       const sourcePanel=(provider,label,resources,loading,error)=>`<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${loading?'<div class="dian-source">后台读取中，不影响影片详情显示。</div>':resources.length?`<div class="resource-list">${resourceCards(resources,provider)}</div>`:`<div class="empty">${escapeHtml(error||`${label}暂时没有匹配资源`)}</div>`}</section>`;
       const totalResources=hdhiveResources.length+dianResources.length;
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">追更会绑定影巢原生订阅；收到更新后自动计算 Emby 缺集，多集资源优先，同一集选择最大文件。</div></section>`:'';
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">请手动选择需要的资源版本，转存前会检查 Emby 入库进度。</div></section>`:'';
       const fallbackLabel=item.in_library?'已入库':totalResources?'没有合适版本，仍然求片':'两个资源源暂无资源，提交求片';
       const requestAction=admin?'':`<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button>`;
-      const followAction=isWatchableMedia(item)?`<button id="detailFollow" class="btn btn-primary" ${item.is_following?'disabled':''}>${item.is_following?'已加入想看':'♡ 想看'}</button>`:'';
-      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}${followAction}${requestAction}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
+      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}${requestAction}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
     }
@@ -700,7 +695,6 @@
         $('detailCard').querySelectorAll('[data-resource-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.resourcePanel!==activeResourceProvider));
       });
       const request=$('detailRequest'); if(request&&currentDetail)request.onclick=()=>submitRequest(currentDetail,request);
-      const follow=$('detailFollow'); if(follow&&currentDetail)follow.onclick=()=>createFollow(currentDetail,follow);
     }
     async function previewTransfer(resource,button,provider='dian') {
       if(preview){button.disabled=true;button.textContent='已加入转存';return toast(`《${currentDetail.title}》的 ${resource.res} 版本已加入 115 转存队列`);}
@@ -885,7 +879,7 @@
       const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'Emby 已配置':'尚未配置 Emby';
     }
     async function loadIntegrations() {
-      const hdhive=preview?{status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write subscription messages vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''}:await api('/api/admin/hdhive/status');
+      const hdhive=preview?{status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''}:await api('/api/admin/hdhive/status');
       const settings=preview?{
         dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
@@ -893,11 +887,11 @@
         p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
       }:await api('/api/admin/integrations');
       $('hdhiveStatus').textContent=hdhive.status_label||'等待审核';
-      $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成页面与追更规则';
+      $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成资源查询与转存配置';
       $('hdhiveProxyState').textContent=hdhive.proxy_label||'固定出口待配置';
       $('hdhiveClientId').value=hdhive.client_id||'';
       $('hdhiveRedirectUri').value=hdhive.redirect_uri||'';
-      const hdhiveScopes=(hdhive.scopes||'meta query unlock write subscription messages vip').split(/\s+/).filter(Boolean);
+      const hdhiveScopes=(hdhive.scopes||'meta query unlock write vip').split(/\s+/).filter(scope=>scope&&!['subscription','messages'].includes(scope));
       if(!hdhiveScopes.includes('write'))hdhiveScopes.push('write');
       $('hdhiveScopes').value=hdhiveScopes.join(' ');
       $('hdhivePollEnabled').checked=Boolean(hdhive.poll_enabled);
@@ -964,7 +958,7 @@
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};
-    $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？本地追更记录不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？已有配置不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveCheckinNow').onclick=async()=>{if(preview){$('hdhiveCheckinResult').textContent='刚刚影巢签到成功 · 普通签到 · 获得 8 积分';return toast('影巢签到成功');}try{const result=await api('/api/admin/hdhive/checkin',{method:'POST',body:JSON.stringify({mode:$('hdhiveSigninMode').value})});toast(result.message||'影巢签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('dianCheckinPreview').onclick=async()=>{if(preview){$('checkinResult').textContent='刚刚签到成功 · 运气签到';return toast('癫影签到成功');}try{const result=await api('/api/admin/dian-signin',{method:'POST',body:JSON.stringify({mode:$('dianSigninMode').value})});$('checkinResult').textContent='刚刚签到成功';toast(result.message||'癫影签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('qrLoginPreview').onclick=startQrLogin;
@@ -978,11 +972,11 @@
         $('previewRibbon').textContent = previewMode === 'member'
           ? '成员端预览 · 可选癫影版本或继续求片'
           : '管理员预览 · 癫影签到与 115 转存设置';
-        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadRequests();loadFollows();
+        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadRequests();
         if(currentUser.role==='admin') switchView('admin');
         return;
       }
-      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadRequests();loadFollows();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
     }
     init();
     setInterval(() => {

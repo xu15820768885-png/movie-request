@@ -435,6 +435,15 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.data_patch.stop()
         self.temporary.cleanup()
 
+    def test_disabled_follow_feature_always_reports_polling_off(self):
+        with app.db() as connection:
+            app.set_setting(connection, "hdhive_poll_enabled", "1")
+
+        status = app.hdhive_public_status()
+
+        self.assertFalse(app.FOLLOW_FEATURE_ENABLED)
+        self.assertFalse(status["poll_enabled"])
+
     def test_follow_uses_emby_episode_as_baseline(self):
         detail = {
             "id": 101172,

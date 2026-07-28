@@ -30,6 +30,7 @@ DB_PATH = DATA_DIR / "movie-request.db"
 WEB_PATH = Path(__file__).parent / "web" / "index.html"
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
+FOLLOW_FEATURE_ENABLED = False
 STATUS_NAMES = {
     "pending": "待处理",
     "approved": "已收到",
@@ -269,7 +270,7 @@ def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
     )
 
 
-HDHIVE_SCOPES = "meta query unlock write subscription messages vip"
+HDHIVE_SCOPES = "meta query unlock write vip"
 
 
 def hdhive_key_path() -> Path:
@@ -3249,7 +3250,12 @@ def hdhive_follow_loop() -> None:
                 if last_poll
                 else 0
             )
-            if enabled and configured and time.time() - last_time >= interval:
+            if (
+                FOLLOW_FEATURE_ENABLED
+                and enabled
+                and configured
+                and time.time() - last_time >= interval
+            ):
                 poll_hdhive_follow_messages()
                 with db() as connection:
                     set_setting(connection, "hdhive_last_poll_at", now_iso())
@@ -3618,7 +3624,10 @@ def emby_episode_progress(
 def hdhive_public_status() -> dict[str, Any]:
     with db() as connection:
         row = hdhive_oauth_row(connection)
-        poll_enabled = setting(connection, "hdhive_poll_enabled") != "0"
+        poll_enabled = (
+            FOLLOW_FEATURE_ENABLED
+            and setting(connection, "hdhive_poll_enabled") != "0"
+        )
         poll_interval = max(
             900, int(setting(connection, "hdhive_poll_interval") or 1800)
         )
@@ -3745,7 +3754,9 @@ async def update_hdhive_config(
             set_setting(
                 connection,
                 "hdhive_poll_enabled",
-                "1" if payload["poll_enabled"] else "0",
+                "1"
+                if FOLLOW_FEATURE_ENABLED and payload["poll_enabled"]
+                else "0",
             )
         if payload.get("poll_interval"):
             interval = max(900, min(86400, int(payload["poll_interval"])))
