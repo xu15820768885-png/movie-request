@@ -57,6 +57,36 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(app.verify_password("hello123", encoded))
         self.assertFalse(app.verify_password("wrong123", encoded))
 
+    def test_movie_watch_rejects_iso_and_bdmv_but_keeps_remux(self):
+        self.assertFalse(
+            app.hdhive_movie_resource_is_playable(
+                {"title": "Movie.2026.2160p.UHD.BluRay.ISO"}
+            )
+        )
+        self.assertFalse(
+            app.hdhive_movie_resource_is_playable(
+                {"title": "电影 4K 蓝光原盘 BDMV"}
+            )
+        )
+        self.assertTrue(
+            app.hdhive_movie_resource_is_playable(
+                {"title": "Movie.2026.2160p.UHD.BluRay.REMUX.MKV"}
+            )
+        )
+
+    def test_movie_watch_prefers_largest_playable_resource(self):
+        resources = [
+            {"title": "Movie 4K REMUX MKV", "size_gb": "82G"},
+            {"title": "Movie 4K WEB-DL", "size_gb": "31G"},
+            {"title": "Movie 4K UHD BluRay ISO", "size_gb": "95G"},
+        ]
+        playable = [
+            item for item in resources
+            if app.hdhive_movie_resource_is_playable(item)
+        ]
+        playable.sort(key=app.hdhive_movie_resource_priority, reverse=True)
+        self.assertEqual(playable[0]["title"], "Movie 4K REMUX MKV")
+
     def test_request_uses_canonical_tmdb_metadata(self):
         canonical = {
             "id": 157336,

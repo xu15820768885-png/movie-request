@@ -140,6 +140,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 tmdb_id INTEGER NOT NULL,
+                media_type TEXT NOT NULL DEFAULT 'tv',
                 title TEXT NOT NULL,
                 original_title TEXT NOT NULL DEFAULT '',
                 year TEXT NOT NULL DEFAULT '',
@@ -202,6 +203,15 @@ def init_db() -> None:
                 ON tv_follow_resources(follow_id, observed_at DESC);
             """
         )
+        follow_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(tv_follows)").fetchall()
+        }
+        if "media_type" not in follow_columns:
+            connection.execute(
+                "ALTER TABLE tv_follows "
+                "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'tv'"
+            )
 
 
 def hash_password(password: str, salt: Optional[bytes] = None) -> str:
@@ -1233,12 +1243,36 @@ def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int, i
     )
 
 
+def hdhive_movie_resource_is_playable(resource: dict[str, Any]) -> bool:
+    """Reject disc-image releases that ordinary family players cannot open."""
+
+    text = " ".join(
+        str(resource.get(key) or "")
+        for key in ("title", "files", "source", "format", "container")
+    ).lower()
+    return not bool(
+        re.search(r"(?:^|[\s._-])iso(?:$|[\s._-])|蓝光原盘|uhd原盘|bdmv", text)
+    )
+
+
+def hdhive_movie_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int]:
+    """For movies, playable files win and then the largest version is preferred."""
+
+    return (
+        1 if hdhive_movie_resource_is_playable(resource) else 0,
+        resource_size_bytes(resource.get("size_gb")),
+        1 if resource.get("is_official_group") or resource.get("vip_free") else 0,
+    )
+
+
 def hdhive_response_data(result: dict[str, Any]) -> Any:
     return result.get("data", result) if isinstance(result, dict) else result
 
 
 def hdhive_subscription_target(
-    share_result: dict[str, Any], expected_tmdb_id: int
+    share_result: dict[str, Any],
+    expected_tmdb_id: int,
+    expected_media_type: str = "tv",
 ) -> dict[str, Any]:
     data = hdhive_response_data(share_result)
     if not isinstance(data, dict):
@@ -1257,29 +1291,36 @@ def hdhive_subscription_target(
             break
 
     media_type = str(
-        media.get("media_type") or media.get("type") or media.get("kind") or "tv"
+        media.get("media_type")
+        or media.get("type")
+        or media.get("kind")
+        or expected_media_type
     ).lower()
-    if media_type not in ("tv", "series", "television"):
-        raise HTTPException(400, "只能把影巢电视剧资源加入原生追更")
+    normalized_type = (
+        "tv" if media_type in ("tv", "series", "television") else
+        "movie" if media_type in ("movie", "film") else ""
+    )
+    if normalized_type != expected_media_type:
+        raise HTTPException(400, "影巢资源类型与当前想看项目不一致")
 
     try:
         returned_tmdb_id = int(media.get("tmdb_id") or 0)
     except (TypeError, ValueError):
         returned_tmdb_id = 0
     if returned_tmdb_id and returned_tmdb_id != expected_tmdb_id:
-        raise HTTPException(400, "影巢资源关联的电视剧与当前追更项目不一致")
+        raise HTTPException(400, "影巢资源关联的影片与当前想看项目不一致")
     if target_id <= 0:
-        raise HTTPException(502, "影巢分享详情缺少电视剧内部编号，无法创建订阅")
+        raise HTTPException(502, "影巢分享详情缺少影片内部编号，无法创建订阅")
 
     return {
         "target_type": "media_resource",
         "target_id": target_id,
-        "target_key": f"tv:{target_id}",
+        "target_key": f"{expected_media_type}:{target_id}",
         "title": str(
             media.get("title")
             or media.get("name")
             or data.get("title")
-            or "影巢电视剧资源"
+            or "影巢影片资源"
         ).strip(),
     }
 
@@ -2696,11 +2737,34 @@ def refresh_hdhive_subscribed_follows() -> int:
         ).fetchall()
     changed = 0
     for follow in follows:
-        result = hdhive_call("resources", "tv", int(follow["tmdb_id"]))
+        media_type = str(follow["media_type"] or "tv")
+        result = hdhive_call("resources", media_type, int(follow["tmdb_id"]))
         resources = [
             normalize_hdhive_resource(item)
             for item in extract_share_items(result)
         ]
+        if media_type == "movie":
+            resources = [
+                resource for resource in resources
+                if hdhive_movie_resource_is_playable(resource)
+            ]
+            resources.sort(key=hdhive_movie_resource_priority, reverse=True)
+            cache_follow_resources(int(follow["id"]), "hdhive", resources)
+            with db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET last_checked_at = ?, "
+                    "last_message = ?, updated_at = ? WHERE id = ?",
+                    (
+                        now_iso(),
+                        (
+                            "已检查影巢电影资源；ISO/BDMV 已排除，"
+                            "可播放版本按文件大小排序"
+                        ),
+                        now_iso(),
+                        follow["id"],
+                    ),
+                )
+            continue
         cache_follow_resources(int(follow["id"]), "hdhive", resources)
         candidates: set[tuple[int, int]] = set()
         for resource in resources:
@@ -2975,17 +3039,18 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         media_type = item.get("media_type")
         results.append(tmdb_media_item(item, media_type, library_ids))
     with db() as connection:
-        followed_ids = {
-            int(row[0])
+        followed_items = {
+            (str(row[0] or "tv"), int(row[1]))
             for row in connection.execute(
-                "SELECT tmdb_id FROM tv_follows WHERE user_id = ? AND active = 1",
+                "SELECT media_type, tmdb_id FROM tv_follows "
+                "WHERE user_id = ? AND active = 1",
                 (user["id"],),
             ).fetchall()
         }
     for item in results:
         item["is_following"] = (
-            item.get("media_type") == "tv"
-            and int(item.get("tmdb_id") or 0) in followed_ids
+            (str(item.get("media_type") or ""), int(item.get("tmdb_id") or 0))
+            in followed_items
         )
     return {"results": results}
 
@@ -3532,31 +3597,43 @@ async def create_follow(
     user = require_user(movie_session)
     payload = await request.json()
     tmdb_id = int(payload.get("tmdb_id") or 0)
-    if tmdb_id <= 0:
-        raise HTTPException(400, "剧集编号无效")
+    media_type = str(payload.get("media_type") or "tv").strip().lower()
+    if tmdb_id <= 0 or media_type not in ("movie", "tv"):
+        raise HTTPException(400, "影片编号无效")
     detail = tmdb_get(
-        f"/tv/{tmdb_id}",
+        f"/{media_type}/{tmdb_id}",
         {"language": "zh-CN", "append_to_response": "external_ids"},
     )
     if int(detail.get("id") or 0) != tmdb_id:
-        raise HTTPException(400, "TMDB 没有返回对应剧集")
-    progress = emby_series_episode_progress(
-        tmdb_id,
-        known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
+        raise HTTPException(400, "TMDB 没有返回对应影片")
+    progress = (
+        emby_series_episode_progress(
+            tmdb_id,
+            known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
+        )
+        if media_type == "tv"
+        else {}
     )
     baseline_season = int(progress.get("emby_latest_season_number") or 1)
     baseline_episode = int(progress.get("emby_latest_episode_number") or 0)
-    title = str(detail.get("name") or detail.get("original_name") or "未命名剧集")
-    first_air = str(detail.get("first_air_date") or "")
+    title = str(
+        detail.get("name")
+        or detail.get("title")
+        or detail.get("original_name")
+        or detail.get("original_title")
+        or "未命名影片"
+    )
+    first_air = str(detail.get("first_air_date") or detail.get("release_date") or "")
     with db() as connection:
         connection.execute(
             "INSERT INTO tv_follows("
-            "user_id, tmdb_id, title, original_title, year, poster_path, "
+            "user_id, tmdb_id, media_type, title, original_title, year, poster_path, "
             "baseline_season, baseline_episode, last_seen_season, "
             "last_seen_episode, created_at, updated_at"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(user_id, tmdb_id) DO UPDATE SET active = 1, "
-            "title = excluded.title, original_title = excluded.original_title, "
+            "media_type = excluded.media_type, title = excluded.title, "
+            "original_title = excluded.original_title, "
             "year = excluded.year, poster_path = excluded.poster_path, "
             "baseline_season = MAX(tv_follows.baseline_season, excluded.baseline_season), "
             "baseline_episode = MAX(tv_follows.baseline_episode, excluded.baseline_episode), "
@@ -3564,8 +3641,9 @@ async def create_follow(
             (
                 user["id"],
                 tmdb_id,
+                media_type,
                 title,
-                str(detail.get("original_name") or ""),
+                str(detail.get("original_name") or detail.get("original_title") or ""),
                 first_air[:4],
                 str(detail.get("poster_path") or ""),
                 baseline_season,
@@ -3584,25 +3662,41 @@ async def create_follow(
         ).fetchone()
     bind_error = ""
     try:
-        resources_result = hdhive_call("resources", "tv", tmdb_id)
+        resources_result = hdhive_call("resources", media_type, tmdb_id)
         resources = [
             normalize_hdhive_resource(item)
             for item in extract_share_items(resources_result)
         ]
-        resources.sort(key=hdhive_resource_priority, reverse=True)
+        resources.sort(
+            key=(
+                hdhive_movie_resource_priority
+                if media_type == "movie"
+                else hdhive_resource_priority
+            ),
+            reverse=True,
+        )
         cache_follow_resources(int(row["id"]), "hdhive", resources)
         selected = next(
-            (resource for resource in resources if resource.get("slug")),
+            (
+                resource
+                for resource in resources
+                if resource.get("slug")
+                and (
+                    media_type != "movie"
+                    or hdhive_movie_resource_is_playable(resource)
+                )
+            ),
             None,
         )
         if not selected:
-            raise HTTPException(404, "影巢暂时没有可用于原生订阅的资源")
+            raise HTTPException(404, "影巢暂时没有可订阅的可播放资源")
         row = bind_hdhive_follow_subscription(int(row["id"]), selected["slug"])
-        Thread(
-            target=auto_replenish_hdhive_follow,
-            args=(int(row["id"]), resources),
-            daemon=True,
-        ).start()
+        if media_type == "tv":
+            Thread(
+                target=auto_replenish_hdhive_follow,
+                args=(int(row["id"]), resources),
+                daemon=True,
+            ).start()
     except HTTPException as error:
         bind_error = str(error.detail)
         with db() as connection:
@@ -3610,7 +3704,7 @@ async def create_follow(
                 "UPDATE tv_follows SET last_message = ?, updated_at = ? "
                 "WHERE id = ?",
                 (
-                    f"本地追更已建立；影巢原生订阅等待重试：{bind_error}",
+                    f"本地想看已建立；影巢原生订阅等待重试：{bind_error}",
                     now_iso(),
                     row["id"],
                 ),
@@ -3643,7 +3737,11 @@ def bind_hdhive_follow_subscription(
         raise HTTPException(404, "没有找到这条有效追更")
 
     share_result = hdhive_call("share", slug)
-    target = hdhive_subscription_target(share_result, int(follow["tmdb_id"]))
+    target = hdhive_subscription_target(
+        share_result,
+        int(follow["tmdb_id"]),
+        str(follow["media_type"] or "tv"),
+    )
     created = hdhive_call(
         "create_subscription",
         target_type=target["target_type"],
@@ -3763,17 +3861,33 @@ def follow_resources(
     hdhive_items: list[dict[str, Any]] = []
     dian_items: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
+    media_type = str(row["media_type"] or "tv")
     try:
-        hdhive_items = hdhive_resources("tv", row["tmdb_id"], movie_session)[
+        hdhive_items = hdhive_resources(media_type, row["tmdb_id"], movie_session)[
             "resources"
         ]
+        if media_type == "movie":
+            hdhive_items = [
+                item for item in hdhive_items
+                if hdhive_movie_resource_is_playable(item)
+            ]
+            hdhive_items.sort(key=hdhive_movie_resource_priority, reverse=True)
         cache_follow_resources(follow_id, "hdhive", hdhive_items)
     except HTTPException as error:
         errors["hdhive"] = str(error.detail)
     try:
-        dian_items = dian_resources("tv", row["tmdb_id"], None, movie_session)[
+        dian_items = dian_resources(media_type, row["tmdb_id"], None, movie_session)[
             "resources"
         ]
+        if media_type == "movie":
+            dian_items = [
+                item for item in dian_items
+                if hdhive_movie_resource_is_playable(item)
+            ]
+            dian_items.sort(
+                key=lambda item: resource_size_bytes(item.get("size_gb")),
+                reverse=True,
+            )
         cache_follow_resources(follow_id, "dian", dian_items)
     except HTTPException as error:
         errors["dian"] = str(error.detail)
