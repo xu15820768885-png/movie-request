@@ -753,6 +753,50 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         read_call = next(call for call in calls if call[0] == "mark_messages_read")
         self.assertEqual(read_call[1][0], [9001])
 
+    def test_auto_replenish_never_transfers_episodes_at_or_below_baseline(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_season, baseline_episode, "
+                "last_seen_season, last_seen_episode, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 1, 132, 1, 132, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        resource = app.normalize_hdhive_resource(
+            {
+                "slug": "episodes-1-80",
+                "title": "仙逆 S01E01-E80",
+                "share_size": "123.95GB",
+                "unlock_points": 0,
+            }
+        )
+        progress = {
+            "emby_latest_season_number": 1,
+            "emby_latest_episode_number": 132,
+            # Emby omitted 1-32 from its detailed enumeration even though the
+            # saved follow baseline confirms the library already reached 132.
+            "emby_episode_numbers": {"1": list(range(33, 133))},
+        }
+        with patch.object(
+            app,
+            "emby_series_episode_progress",
+            return_value=progress,
+        ):
+            with patch.object(app, "p115_client", return_value=object()):
+                with patch.object(app, "hdhive_call") as hdhive:
+                    result = app.auto_replenish_hdhive_follow(
+                        follow_id,
+                        [resource],
+                    )
+
+        self.assertEqual(result["transferred"], [])
+        self.assertIn("没有找到", result["message"])
+        hdhive.assert_not_called()
+
     def test_whole_transfer_is_rejected_when_library_already_has_episodes(self):
         with app.db() as connection:
             user_id = connection.execute(

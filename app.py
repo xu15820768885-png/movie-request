@@ -2769,6 +2769,13 @@ def auto_replenish_hdhive_follow(
         for value in by_season.get(str(season_number), [])
         if int(value) > 0
     }
+    baseline_season = int(follow["baseline_season"] or 1)
+    baseline_episode = int(follow["baseline_episode"] or 0)
+    if season_number == baseline_season and baseline_episode > 0:
+        # The watch card promises "continue from the next episode". Emby may
+        # omit older episodes from its enumerated result even though the
+        # library already contains them, so the saved baseline is a hard floor.
+        present.update(range(1, baseline_episode + 1))
     present.update(transferred_episode_set(tmdb_id, season_number))
 
     if resources is None:
