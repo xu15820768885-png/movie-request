@@ -3,3 +3,4 @@ __pycache__/
 .env
 data/
 115-cookies.txt
+deploy/hdhive-egress/passwords

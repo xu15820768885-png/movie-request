@@ -18,9 +18,11 @@ from urllib.parse import quote, urlparse
 
 import requests
 import uvicorn
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
+from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -116,6 +118,78 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS request_user_idx ON movie_requests(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS request_status_idx ON movie_requests(status, created_at DESC);
+            CREATE TABLE IF NOT EXISTS hdhive_oauth (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                client_id TEXT NOT NULL DEFAULT '',
+                app_secret_cipher TEXT NOT NULL DEFAULT '',
+                access_token_cipher TEXT NOT NULL DEFAULT '',
+                refresh_token_cipher TEXT NOT NULL DEFAULT '',
+                scopes TEXT NOT NULL DEFAULT '',
+                redirect_uri TEXT NOT NULL DEFAULT '',
+                proxy_url_cipher TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'waiting_approval',
+                token_expires_at TEXT NOT NULL DEFAULT '',
+                authorized_at TEXT NOT NULL DEFAULT '',
+                state_hash TEXT NOT NULL DEFAULT '',
+                state_expires_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO hdhive_oauth(id, updated_at) VALUES(1, '');
+            CREATE TABLE IF NOT EXISTS tv_follows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                tmdb_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                original_title TEXT NOT NULL DEFAULT '',
+                year TEXT NOT NULL DEFAULT '',
+                poster_path TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                mode TEXT NOT NULL DEFAULT 'notify',
+                source_preference TEXT NOT NULL DEFAULT 'hdhive_first',
+                baseline_season INTEGER NOT NULL DEFAULT 1,
+                baseline_episode INTEGER NOT NULL DEFAULT 0,
+                last_seen_season INTEGER NOT NULL DEFAULT 1,
+                last_seen_episode INTEGER NOT NULL DEFAULT 0,
+                last_transferred_season INTEGER NOT NULL DEFAULT 0,
+                last_transferred_episode INTEGER NOT NULL DEFAULT 0,
+                hdhive_subscription_id INTEGER,
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_message TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, tmdb_id)
+            );
+            CREATE INDEX IF NOT EXISTS tv_follow_active_idx
+                ON tv_follows(active, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS resource_transfer_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                follow_id INTEGER REFERENCES tv_follows(id) ON DELETE SET NULL,
+                source TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                season_number INTEGER NOT NULL DEFAULT 0,
+                episode_number INTEGER NOT NULL DEFAULT 0,
+                transfer_scope TEXT NOT NULL DEFAULT 'manual',
+                status TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            DROP INDEX IF EXISTS resource_transfer_success_idx;
+            CREATE UNIQUE INDEX resource_transfer_success_idx
+                ON resource_transfer_log(source, resource_key, transfer_scope, episode_number)
+                WHERE status = 'success';
+            CREATE UNIQUE INDEX IF NOT EXISTS resource_episode_success_idx
+                ON resource_transfer_log(tmdb_id, season_number, episode_number)
+                WHERE status = 'success' AND episode_number > 0;
+            CREATE TABLE IF NOT EXISTS hdhive_message_log (
+                message_key TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
             """
         )
 
@@ -163,6 +237,129 @@ def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, str(value or "").strip()),
     )
+
+
+HDHIVE_SCOPES = "meta query unlock subscription messages vip"
+
+
+def hdhive_key_path() -> Path:
+    return DATA_DIR / "hdhive-fernet.key"
+
+
+def hdhive_fernet() -> Fernet:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = hdhive_key_path()
+    if not path.exists():
+        path.write_bytes(Fernet.generate_key())
+        path.chmod(0o600)
+    return Fernet(path.read_bytes().strip())
+
+
+def encrypt_secret(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    return hdhive_fernet().encrypt(clean.encode()).decode()
+
+
+def decrypt_secret(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    try:
+        return hdhive_fernet().decrypt(clean.encode()).decode()
+    except (InvalidToken, ValueError) as error:
+        raise HTTPException(500, "影巢密钥无法解密，请管理员重新保存配置") from error
+
+
+def hdhive_oauth_row(connection: sqlite3.Connection) -> sqlite3.Row:
+    row = connection.execute("SELECT * FROM hdhive_oauth WHERE id = 1").fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO hdhive_oauth(id, updated_at) VALUES(1, ?)",
+            (now_iso(),),
+        )
+        row = connection.execute("SELECT * FROM hdhive_oauth WHERE id = 1").fetchone()
+    return row
+
+
+def hdhive_save_tokens(tokens: TokenSet) -> None:
+    if not tokens.access_token:
+        raise HTTPException(502, "影巢没有返回 Access Token")
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=max(tokens.expires_in, 0))
+    ).isoformat()
+    with db() as connection:
+        current = hdhive_oauth_row(connection)
+        refresh = tokens.refresh_token or decrypt_secret(current["refresh_token_cipher"])
+        connection.execute(
+            "UPDATE hdhive_oauth SET access_token_cipher = ?, "
+            "refresh_token_cipher = ?, scopes = ?, token_expires_at = ?, "
+            "authorized_at = ?, status = 'connected', last_error = '', updated_at = ? "
+            "WHERE id = 1",
+            (
+                encrypt_secret(tokens.access_token),
+                encrypt_secret(refresh),
+                " ".join(tokens.scopes) or current["scopes"] or HDHIVE_SCOPES,
+                expires_at,
+                now_iso(),
+                now_iso(),
+            ),
+        )
+
+
+def hdhive_client(require_authorized: bool = True) -> HDHiveOpenAPI:
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        api_key = decrypt_secret(row["app_secret_cipher"])
+        access_token = decrypt_secret(row["access_token_cipher"])
+        refresh_token = decrypt_secret(row["refresh_token_cipher"])
+        proxy_url = (
+            decrypt_secret(row["proxy_url_cipher"])
+            or os.getenv("HDHIVE_PROXY_URL", "").strip()
+        )
+    if not row["client_id"] or not api_key:
+        raise HTTPException(503, "影巢应用仍在等待审核或尚未填写凭证")
+    if require_authorized and not access_token:
+        raise HTTPException(503, "影巢应用尚未完成 OAuth 授权")
+    return HDHiveOpenAPI(
+        api_key=api_key,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        proxy_url=proxy_url,
+        on_token_refresh=hdhive_save_tokens,
+    )
+
+
+def hdhive_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    try:
+        result = getattr(hdhive_client(), method)(*args, **kwargs)
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET status = 'connected', last_error = '', "
+                "updated_at = ? WHERE id = 1",
+                (now_iso(),),
+            )
+        return result if isinstance(result, dict) else {"data": result}
+    except HTTPException:
+        raise
+    except HDHiveOpenAPIError as error:
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET last_error = ?, status = ?, updated_at = ? "
+                "WHERE id = 1",
+                (
+                    str(error),
+                    "rate_limited" if error.status == 429 else "error",
+                    now_iso(),
+                ),
+            )
+        if error.status == 429:
+            wait = f"，请等待约 {error.retry_after} 秒" if error.retry_after else ""
+            raise HTTPException(429, f"影巢调用已达到限制{wait}") from error
+        raise HTTPException(error.status or 502, f"影巢接口：{error}") from error
+    except (requests.RequestException, RuntimeError, ValueError, KeyError) as error:
+        raise HTTPException(502, f"暂时无法连接影巢：{error}") from error
 
 
 def dian_client() -> Dian115OpenAPI:
@@ -452,6 +649,167 @@ def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
     return False
 
 
+def p115_share_item_id(item: dict[str, Any]) -> str:
+    return str(item.get("fid") or item.get("file_id") or item.get("cid") or "")
+
+
+def p115_share_item_name(item: dict[str, Any]) -> str:
+    return str(item.get("n") or item.get("file_name") or item.get("name") or "")
+
+
+def p115_share_item_is_dir(item: dict[str, Any]) -> bool:
+    kind = str(
+        item.get("file_type")
+        or item.get("type")
+        or item.get("category")
+        or ""
+    ).lower()
+    return bool(
+        item.get("is_dir")
+        or item.get("is_folder")
+        or kind in ("dir", "folder", "directory")
+        or (item.get("cid") and not item.get("fid") and not item.get("file_id"))
+    )
+
+
+def p115_share_tree(
+    client: Any,
+    share_url: str,
+    *,
+    cid: int = 0,
+    depth: int = 0,
+    max_depth: int = 4,
+    visited: Optional[set[str]] = None,
+) -> list[dict[str, Any]]:
+    visited = visited or set()
+    result = p115_call(
+        "读取115分享文件失败",
+        client.share_snap,
+        cid,
+        share_url=share_url,
+    )
+    if not response_ok(result):
+        raise HTTPException(502, response_message(result, "无法读取115分享"))
+    output: list[dict[str, Any]] = []
+    for item in extract_share_items(result):
+        entry = dict(item)
+        entry["_share_id"] = p115_share_item_id(item)
+        entry["_share_name"] = p115_share_item_name(item)
+        entry["_share_depth"] = depth
+        entry["_share_is_dir"] = p115_share_item_is_dir(item)
+        output.append(entry)
+        folder_id = entry["_share_id"]
+        if (
+            entry["_share_is_dir"]
+            and folder_id
+            and folder_id not in visited
+            and depth < max_depth
+        ):
+            visited.add(folder_id)
+            output.extend(
+                p115_share_tree(
+                    client,
+                    share_url,
+                    cid=int(folder_id),
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    visited=visited,
+                )
+            )
+    return output
+
+
+def select_missing_episode_files(
+    items: list[dict[str, Any]],
+    *,
+    baseline_episode: int,
+    wanted_episodes: Optional[set[int]] = None,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    wanted = wanted_episodes or set()
+    for item in items:
+        if item.get("_share_is_dir"):
+            continue
+        episode = parse_episode_spec(item.get("_share_name"))
+        numbers = set(episode["episode_numbers"])
+        if not numbers:
+            continue
+        if wanted:
+            numbers &= wanted
+        else:
+            numbers = {number for number in numbers if number > baseline_episode}
+        if numbers:
+            selected.append(item)
+    return selected
+
+
+def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> bool:
+    with db() as connection:
+        return bool(
+            connection.execute(
+                "SELECT 1 FROM resource_transfer_log "
+                "WHERE source = ? AND resource_key = ? AND transfer_scope = ? "
+                "AND status = 'success' LIMIT 1",
+                (source, resource_key, transfer_scope),
+            ).fetchone()
+        )
+
+
+def completed_episode_numbers(
+    tmdb_id: int, season_number: int, episode_numbers: set[int]
+) -> set[int]:
+    if tmdb_id <= 0 or not episode_numbers:
+        return set()
+    placeholders = ",".join("?" for _ in episode_numbers)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT episode_number FROM resource_transfer_log "
+            "WHERE tmdb_id = ? AND season_number = ? AND status = 'success' "
+            f"AND episode_number IN ({placeholders})",
+            (tmdb_id, season_number, *sorted(episode_numbers)),
+        ).fetchall()
+    return {int(row["episode_number"]) for row in rows}
+
+
+def record_transfer(
+    *,
+    user_id: int,
+    source: str,
+    resource_key: str,
+    tmdb_id: int,
+    transfer_scope: str,
+    status: str,
+    detail: str,
+    follow_id: Optional[int] = None,
+    season_number: int = 0,
+    episode_numbers: Optional[list[int]] = None,
+) -> None:
+    numbers = episode_numbers or [0]
+    with db() as connection:
+        for episode_number in numbers:
+            connection.execute(
+                "INSERT OR IGNORE INTO resource_transfer_log("
+                "user_id, follow_id, source, resource_key, tmdb_id, "
+                "season_number, episode_number, transfer_scope, status, "
+                "detail, created_at, updated_at"
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    follow_id,
+                    source,
+                    resource_key,
+                    tmdb_id,
+                    season_number,
+                    int(episode_number),
+                    transfer_scope,
+                    status,
+                    detail,
+                    now_iso(),
+                    now_iso(),
+                ),
+            )
+
+
 def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
@@ -513,6 +871,125 @@ def compact_episode_numbers(numbers: set[int]) -> str:
         start = previous = number
     ranges.append(str(start) if start == previous else f"{start}–{previous}")
     return "、".join(ranges)
+
+
+def parse_episode_spec(text: Any) -> dict[str, Any]:
+    """Parse only explicit episode markers; resolutions and years are ignored."""
+    value = str(text or "").strip()
+    seasons: set[int] = set()
+    episodes: set[int] = set()
+    complete_words = bool(re.search(r"(全集|合集|全\d+\s*集|完结)", value, re.I))
+
+    for match in re.finditer(
+        r"(?i)\bS(\d{1,3})\s*E(\d{1,4})(?:\s*[-–~至]\s*E?(\d{1,4}))?",
+        value,
+    ):
+        seasons.add(int(match.group(1)))
+        start = int(match.group(2))
+        end = int(match.group(3) or start)
+        if 0 < start <= end <= 10000:
+            episodes.update(range(start, end + 1))
+
+    for match in re.finditer(
+        r"(?i)\bE(\d{1,4})(?:\s*[-–~至]\s*E?(\d{1,4}))\b",
+        value,
+    ):
+        start, end = int(match.group(1)), int(match.group(2))
+        if 0 < start <= end <= 10000:
+            episodes.update(range(start, end + 1))
+
+    for match in re.finditer(
+        r"(?:第\s*)?(\d{1,4})(?:\s*[-–~至]\s*(?:第\s*)?(\d{1,4}))?\s*集",
+        value,
+    ):
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if 0 < start <= end <= 10000:
+            episodes.update(range(start, end + 1))
+
+    for match in re.finditer(r"(\d{1,4})\s*[-–~至]\s*(\d{1,4})\s*不缺集", value):
+        start, end = int(match.group(1)), int(match.group(2))
+        if 0 < start <= end <= 10000:
+            episodes.update(range(start, end + 1))
+
+    for match in re.finditer(r"第\s*(\d{1,3})\s*季", value):
+        seasons.add(int(match.group(1)))
+
+    episode_start = min(episodes) if episodes else 0
+    episode_end = max(episodes) if episodes else 0
+    is_pack = bool(
+        len(episodes) > 1
+        or complete_words
+        or re.search(r"(不缺集|持续更新|长期更新|季全|整季)", value, re.I)
+    )
+    label = ""
+    if episodes:
+        episode_text = compact_episode_numbers(episodes)
+        if len(seasons) == 1:
+            label = f"第{next(iter(seasons))}季 · 第{episode_text}集"
+        else:
+            label = f"第{episode_text}集"
+    elif complete_words:
+        label = "全集/合集"
+    return {
+        "season_numbers": sorted(seasons),
+        "episode_numbers": sorted(episodes),
+        "season_number": min(seasons) if seasons else 1,
+        "episode_start": episode_start,
+        "episode_end": episode_end,
+        "is_pack": is_pack,
+        "is_complete_series": complete_words,
+        "episode_label": label,
+        "safe_single_episode": len(episodes) == 1 and not is_pack,
+    }
+
+
+def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
+    title = str(item.get("title") or "影巢资源").strip()
+    episode = parse_episode_spec(title)
+
+    def joined(value: Any, fallback: str = "") -> str:
+        if isinstance(value, list):
+            clean = [str(entry) for entry in value if str(entry).strip()]
+            return " · ".join(clean) or fallback
+        return str(value or fallback)
+
+    subtitle = " · ".join(
+        value
+        for value in (
+            joined(item.get("subtitle_language")),
+            joined(item.get("subtitle_type")),
+        )
+        if value
+    )
+    return {
+        "provider": "hdhive",
+        "slug": str(item.get("slug") or ""),
+        "title": title,
+        "res": joined(item.get("video_resolution"), "规格待确认"),
+        "codec": "编码待解锁后确认",
+        "hdr": "",
+        "audio": "音轨待解锁后确认",
+        "chn_sub": "中" in subtitle or "简" in subtitle,
+        "subtitle": subtitle or "字幕信息未知",
+        "size_gb": str(item.get("share_size") or "未知"),
+        "source": joined(item.get("source"), "影巢"),
+        "files": episode["episode_label"] or "标题未标明具体集数",
+        "episode_label": episode["episode_label"],
+        "episode_start": episode["episode_start"],
+        "episode_end": episode["episode_end"],
+        "season_number": episode["season_number"],
+        "episode_numbers": episode["episode_numbers"],
+        "is_pack": episode["is_pack"],
+        "is_complete_series": episode["is_complete_series"],
+        "safe_single_episode": episode["safe_single_episode"],
+        "share_type_label": str(item.get("pan_type") or "网盘"),
+        "unlock_points": item.get("unlock_points"),
+        "is_unlocked": bool(item.get("is_unlocked")),
+        "media_url": str(item.get("media_url") or ""),
+        "media_slug": str(item.get("media_slug") or ""),
+        "hot": "-",
+    }
 
 
 def dian_number_values(value: Any, *, allow_zero: bool = False) -> set[int]:
@@ -1522,6 +1999,82 @@ def dian_signin_loop() -> None:
         time.sleep(30)
 
 
+def poll_hdhive_follow_messages() -> int:
+    with db() as connection:
+        active_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM tv_follows WHERE active = 1"
+            ).fetchone()[0]
+        )
+    if not active_count:
+        return 0
+    result = hdhive_call("messages", status="unread", page=1, page_size=50)
+    data = result.get("data", [])
+    if isinstance(data, dict):
+        items = extract_share_items({"data": data})
+    elif isinstance(data, list):
+        items = [item for item in data if isinstance(item, dict)]
+    else:
+        items = []
+    created = 0
+    for item in items:
+        message_key = str(
+            item.get("id")
+            or item.get("message_id")
+            or hashlib.sha256(
+                json.dumps(item, sort_keys=True, ensure_ascii=False).encode()
+            ).hexdigest()
+        )
+        event_type = str(item.get("event_type") or item.get("type") or "")
+        with db() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO hdhive_message_log("
+                "message_key, event_type, payload_json, created_at"
+                ") VALUES(?, ?, ?, ?)",
+                (
+                    message_key,
+                    event_type,
+                    json.dumps(item, ensure_ascii=False),
+                    now_iso(),
+                ),
+            )
+        if cursor.rowcount:
+            created += 1
+            title = str(item.get("title") or item.get("subject") or "订阅资源有更新")
+            send_telegram(f"🆕 影巢追更提醒\n\n{title}\n请到映单“我的追更”中查看并确认转存。")
+    return created
+
+
+def hdhive_follow_loop() -> None:
+    while True:
+        try:
+            with db() as connection:
+                row = hdhive_oauth_row(connection)
+                enabled = setting(connection, "hdhive_poll_enabled") != "0"
+                interval = max(
+                    900,
+                    int(setting(connection, "hdhive_poll_interval") or 1800),
+                )
+                last_poll = setting(connection, "hdhive_last_poll_at")
+                configured = bool(
+                    row["access_token_cipher"]
+                    and row["app_secret_cipher"]
+                    and row["status"] in ("connected", "rate_limited")
+                )
+            last_time = (
+                datetime.fromisoformat(last_poll).timestamp()
+                if last_poll
+                else 0
+            )
+            if enabled and configured and time.time() - last_time >= interval:
+                poll_hdhive_follow_messages()
+                with db() as connection:
+                    set_setting(connection, "hdhive_last_poll_at", now_iso())
+        except Exception:
+            pass
+        time.sleep(60)
+
+
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
@@ -1529,6 +2082,7 @@ def startup() -> None:
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
+    Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
 
 
 @APP.get("/")
@@ -1855,6 +2409,397 @@ def emby_episode_progress(
     )
 
 
+def hdhive_public_status() -> dict[str, Any]:
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        poll_enabled = setting(connection, "hdhive_poll_enabled") != "0"
+        poll_interval = max(
+            900, int(setting(connection, "hdhive_poll_interval") or 1800)
+        )
+        last_poll = setting(connection, "hdhive_last_poll_at")
+    configured = bool(row["client_id"] and row["app_secret_cipher"])
+    connected = bool(configured and row["access_token_cipher"])
+    status = row["status"]
+    if not configured:
+        status = "waiting_approval"
+    elif not connected:
+        status = "ready_to_authorize"
+    elif status not in ("rate_limited", "error"):
+        status = "connected"
+    labels = {
+        "waiting_approval": "等待审核",
+        "ready_to_authorize": "等待授权",
+        "connected": "已连接",
+        "rate_limited": "已限流，等待恢复",
+        "error": "连接异常",
+    }
+    return {
+        "status": status,
+        "status_label": labels.get(status, status),
+        "configured": configured,
+        "connected": connected,
+        "client_id": row["client_id"],
+        "scopes": row["scopes"] or HDHIVE_SCOPES,
+        "redirect_uri": row["redirect_uri"],
+        "proxy_configured": bool(
+            row["proxy_url_cipher"] or os.getenv("HDHIVE_PROXY_URL", "").strip()
+        ),
+        "proxy_label": (
+            "云服务器固定出口"
+            if row["proxy_url_cipher"] or os.getenv("HDHIVE_PROXY_URL", "").strip()
+            else "尚未配置固定出口"
+        ),
+        "authorized_at": row["authorized_at"],
+        "token_expires_at": row["token_expires_at"],
+        "last_error": row["last_error"],
+        "poll_enabled": poll_enabled,
+        "poll_interval": poll_interval,
+        "last_poll_at": last_poll,
+    }
+
+
+@APP.get("/api/admin/hdhive/status")
+def hdhive_admin_status(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    return hdhive_public_status()
+
+
+@APP.patch("/api/admin/hdhive/config")
+async def update_hdhive_config(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    redirect_uri = str(payload.get("redirect_uri") or "").strip()
+    proxy_url = str(payload.get("proxy_url") or "").strip()
+    for label, value in (("回调地址", redirect_uri), ("固定出口代理", proxy_url)):
+        if value:
+            parsed = urlparse(value)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                raise HTTPException(400, f"{label}格式无效")
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        client_id = str(payload.get("client_id") or row["client_id"]).strip()
+        secret_cipher = row["app_secret_cipher"]
+        proxy_cipher = row["proxy_url_cipher"]
+        if str(payload.get("app_secret") or "").strip():
+            secret_cipher = encrypt_secret(payload["app_secret"])
+        if proxy_url:
+            proxy_cipher = encrypt_secret(proxy_url)
+        scopes = str(payload.get("scopes") or row["scopes"] or HDHIVE_SCOPES).strip()
+        new_redirect = redirect_uri or row["redirect_uri"]
+        status = (
+            "connected"
+            if row["access_token_cipher"]
+            else "ready_to_authorize"
+            if client_id and secret_cipher
+            else "waiting_approval"
+        )
+        connection.execute(
+            "UPDATE hdhive_oauth SET client_id = ?, app_secret_cipher = ?, "
+            "scopes = ?, redirect_uri = ?, proxy_url_cipher = ?, status = ?, "
+            "last_error = '', updated_at = ? WHERE id = 1",
+            (
+                client_id,
+                secret_cipher,
+                scopes,
+                new_redirect,
+                proxy_cipher,
+                status,
+                now_iso(),
+            ),
+        )
+        if "poll_enabled" in payload:
+            set_setting(
+                connection,
+                "hdhive_poll_enabled",
+                "1" if payload["poll_enabled"] else "0",
+            )
+        if payload.get("poll_interval"):
+            interval = max(900, min(86400, int(payload["poll_interval"])))
+            set_setting(connection, "hdhive_poll_interval", interval)
+    return {"ok": True, **hdhive_public_status()}
+
+
+@APP.post("/api/admin/hdhive/oauth/start")
+async def start_hdhive_oauth(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, str]:
+    require_admin(movie_session)
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        redirect_uri = row["redirect_uri"] or str(
+            request.base_url.replace(path="/api/hdhive/oauth/callback", query="")
+        )
+        state = secrets.token_urlsafe(36)
+        connection.execute(
+            "UPDATE hdhive_oauth SET state_hash = ?, state_expires_at = ?, "
+            "redirect_uri = ?, updated_at = ? WHERE id = 1",
+            (
+                hashlib.sha256(state.encode()).hexdigest(),
+                (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+                redirect_uri,
+                now_iso(),
+            ),
+        )
+        client_id = row["client_id"]
+        scopes = row["scopes"] or HDHIVE_SCOPES
+    client = hdhive_client(require_authorized=False)
+    return {
+        "authorize_url": client.build_authorize_url(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scopes,
+            state=state,
+        )
+    }
+
+
+@APP.get("/api/hdhive/oauth/callback")
+def hdhive_oauth_callback(code: str = "", state: str = "") -> RedirectResponse:
+    if not code or not state:
+        raise HTTPException(400, "影巢授权回调缺少 code 或 state")
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        valid_state = hmac.compare_digest(
+            row["state_hash"],
+            hashlib.sha256(state.encode()).hexdigest(),
+        )
+        expires_at = (
+            datetime.fromisoformat(row["state_expires_at"])
+            if row["state_expires_at"]
+            else datetime.min.replace(tzinfo=timezone.utc)
+        )
+        redirect_uri = row["redirect_uri"]
+    if not valid_state or expires_at < datetime.now(timezone.utc):
+        raise HTTPException(400, "影巢授权状态已失效，请重新发起授权")
+    try:
+        tokens = hdhive_client(require_authorized=False).exchange_code(
+            code, redirect_uri
+        )
+        hdhive_save_tokens(tokens)
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET state_hash = '', state_expires_at = '', "
+                "updated_at = ? WHERE id = 1",
+                (now_iso(),),
+            )
+    except (HDHiveOpenAPIError, ValueError) as error:
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET status = 'error', last_error = ?, "
+                "updated_at = ? WHERE id = 1",
+                (str(error), now_iso()),
+            )
+        raise HTTPException(502, f"影巢授权失败：{error}") from error
+    return RedirectResponse(url="/?hdhive=connected", status_code=303)
+
+
+@APP.post("/api/admin/hdhive/disconnect")
+def disconnect_hdhive(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    try:
+        client = hdhive_client()
+        if client.refresh_token:
+            client.revoke_refresh_token()
+    except Exception:
+        pass
+    with db() as connection:
+        connection.execute(
+            "UPDATE hdhive_oauth SET access_token_cipher = '', "
+            "refresh_token_cipher = '', authorized_at = '', token_expires_at = '', "
+            "status = 'ready_to_authorize', last_error = '', updated_at = ? "
+            "WHERE id = 1",
+            (now_iso(),),
+        )
+    return {"ok": True}
+
+
+@APP.get("/api/hdhive/resources/{media_type}/{tmdb_id}")
+def hdhive_resources(
+    media_type: str,
+    tmdb_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if media_type not in ("movie", "tv") or tmdb_id <= 0:
+        raise HTTPException(400, "影片编号无效")
+    result = hdhive_call("resources", media_type, tmdb_id)
+    data = result.get("data", [])
+    if isinstance(data, dict):
+        items = extract_share_items({"data": data})
+    elif isinstance(data, list):
+        items = [item for item in data if isinstance(item, dict)]
+    else:
+        items = []
+    return {
+        "resources": [normalize_hdhive_resource(item) for item in items],
+        "meta": result.get("meta", {}),
+    }
+
+
+def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["active"] = bool(item["active"])
+    item["poster_url"] = (
+        f"https://image.tmdb.org/t/p/w342{item['poster_path']}"
+        if item["poster_path"]
+        else ""
+    )
+    item["baseline_label"] = episode_progress_label(
+        int(item["baseline_season"]),
+        int(item["baseline_episode"]),
+        "已从",
+    )
+    item["latest_label"] = episode_progress_label(
+        int(item["last_seen_season"]),
+        int(item["last_seen_episode"]),
+        "已看到",
+    )
+    return item
+
+
+@APP.get("/api/follows")
+def list_follows(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        query = (
+            "SELECT f.*, u.display_name, u.username FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id "
+        )
+        values: tuple[Any, ...] = ()
+        if user["role"] != "admin":
+            query += "WHERE f.user_id = ? "
+            values = (user["id"],)
+        query += "ORDER BY f.active DESC, f.updated_at DESC"
+        rows = connection.execute(query, values).fetchall()
+    return {"follows": [serialize_follow(row) for row in rows]}
+
+
+@APP.post("/api/follows")
+async def create_follow(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    if tmdb_id <= 0:
+        raise HTTPException(400, "剧集编号无效")
+    detail = tmdb_get(
+        f"/tv/{tmdb_id}",
+        {"language": "zh-CN", "append_to_response": "external_ids"},
+    )
+    if int(detail.get("id") or 0) != tmdb_id:
+        raise HTTPException(400, "TMDB 没有返回对应剧集")
+    progress = emby_series_episode_progress(
+        tmdb_id,
+        known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
+    )
+    baseline_season = int(progress.get("emby_latest_season_number") or 1)
+    baseline_episode = int(progress.get("emby_latest_episode_number") or 0)
+    title = str(detail.get("name") or detail.get("original_name") or "未命名剧集")
+    first_air = str(detail.get("first_air_date") or "")
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO tv_follows("
+            "user_id, tmdb_id, title, original_title, year, poster_path, "
+            "baseline_season, baseline_episode, last_seen_season, "
+            "last_seen_episode, created_at, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, tmdb_id) DO UPDATE SET active = 1, "
+            "title = excluded.title, original_title = excluded.original_title, "
+            "year = excluded.year, poster_path = excluded.poster_path, "
+            "baseline_season = MAX(tv_follows.baseline_season, excluded.baseline_season), "
+            "baseline_episode = MAX(tv_follows.baseline_episode, excluded.baseline_episode), "
+            "updated_at = excluded.updated_at",
+            (
+                user["id"],
+                tmdb_id,
+                title,
+                str(detail.get("original_name") or ""),
+                first_air[:4],
+                str(detail.get("poster_path") or ""),
+                baseline_season,
+                baseline_episode,
+                baseline_season,
+                baseline_episode,
+                now_iso(),
+                now_iso(),
+            ),
+        )
+        row = connection.execute(
+            "SELECT f.*, u.display_name, u.username FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id "
+            "WHERE f.user_id = ? AND f.tmdb_id = ?",
+            (user["id"], tmdb_id),
+        ).fetchone()
+    return {"ok": True, "follow": serialize_follow(row)}
+
+
+@APP.delete("/api/follows/{follow_id}")
+def delete_follow(
+    follow_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+        if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+            raise HTTPException(404, "没有找到这条追更")
+        connection.execute(
+            "UPDATE tv_follows SET active = 0, updated_at = ? WHERE id = ?",
+            (now_iso(), follow_id),
+        )
+    return {"ok": True}
+
+
+@APP.get("/api/follows/{follow_id}/resources")
+def follow_resources(
+    follow_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+    if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+        raise HTTPException(404, "没有找到这条追更")
+    hdhive_items: list[dict[str, Any]] = []
+    dian_items: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    try:
+        hdhive_items = hdhive_resources("tv", row["tmdb_id"], movie_session)[
+            "resources"
+        ]
+    except HTTPException as error:
+        errors["hdhive"] = str(error.detail)
+    try:
+        dian_items = dian_resources("tv", row["tmdb_id"], None, movie_session)[
+            "resources"
+        ]
+    except HTTPException as error:
+        errors["dian"] = str(error.detail)
+    return {
+        "follow": serialize_follow(row),
+        "hdhive_resources": hdhive_items,
+        "dian_resources": dian_items,
+        "errors": errors,
+        "source_order": ["hdhive", "dian"],
+    }
+
+
 @APP.get("/api/dian/resources/{media_type}/{tmdb_id}")
 def dian_resources(
     media_type: str,
@@ -1885,6 +2830,196 @@ def dian_resources(
     }
 
 
+@APP.post("/api/hdhive/transfer")
+async def hdhive_transfer(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    slug = str(payload.get("slug") or "").strip()
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    media_type = str(payload.get("media_type") or "")
+    transfer_scope = str(payload.get("transfer_scope") or "single")
+    if not slug or media_type not in ("movie", "tv") or tmdb_id <= 0:
+        raise HTTPException(400, "影巢资源信息无效")
+    if transfer_scope not in ("single", "missing", "whole"):
+        raise HTTPException(400, "转存范围无效")
+    if transfer_completed("hdhive", slug, transfer_scope):
+        raise HTTPException(409, "这个影巢资源已经成功转存过，无需重复添加")
+
+    baseline_episode = 0
+    follow_id: Optional[int] = None
+    if media_type == "tv":
+        with db() as connection:
+            follow = connection.execute(
+                "SELECT * FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
+                "AND active = 1",
+                (user["id"], tmdb_id),
+            ).fetchone()
+        if follow:
+            follow_id = int(follow["id"])
+            baseline_episode = int(follow["baseline_episode"])
+        else:
+            progress = emby_series_episode_progress(
+                tmdb_id,
+                known_in_library=tmdb_id in emby_library_tmdb_ids(
+                    prefer_cached=True
+                ),
+            )
+            baseline_episode = int(
+                progress.get("emby_latest_episode_number") or 0
+            )
+        if transfer_scope == "whole":
+            if baseline_episode > 0:
+                raise HTTPException(
+                    400,
+                    f"Emby 已有到第{baseline_episode}集，不能再次整部转存；请选择缺失单集",
+                )
+            if payload.get("confirm_whole") is not True:
+                raise HTTPException(400, "转存整部剧需要再次确认")
+
+    unlocked = hdhive_call("unlock", slug)
+    data = unlocked.get("data", unlocked)
+    if not isinstance(data, dict):
+        raise HTTPException(502, "影巢解锁结果格式无效")
+    share_url = str(data.get("full_url") or data.get("url") or "").strip()
+    if not share_url:
+        raise HTTPException(502, "影巢解锁后没有返回资源链接")
+    client = p115_client()
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+
+    title_spec = parse_episode_spec(payload.get("resource_title"))
+    wanted_episodes = set(title_spec["episode_numbers"])
+    selected_episode_numbers: list[int] = []
+
+    if not is_115_share_url(share_url):
+        if media_type == "tv" and transfer_scope == "missing":
+            safe_numbers = sorted(
+                number
+                for number in wanted_episodes
+                if number > baseline_episode
+            )
+            if len(safe_numbers) != 1 or title_spec["is_pack"]:
+                raise HTTPException(
+                    400,
+                    "这个离线资源无法在转存前查看文件列表，不能安全地从整包中只选缺失集",
+                )
+            selected_episode_numbers = safe_numbers
+            if completed_episode_numbers(
+                tmdb_id,
+                int(title_spec["season_number"]),
+                set(selected_episode_numbers),
+            ):
+                raise HTTPException(409, "这个单集已经成功转存过，无需重复添加")
+        before_tasks = p115_offline_snapshot(client)
+        queued = p115_call(
+            "提交115离线任务失败",
+            client.clouddownload_task_add_url,
+            {"url": share_url, "wp_path_id": target_cid},
+        )
+        if not response_ok(queued):
+            raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+        if not wait_for_p115_change(
+            lambda: p115_offline_snapshot(client), before_tasks
+        ):
+            raise HTTPException(502, "115接口没有创建云下载任务")
+        mode = "offline"
+        message = "已加入115离线下载"
+    else:
+        before_files = p115_folder_snapshot(client, target_cid)
+        if media_type == "tv" and transfer_scope in ("missing", "single"):
+            tree = p115_share_tree(client, share_url)
+            selected = select_missing_episode_files(
+                tree,
+                baseline_episode=baseline_episode,
+                wanted_episodes=wanted_episodes or None,
+            )
+            if not selected:
+                raise HTTPException(
+                    400,
+                    f"115分享中没有找到高于第{baseline_episode}集的明确单集文件，未执行转存",
+                )
+            selected_ids = [item["_share_id"] for item in selected]
+            for item in selected:
+                selected_episode_numbers.extend(
+                    parse_episode_spec(item["_share_name"])["episode_numbers"]
+                )
+            duplicates = completed_episode_numbers(
+                tmdb_id,
+                int(title_spec["season_number"]),
+                set(selected_episode_numbers),
+            )
+            if duplicates:
+                raise HTTPException(
+                    409,
+                    f"第{compact_episode_numbers(duplicates)}集已经成功转存过，未重复添加",
+                )
+        else:
+            snap = p115_call(
+                "读取115分享失败",
+                client.share_snap,
+                0,
+                share_url=share_url,
+            )
+            if not response_ok(snap):
+                raise HTTPException(502, response_message(snap, "无法读取115分享"))
+            selected_ids = [
+                p115_share_item_id(item)
+                for item in extract_share_items(snap)
+                if p115_share_item_id(item)
+            ]
+            selected_episode_numbers = sorted(wanted_episodes)
+        if not selected_ids:
+            raise HTTPException(502, "115分享中没有找到可转存内容")
+        received = p115_call(
+            "接收115分享失败",
+            client.share_receive,
+            {"file_id": ",".join(selected_ids), "cid": target_cid},
+            share_url=share_url,
+        )
+        if not response_ok(received):
+            raise HTTPException(502, response_message(received, "115转存失败"))
+        if not wait_for_p115_change(
+            lambda: p115_folder_snapshot(client, target_cid), before_files
+        ):
+            raise HTTPException(502, "115接口没有把文件写入目标目录")
+        mode = "share"
+        message = (
+            f"已安全选择 {len(selected_ids)} 个缺失单集文件"
+            if media_type == "tv" and transfer_scope in ("missing", "single")
+            else "已按你的确认转存整部资源"
+        )
+
+    record_transfer(
+        user_id=int(user["id"]),
+        source="hdhive",
+        resource_key=slug,
+        tmdb_id=tmdb_id,
+        transfer_scope=transfer_scope,
+        status="success",
+        detail=message,
+        follow_id=follow_id,
+        season_number=int(title_spec["season_number"]),
+        episode_numbers=sorted(set(selected_episode_numbers)),
+    )
+    if follow_id and selected_episode_numbers:
+        latest = max(selected_episode_numbers)
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET last_transferred_episode = "
+                "MAX(last_transferred_episode, ?), last_seen_episode = "
+                "MAX(last_seen_episode, ?), last_message = ?, updated_at = ? "
+                "WHERE id = ?",
+                (latest, latest, message, now_iso(), follow_id),
+            )
+    send_telegram(
+        f"☁️ 影巢资源已转存\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
+    )
+    return {"ok": True, "mode": mode, "message": message}
+
+
 @APP.post("/api/dian/transfer")
 async def dian_transfer(
     request: Request,
@@ -1896,6 +3031,32 @@ async def dian_transfer(
     resource_id = int(payload.get("resource_id") or 0)
     if share_id <= 0 or resource_id <= 0:
         raise HTTPException(400, "资源信息无效")
+    resource_key = f"{share_id}:{resource_id}"
+    media_type = str(payload.get("media_type") or "")
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    transfer_scope = str(payload.get("transfer_scope") or "manual")
+    if transfer_scope not in ("manual", "single", "missing", "whole"):
+        raise HTTPException(400, "转存范围无效")
+    if transfer_completed("dian", resource_key, transfer_scope):
+        raise HTTPException(409, "这个癫影资源已经成功转存过，无需重复添加")
+    baseline_episode = 0
+    title_spec = parse_episode_spec(payload.get("resource_title"))
+    wanted_episodes = set(title_spec["episode_numbers"])
+    selected_episode_numbers: list[int] = []
+    if media_type == "tv" and tmdb_id > 0:
+        progress = emby_series_episode_progress(
+            tmdb_id,
+            known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
+        )
+        baseline_episode = int(progress.get("emby_latest_episode_number") or 0)
+        if transfer_scope == "whole":
+            if baseline_episode > 0:
+                raise HTTPException(
+                    400,
+                    f"Emby 已有到第{baseline_episode}集，不能再次整部转存；请选择缺失单集",
+                )
+            if payload.get("confirm_whole") is not True:
+                raise HTTPException(400, "转存整部剧需要再次确认")
     unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
@@ -1919,6 +3080,22 @@ async def dian_transfer(
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
+        if media_type == "tv" and transfer_scope == "missing":
+            safe_numbers = sorted(
+                number for number in wanted_episodes if number > baseline_episode
+            )
+            if len(safe_numbers) != 1 or title_spec["is_pack"]:
+                raise HTTPException(
+                    400,
+                    "这个离线资源无法在转存前查看文件列表，不能安全地从整包中只选缺失集",
+                )
+            selected_episode_numbers = safe_numbers
+            if completed_episode_numbers(
+                tmdb_id,
+                int(title_spec["season_number"]),
+                set(selected_episode_numbers),
+            ):
+                raise HTTPException(409, "这个单集已经成功转存过，无需重复添加")
         before_tasks = p115_offline_snapshot(client)
         if len(links) == 1:
             queued = p115_call(
@@ -1950,6 +3127,17 @@ async def dian_transfer(
         send_telegram(
             f"☁️ 115离线任务已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
         )
+        record_transfer(
+            user_id=int(user["id"]),
+            source="dian",
+            resource_key=resource_key,
+            tmdb_id=tmdb_id,
+            transfer_scope=transfer_scope,
+            status="success",
+            detail=f"已加入115离线下载（{len(links)}个任务）",
+            season_number=int(title_spec["season_number"]),
+            episode_numbers=selected_episode_numbers,
+        )
         return {
             "ok": True,
             "mode": "offline",
@@ -1957,20 +3145,49 @@ async def dian_transfer(
         }
 
     before_files = p115_folder_snapshot(client, target_cid)
-    snap = p115_call(
-        "读取115分享失败",
-        client.share_snap,
-        0,
-        share_url=share_url,
-    )
-    if not response_ok(snap):
-        raise HTTPException(502, response_message(snap, "无法读取115分享"))
-    items = extract_share_items(snap)
-    file_ids = ",".join(
-        str(item.get("fid") or item.get("file_id") or item.get("cid"))
-        for item in items
-        if item.get("fid") or item.get("file_id") or item.get("cid")
-    )
+    if media_type == "tv" and transfer_scope in ("missing", "single"):
+        tree = p115_share_tree(client, share_url)
+        selected = select_missing_episode_files(
+            tree,
+            baseline_episode=baseline_episode,
+            wanted_episodes=wanted_episodes or None,
+        )
+        if not selected:
+            raise HTTPException(
+                400,
+                f"115分享中没有找到高于第{baseline_episode}集的明确单集文件，未执行转存",
+            )
+        file_ids = ",".join(item["_share_id"] for item in selected)
+        for item in selected:
+            selected_episode_numbers.extend(
+                parse_episode_spec(item["_share_name"])["episode_numbers"]
+            )
+        duplicates = completed_episode_numbers(
+            tmdb_id,
+            int(title_spec["season_number"]),
+            set(selected_episode_numbers),
+        )
+        if duplicates:
+            raise HTTPException(
+                409,
+                f"第{compact_episode_numbers(duplicates)}集已经成功转存过，未重复添加",
+            )
+    else:
+        snap = p115_call(
+            "读取115分享失败",
+            client.share_snap,
+            0,
+            share_url=share_url,
+        )
+        if not response_ok(snap):
+            raise HTTPException(502, response_message(snap, "无法读取115分享"))
+        items = extract_share_items(snap)
+        file_ids = ",".join(
+            str(item.get("fid") or item.get("file_id") or item.get("cid"))
+            for item in items
+            if item.get("fid") or item.get("file_id") or item.get("cid")
+        )
+        selected_episode_numbers = sorted(wanted_episodes)
     if not file_ids:
         raise HTTPException(502, "115分享中没有找到可转存内容")
     received = p115_call(
@@ -1991,6 +3208,21 @@ async def dian_transfer(
         )
     send_telegram(
         f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
+    )
+    record_transfer(
+        user_id=int(user["id"]),
+        source="dian",
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        transfer_scope=transfer_scope,
+        status="success",
+        detail=(
+            f"已安全选择缺失单集文件"
+            if media_type == "tv" and transfer_scope in ("missing", "single")
+            else "已转存到115所选目录"
+        ),
+        season_number=int(title_spec["season_number"]),
+        episode_numbers=sorted(set(selected_episode_numbers)),
     )
     return {
         "ok": True,
