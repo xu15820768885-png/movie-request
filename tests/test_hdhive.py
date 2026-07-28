@@ -589,6 +589,35 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(app.list_follows(self.token)["follows"], [])
         self.assertEqual(app.list_follows(self.admin_token)["follows"], [])
 
+    def test_cancel_follow_also_deletes_native_hdhive_subscription(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, hdhive_subscription_id, "
+                "created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 9001, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        with patch.object(
+            app, "hdhive_call", return_value={"success": True}
+        ) as hdhive:
+            result = app.delete_follow(follow_id, self.token)
+
+        self.assertTrue(result["ok"])
+        hdhive.assert_called_once_with("delete_subscription", 9001)
+        with app.db() as connection:
+            row = connection.execute(
+                "SELECT active, hdhive_subscription_id FROM tv_follows "
+                "WHERE id = ?",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(row["active"], 0)
+        self.assertIsNone(row["hdhive_subscription_id"])
+
     def test_member_cannot_bind_native_subscription_directly(self):
         with app.db() as connection:
             user_id = connection.execute(

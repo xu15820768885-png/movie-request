@@ -15,6 +15,10 @@ class FollowResourceActionsTest(unittest.TestCase):
         self.assertIn("await api('/api/hdhive/transfer'", html)
         self.assertIn("allow_existing:scope==='whole'&&hasLocal", html)
         self.assertIn("Object.assign(follow,result.follow)", html)
+        self.assertIn('data-follow-delete="${item.id}">取消追更</button>', html)
+        self.assertIn("已取消本地与影巢追更", html)
+        self.assertNotIn("data-native-cancel", html)
+        self.assertNotIn("确定取消《${follow.title}》的影巢原生订阅吗", html)
         self.assertNotIn(">更换为此资源</button>", html)
 
 
