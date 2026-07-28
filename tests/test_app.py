@@ -299,6 +299,70 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 409)
         self.assertIn("Emby", error.exception.detail)
 
+    def test_tv_request_is_allowed_when_series_is_already_in_emby(self):
+        canonical = {
+            "id": 223911,
+            "name": "仙逆",
+            "first_air_date": "2023-09-25",
+        }
+        with patch.object(app, "tmdb_get", return_value=canonical):
+            with patch.object(app, "emby_library_tmdb_ids", return_value={223911}):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.create_request(
+                            FakeRequest(
+                                {
+                                    "tmdb_id": 223911,
+                                    "media_type": "tv",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+
+        self.assertTrue(result["ok"])
+        request = app.list_requests(self.token)["requests"][0]
+        self.assertEqual(request["title"], "仙逆")
+        self.assertEqual(request["media_type"], "tv")
+
+    def test_emby_sync_keeps_tv_request_open_for_moviepilot_followup(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO movie_requests("
+                "user_id, tmdb_id, media_type, title, created_at, updated_at"
+                ") VALUES(?, 1001, 'movie', '示例电影', ?, ?)",
+                (user_id, timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO movie_requests("
+                "user_id, tmdb_id, media_type, title, created_at, updated_at"
+                ") VALUES(?, 1002, 'tv', '未完结剧集', ?, ?)",
+                (user_id, timestamp, timestamp),
+            )
+
+        with patch.object(
+            app,
+            "emby_library_tmdb_ids",
+            return_value={1001, 1002},
+        ):
+            updated = app.sync_emby_requests(force=True)
+
+        with app.db() as connection:
+            rows = {
+                row["media_type"]: row["status"]
+                for row in connection.execute(
+                    "SELECT media_type, status FROM movie_requests "
+                    "WHERE tmdb_id IN (1001, 1002)"
+                )
+            }
+        self.assertEqual(updated, 1)
+        self.assertEqual(rows["movie"], "available")
+        self.assertEqual(rows["tv"], "pending")
+
     def test_details_include_story_cast_and_recommendations(self):
         details = {
             "id": 157336,

@@ -12,6 +12,8 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("$('followTab').classList.add('hidden')", html)
         self.assertNotIn('data-follow-index="${index}"', html)
         self.assertNotIn('id="detailFollow"', html)
+        self.assertIn('class="poster-library-status ${item.in_library?', html)
+        self.assertIn("item.in_library?'已入库':'未入库'", html)
         self.assertNotIn("showApp();loadSiteNotice();loadRequests();loadFollows()", html)
         self.assertIn(
             "点击按钮会完整转存你选择的资源，不再自动筛选缺集。",
@@ -19,6 +21,9 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         )
         self.assertIn("const scope='manual'", html)
         self.assertIn("const actionLabel='转存此资源'", html)
+        self.assertIn('id="detailRequest"', html)
+        self.assertIn("提交求片需求", html)
+        self.assertIn("${requestShortcut}</div>", html)
         self.assertNotIn("安全转存缺失集", html)
         self.assertNotIn("115安全预检", html)
         self.assertNotIn("confirm_whole:", html)

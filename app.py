@@ -2318,7 +2318,8 @@ def sync_emby_requests(force: bool = False) -> int:
     with db() as connection:
         cursor = connection.execute(
             f"UPDATE movie_requests SET status = 'available', updated_at = ? "
-            f"WHERE tmdb_id IN ({placeholders}) AND status != 'available'",
+            f"WHERE tmdb_id IN ({placeholders}) AND media_type = 'movie' "
+            f"AND status != 'available'",
             (now_iso(), *tmdb_ids),
         )
         return cursor.rowcount
@@ -4662,7 +4663,7 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
     date = canonical.get("release_date") or canonical.get("first_air_date") or ""
     poster_path = canonical.get("poster_path") or ""
     overview = canonical.get("overview") or ""
-    if tmdb_id in emby_library_tmdb_ids():
+    if media_type == "movie" and tmdb_id in emby_library_tmdb_ids():
         raise HTTPException(409, "这部影片已经在 Emby 媒体库里了")
     with db() as connection:
         duplicate = connection.execute(

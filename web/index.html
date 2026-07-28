@@ -143,6 +143,14 @@
     .poster-follow:hover { color: white; background: rgba(255,122,69,.25); }
     .poster-follow.active { color: #b7f1d4; background: rgba(50,199,131,.14); }
     .poster-follow small { color: var(--muted); font-size: 9px; font-weight: 700; }
+    .poster-library-status {
+      display: grid; place-items: center; min-height: 42px; padding: 9px 12px;
+      border-top: 1px solid var(--line); color: var(--orange-2);
+      background: rgba(255,122,69,.12); font-size: 12px; font-weight: 900;
+    }
+    .poster-library-status.available {
+      color: #b7f1d4; background: rgba(50,199,131,.14);
+    }
     .movie-body { padding: 13px; }
     .movie-title { min-height: 42px; margin: 0; font-size: 14px; line-height: 1.45; font-weight: 800; }
     .movie-title-button { width: 100%; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
@@ -255,12 +263,13 @@
     .resource-transfer-status.error { color: #ffc4c4; }
     .resource-transfer-status.success { color: #b7f1d4; }
     .resource-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
-    .resource-tabs { display: flex; gap: 8px; margin: 16px 0 14px; }
+    .resource-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 14px; }
     .resource-tab {
       min-width: 110px; padding: 10px 16px; border: 1px solid var(--line);
       border-radius: 10px; color: var(--muted); background: transparent; font-weight: 900;
     }
     .resource-tab.active { color: #21120b; border-color: var(--orange); background: var(--orange); }
+    .request-shortcut { min-width: 140px; }
     .resource-panel.hidden { display: none; }
     .resource-source-column { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,.018); }
     .resource-source-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 11px; }
@@ -550,7 +559,8 @@
         const typeLabel=isDouban?`豆瓣${item.media_type==='movie'?'电影':'剧集'}`:(item.media_type==='movie'?'电影':'电视剧');
         const summary=[item.year||'年份未知',item.latest_episode_label||item.series_status_label||''].filter(Boolean).join(' · ');
         const check=item.in_library?'<span class="library-check" title="已在 Emby 片库">✓</span>':(item.rating?`<span class="rating">★ ${item.rating}</span>`:'');
-        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button></article>`;
+        const libraryStatus=`<div class="poster-library-status ${item.in_library?'available':'missing'}">${item.in_library?'已入库':'未入库'}</div>`;
+        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${libraryStatus}</article>`;
       }).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)],true));
     }
@@ -660,7 +670,7 @@
       return date.toLocaleDateString('zh-CN',{month:'numeric',day:'numeric',weekday:'short'});
     }
     function renderDetails(item) {
-      const admin=currentUser?.role==='admin'; const disabled=item.in_library;
+      const admin=currentUser?.role==='admin';
       const length=item.media_type==='movie'?(item.runtime?`${item.runtime} 分钟`:'时长未知'):(item.number_of_seasons?`${item.number_of_seasons} 季 · ${item.number_of_episodes} 集`:item.episode_runtime?`单集约 ${item.episode_runtime} 分钟`:'集数未知');
       const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,...(item.series_status_label?[item.series_status_label]:[]),length,...(item.genres||[])];
       const episodeProgress=item.media_type==='tv'?`<section class="episode-progress"><div class="episode-progress-item accent"><div class="episode-progress-name">官方播出进度</div><div class="episode-progress-value">${escapeHtml(item.latest_episode_label||'暂时未知')}</div></div><div class="episode-progress-item"><div class="episode-progress-name">Emby 本地进度</div><div class="episode-progress-value">${escapeHtml(item.emby_progress_loading?'正在后台检查…':item.emby_episode_label||(item.in_library?'已入库，集数待识别':'尚未入库'))}</div></div><div class="episode-progress-item"><div class="episode-progress-name">下一集计划</div><div class="episode-progress-value">${escapeHtml(item.next_episode_air_date?`${item.next_episode_label||'下一集'} · ${formatEpisodeAirDate(item.next_episode_air_date)}`:(item.series_status==='ongoing'?'待公布':'暂无更新'))}</div></div></section>`:'';
@@ -676,11 +686,10 @@
         return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${resource.episode_label?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div><div class="resource-tags">${official}${resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:''}<span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}${points}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)} · ${escapeHtml(resource.size_gb)}<br>${escapeHtml(resource.files)}${provider==='dian'?` · 热度 ${escapeHtml(resource.hot)}`:''}</div></div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${index}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${index}"></div></div></article>`;
       }).join('');
       const sourcePanel=(provider,label,resources,loading,error)=>`<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${loading?'<div class="dian-source">后台读取中，不影响影片详情显示。</div>':resources.length?`<div class="resource-list">${resourceCards(resources,provider)}</div>`:`<div class="empty">${escapeHtml(error||`${label}暂时没有匹配资源`)}</div>`}</section>`;
-      const totalResources=hdhiveResources.length+dianResources.length;
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">点击按钮会完整转存你选择的资源，不再自动筛选缺集。</div></section>`:'';
-      const fallbackLabel=item.in_library?'已入库':totalResources?'没有合适版本，仍然求片':'两个资源源暂无资源，提交求片';
-      const requestAction=admin?'':`<button id="detailRequest" class="btn ${disabled?'':'btn-primary'}" ${disabled?'disabled':''}>${fallbackLabel}</button>`;
-      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}${requestAction}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
+      const requestDisabled=item.media_type==='movie'&&item.in_library;
+      const requestShortcut=admin?'':`<button id="detailRequest" class="btn request-shortcut ${requestDisabled?'':'btn-primary'}" ${requestDisabled?'disabled':''}>${requestDisabled?'已入库':'提交求片需求'}</button>`;
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">默认显示影巢；如果版本不满意，切换到癫影。</div></div><div class="dian-source">按 TMDB 编号精确匹配</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">点击按钮会完整转存你选择的资源，不再自动筛选缺集。</div></section>`:'';
+      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
     }
