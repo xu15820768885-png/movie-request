@@ -137,6 +137,14 @@ class HDHiveOpenAPI:
     def me(self) -> dict[str, Any]:
         return self._request("GET", "/api/open/me")
 
+    def checkin(self, is_gambler: bool = False) -> dict[str, Any]:
+        body = {"is_gambler": True} if is_gambler else {}
+        return self._request(
+            "POST",
+            "/api/open/checkin",
+            json_body=body,
+        )
+
     def weekly_free_quota(self) -> dict[str, Any]:
         return self._request("GET", "/api/open/vip/weekly-free-quota")
 

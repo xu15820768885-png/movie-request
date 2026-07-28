@@ -239,7 +239,7 @@ def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
     )
 
 
-HDHIVE_SCOPES = "meta query unlock subscription messages vip"
+HDHIVE_SCOPES = "meta query unlock write subscription messages vip"
 
 
 def hdhive_key_path() -> Path:
@@ -459,11 +459,16 @@ def signin_points(result: dict[str, Any]) -> tuple[Any, Any]:
     return earned, total
 
 
-def signin_notification(result: dict[str, Any], source_label: str, mode_label: str) -> str:
+def signin_notification(
+    result: dict[str, Any],
+    source_label: str,
+    mode_label: str,
+    service_label: str = "癫影",
+) -> str:
     message = signin_result_message(result, "签到成功")
     earned, total = signin_points(result)
     lines = [
-        "✅ 癫影签到成功",
+        f"✅ {service_label}签到成功",
         "",
         f"{source_label} · {mode_label}",
         f"结果：{message}",
@@ -504,6 +509,57 @@ def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
         set_setting(connection, "dian_last_signin_message", message)
         set_setting(connection, "dian_last_signin_result", json.dumps(result, ensure_ascii=False))
     send_telegram(signin_notification(result, source_label, mode_label))
+    return result
+
+
+def perform_hdhive_signin(mode: str, source: str = "manual") -> dict[str, Any]:
+    if mode not in ("normal", "lucky"):
+        raise HTTPException(400, "签到模式无效")
+    attempted_at = now_iso()
+    mode_label = "运气签到" if mode == "lucky" else "普通签到"
+    source_label = "自动签到" if source == "auto" else "手动签到"
+    try:
+        result = hdhive_call("checkin", is_gambler=mode == "lucky")
+    except HTTPException as error:
+        message = str(error.detail)
+        with db() as connection:
+            set_setting(connection, "hdhive_last_signin_at", attempted_at)
+            set_setting(
+                connection,
+                "hdhive_last_signin_day",
+                datetime.now().date().isoformat(),
+            )
+            set_setting(connection, "hdhive_last_signin_mode", mode)
+            set_setting(connection, "hdhive_last_signin_status", "failed")
+            set_setting(connection, "hdhive_last_signin_message", message)
+        send_telegram(
+            f"❌ 影巢签到失败\n\n{source_label} · {mode_label}\n原因：{message}"
+        )
+        raise
+    message = signin_result_message(result, "签到成功")
+    with db() as connection:
+        set_setting(connection, "hdhive_last_signin_at", attempted_at)
+        set_setting(
+            connection,
+            "hdhive_last_signin_day",
+            datetime.now().date().isoformat(),
+        )
+        set_setting(connection, "hdhive_last_signin_mode", mode)
+        set_setting(connection, "hdhive_last_signin_status", "success")
+        set_setting(connection, "hdhive_last_signin_message", message)
+        set_setting(
+            connection,
+            "hdhive_last_signin_result",
+            json.dumps(result, ensure_ascii=False),
+        )
+    send_telegram(
+        signin_notification(
+            result,
+            source_label,
+            mode_label,
+            service_label="影巢",
+        )
+    )
     return result
 
 
@@ -2082,6 +2138,30 @@ def dian_signin_loop() -> None:
         time.sleep(30)
 
 
+def maybe_perform_hdhive_signin() -> bool:
+    now = datetime.now()
+    with db() as connection:
+        row = hdhive_oauth_row(connection)
+        enabled = setting(connection, "hdhive_signin_enabled") == "1"
+        schedule = setting(connection, "hdhive_signin_time") or "08:35"
+        mode = setting(connection, "hdhive_signin_mode") or "normal"
+        last_day = setting(connection, "hdhive_last_signin_day")
+        configured = bool(
+            row["access_token_cipher"]
+            and row["app_secret_cipher"]
+            and row["status"] in ("connected", "rate_limited")
+        )
+    if (
+        enabled
+        and configured
+        and last_day != now.date().isoformat()
+        and now.strftime("%H:%M") >= schedule
+    ):
+        perform_hdhive_signin(mode, source="auto")
+        return True
+    return False
+
+
 def refresh_hdhive_subscribed_follows() -> int:
     with db() as connection:
         follows = connection.execute(
@@ -2193,6 +2273,10 @@ def poll_hdhive_follow_messages() -> int:
 
 def hdhive_follow_loop() -> None:
     while True:
+        try:
+            maybe_perform_hdhive_signin()
+        except Exception:
+            pass
         try:
             with db() as connection:
                 row = hdhive_oauth_row(connection)
@@ -2563,6 +2647,13 @@ def hdhive_public_status() -> dict[str, Any]:
             900, int(setting(connection, "hdhive_poll_interval") or 1800)
         )
         last_poll = setting(connection, "hdhive_last_poll_at")
+        signin_enabled = setting(connection, "hdhive_signin_enabled") == "1"
+        signin_time = setting(connection, "hdhive_signin_time") or "08:35"
+        signin_mode = setting(connection, "hdhive_signin_mode") or "normal"
+        last_signin_at = setting(connection, "hdhive_last_signin_at")
+        last_signin_mode = setting(connection, "hdhive_last_signin_mode")
+        last_signin_status = setting(connection, "hdhive_last_signin_status")
+        last_signin_message = setting(connection, "hdhive_last_signin_message")
     configured = bool(row["client_id"] and row["app_secret_cipher"])
     connected = bool(configured and row["access_token_cipher"])
     status = row["status"]
@@ -2601,6 +2692,13 @@ def hdhive_public_status() -> dict[str, Any]:
         "poll_enabled": poll_enabled,
         "poll_interval": poll_interval,
         "last_poll_at": last_poll,
+        "signin_enabled": signin_enabled,
+        "signin_time": signin_time,
+        "signin_mode": signin_mode,
+        "last_signin_at": last_signin_at,
+        "last_signin_mode": last_signin_mode,
+        "last_signin_status": last_signin_status,
+        "last_signin_message": last_signin_message,
     }
 
 
@@ -2621,6 +2719,15 @@ async def update_hdhive_config(
     payload = await request.json()
     redirect_uri = str(payload.get("redirect_uri") or "").strip()
     proxy_url = str(payload.get("proxy_url") or "").strip()
+    signin_mode = str(payload.get("signin_mode") or "").strip()
+    signin_time = str(payload.get("signin_time") or "").strip()
+    if signin_mode and signin_mode not in ("normal", "lucky"):
+        raise HTTPException(400, "影巢签到模式无效")
+    if signin_time:
+        try:
+            datetime.strptime(signin_time, "%H:%M")
+        except ValueError as error:
+            raise HTTPException(400, "影巢签到时间格式无效") from error
     for label, value in (("回调地址", redirect_uri), ("固定出口代理", proxy_url)):
         if value:
             parsed = urlparse(value)
@@ -2667,7 +2774,38 @@ async def update_hdhive_config(
         if payload.get("poll_interval"):
             interval = max(900, min(86400, int(payload["poll_interval"])))
             set_setting(connection, "hdhive_poll_interval", interval)
+        if "signin_enabled" in payload:
+            set_setting(
+                connection,
+                "hdhive_signin_enabled",
+                "1" if payload["signin_enabled"] else "0",
+            )
+        if signin_time:
+            set_setting(connection, "hdhive_signin_time", signin_time)
+        if signin_mode:
+            set_setting(connection, "hdhive_signin_mode", signin_mode)
     return {"ok": True, **hdhive_public_status()}
+
+
+@APP.post("/api/admin/hdhive/checkin")
+async def hdhive_checkin(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    with db() as connection:
+        mode = str(
+            payload.get("mode")
+            or setting(connection, "hdhive_signin_mode")
+            or "normal"
+        )
+    result = perform_hdhive_signin(mode, source="manual")
+    return {
+        "ok": True,
+        "message": signin_result_message(result, "影巢签到成功"),
+        "result": result,
+    }
 
 
 @APP.post("/api/admin/hdhive/oauth/start")

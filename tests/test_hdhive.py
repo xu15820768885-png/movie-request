@@ -137,6 +137,22 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(result["data"]["media"]["id"], 77)
         self.assertTrue(session.calls[0][1].endswith("/api/open/shares/abc"))
 
+    def test_client_checkin_maps_normal_and_lucky_modes(self):
+        session = FakeSession(
+            [
+                FakeResponse({"success": True, "data": {"points": 8}}),
+                FakeResponse({"success": True, "data": {"points": 16}}),
+            ]
+        )
+        client = HDHiveOpenAPI(
+            api_key="secret", access_token="access", session=session
+        )
+        client.checkin()
+        client.checkin(is_gambler=True)
+        self.assertTrue(session.calls[0][1].endswith("/api/open/checkin"))
+        self.assertEqual(session.calls[0][2]["json"], {})
+        self.assertEqual(session.calls[1][2]["json"], {"is_gambler": True})
+
     def test_hdhive_resource_normalization_marks_pack(self):
         resource = app.normalize_hdhive_resource(
             {
@@ -290,6 +306,78 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 )
             )
         self.assertEqual(error.exception.status_code, 403)
+
+    def test_hdhive_signin_records_result_and_sends_telegram(self):
+        result = {
+            "success": True,
+            "message": "签到成功，获得 8 积分",
+            "data": {
+                "checked_in": True,
+                "message": "签到成功，获得 8 积分",
+                "points": 8,
+            },
+        }
+        with patch.object(app, "hdhive_call", return_value=result) as call:
+            with patch.object(app, "send_telegram") as telegram:
+                returned = app.perform_hdhive_signin("lucky", source="auto")
+        self.assertEqual(returned, result)
+        call.assert_called_once_with("checkin", is_gambler=True)
+        self.assertIn("影巢签到成功", telegram.call_args.args[0])
+        self.assertIn("自动签到 · 运气签到", telegram.call_args.args[0])
+        self.assertIn("本次签到积分：8", telegram.call_args.args[0])
+        with app.db() as connection:
+            self.assertEqual(
+                app.setting(connection, "hdhive_last_signin_status"),
+                "success",
+            )
+            self.assertEqual(
+                app.setting(connection, "hdhive_last_signin_mode"),
+                "lucky",
+            )
+
+    def test_hdhive_signin_settings_and_manual_route(self):
+        with app.db() as connection:
+            row = app.hdhive_oauth_row(connection)
+            connection.execute(
+                "UPDATE hdhive_oauth SET client_id = ?, app_secret_cipher = ?, "
+                "scopes = ?, redirect_uri = ?, updated_at = ? WHERE id = 1",
+                (
+                    "app_test",
+                    app.encrypt_secret("secret"),
+                    app.HDHIVE_SCOPES,
+                    "https://example.com/api/hdhive/oauth/callback",
+                    app.now_iso(),
+                ),
+            )
+        asyncio.run(
+            app.update_hdhive_config(
+                FakeRequest(
+                    {
+                        "signin_enabled": True,
+                        "signin_time": "07:45",
+                        "signin_mode": "normal",
+                    }
+                ),
+                self.admin_token,
+            )
+        )
+        status = app.hdhive_admin_status(self.admin_token)
+        self.assertTrue(status["signin_enabled"])
+        self.assertEqual(status["signin_time"], "07:45")
+        self.assertEqual(status["signin_mode"], "normal")
+        with patch.object(
+            app,
+            "perform_hdhive_signin",
+            return_value={"message": "签到成功"},
+        ) as signin:
+            result = asyncio.run(
+                app.hdhive_checkin(
+                    FakeRequest({"mode": "lucky"}),
+                    self.admin_token,
+                )
+            )
+        self.assertTrue(result["ok"])
+        signin.assert_called_once_with("lucky", source="manual")
 
     def test_subscription_message_refreshes_episode_and_is_marked_read(self):
         with app.db() as connection:

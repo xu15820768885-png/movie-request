@@ -393,9 +393,14 @@
           <div class="inline"><label>Client ID<input id="hdhiveClientId" placeholder="审核通过后填写"></label><label>App Secret<input id="hdhiveAppSecret" type="password" placeholder="留空表示不修改"></label></div>
           <label>固定 Redirect URI<input id="hdhiveRedirectUri" placeholder="https://你的域名/api/hdhive/oauth/callback"></label>
           <label>云服务器固定出口代理<input id="hdhiveProxyUrl" type="password" placeholder="例如：http://用户名:密码@38.55.106.163:3128"></label>
-          <label>申请权限<input id="hdhiveScopes" value="meta query unlock subscription messages vip"></label>
+          <label>申请权限<input id="hdhiveScopes" value="meta query unlock write subscription messages vip"></label>
           <div class="inline"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto" checked>启用低频追更消息检查</label></div>
+          <div class="inline"><label>影巢自动签到时间<input id="hdhiveSigninTime" type="time" value="08:35"></label><label>影巢签到模式<select id="hdhiveSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
+          <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveSigninEnabled" type="checkbox" style="width:auto">启用影巢每日自动签到</label>
+          <div id="hdhiveCheckinResult" class="checkin-result">影巢尚未执行签到</div>
+          <div class="transfer-note">影巢签到需要 <strong>write</strong> 权限；首次启用前，请在影巢应用后台补充该权限并重新授权。</div>
           <div class="integration-actions"><button class="btn" type="submit">保存影巢配置</button><button id="hdhiveAuthorize" class="btn btn-primary" type="button">连接影巢</button><button id="hdhiveDisconnect" class="btn btn-danger" type="button">断开授权</button></div>
+          <div class="integration-actions"><button id="hdhiveCheckinNow" class="btn btn-primary" type="button">影巢立即签到</button></div>
           <div class="transfer-note">App Secret 和 OAuth 令牌使用独立密钥加密保存在 NAS；影巢请求不会使用当前会变化的全局代理。</div>
         </form>
         <div class="integration-grid">
@@ -781,7 +786,7 @@
       const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'Emby 已配置':'尚未配置 Emby';
     }
     async function loadIntegrations() {
-      const hdhive=preview?{status:'waiting_approval',status_label:'等待审核',configured:false,connected:false,client_id:'',scopes:'meta query unlock subscription messages vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:1800,last_error:''}:await api('/api/admin/hdhive/status');
+      const hdhive=preview?{status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write subscription messages vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''}:await api('/api/admin/hdhive/status');
       const settings=preview?{
         dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
@@ -793,9 +798,15 @@
       $('hdhiveProxyState').textContent=hdhive.proxy_label||'固定出口待配置';
       $('hdhiveClientId').value=hdhive.client_id||'';
       $('hdhiveRedirectUri').value=hdhive.redirect_uri||'';
-      $('hdhiveScopes').value=hdhive.scopes||'meta query unlock subscription messages vip';
+      const hdhiveScopes=(hdhive.scopes||'meta query unlock write subscription messages vip').split(/\s+/).filter(Boolean);
+      if(!hdhiveScopes.includes('write'))hdhiveScopes.push('write');
+      $('hdhiveScopes').value=hdhiveScopes.join(' ');
       $('hdhivePollEnabled').checked=Boolean(hdhive.poll_enabled);
       $('hdhivePollInterval').value=String(hdhive.poll_interval||1800);
+      $('hdhiveSigninEnabled').checked=Boolean(hdhive.signin_enabled);
+      $('hdhiveSigninTime').value=hdhive.signin_time||'08:35';
+      $('hdhiveSigninMode').value=hdhive.signin_mode||'normal';
+      $('hdhiveCheckinResult').textContent=hdhive.last_signin_at?`${hdhive.last_signin_status==='failed'?'上次影巢签到失败':'上次影巢签到成功'}：${hdhive.last_signin_at} · ${hdhive.last_signin_mode==='lucky'?'运气签到':'普通签到'}${hdhive.last_signin_message?` · ${hdhive.last_signin_message}`:''}`:'影巢尚未执行签到';
       $('hdhiveAuthorize').disabled=!hdhive.configured||hdhive.connected;
       $('hdhiveDisconnect').disabled=!hdhive.connected;
       $('dianBaseUrl').value=settings.dian_base_url||'';
@@ -852,9 +863,10 @@
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
     $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，1 条需求已更新为“已入库”');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，${result.updated} 条需求更新为“已入库”`);loadRequests();}catch(error){toast(error.message,true);}};
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
-    $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置已安全保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value)})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};
     $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？本地追更记录不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('hdhiveCheckinNow').onclick=async()=>{if(preview){$('hdhiveCheckinResult').textContent='刚刚影巢签到成功 · 普通签到 · 获得 8 积分';return toast('影巢签到成功');}try{const result=await api('/api/admin/hdhive/checkin',{method:'POST',body:JSON.stringify({mode:$('hdhiveSigninMode').value})});toast(result.message||'影巢签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('dianCheckinPreview').onclick=async()=>{if(preview){$('checkinResult').textContent='刚刚签到成功 · 运气签到';return toast('癫影签到成功');}try{const result=await api('/api/admin/dian-signin',{method:'POST',body:JSON.stringify({mode:$('dianSigninMode').value})});$('checkinResult').textContent='刚刚签到成功';toast(result.message||'癫影签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('qrLoginPreview').onclick=startQrLogin;
     $('folderSelectPreview').onclick=()=>{$('folderPicker').classList.contains('hidden')?loadFolders():($('folderPicker').classList.add('hidden'),$('folderSelectPreview').textContent='选择转存文件夹');};
