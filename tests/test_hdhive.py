@@ -783,6 +783,27 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 400)
         self.assertIn("已有到第232集", error.exception.detail)
 
+    def test_follow_baseline_is_cleared_after_series_is_removed_from_emby(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 132, 132, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            app.set_setting(connection, "emby_url", "http://emby.test")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+
+        with patch.object(app, "emby_library_tmdb_ids", return_value=set()) as library:
+            row = app.refresh_follow_emby_baseline(follow_id)
+
+        self.assertEqual(row["baseline_episode"], 0)
+        library.assert_called_once_with(force=True)
+
     def test_admin_can_confirm_whole_transfer_with_existing_episodes(self):
         class FakeP115:
             def clouddownload_task_list(self, _payload):

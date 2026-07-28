@@ -1997,6 +1997,7 @@ def episode_progress_label(
 def emby_series_episode_progress(
     tmdb_id: int,
     known_in_library: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     with db() as connection:
         base_url = setting(connection, "emby_url")
@@ -2010,7 +2011,7 @@ def emby_series_episode_progress(
     now = time.monotonic()
     with CACHE_LOCK:
         cached = EMBY_EPISODE_CACHE.get(cache_key)
-        if cached and cached[0] > now:
+        if not force and cached and cached[0] > now:
             return dict(cached[1])
 
     headers = {"X-Emby-Token": api_key, "Accept": "application/json"}
@@ -2050,6 +2051,8 @@ def emby_series_episode_progress(
                 series_id = str(item.get("Id") or item.get("id") or "")
                 break
         if not series_id:
+            with CACHE_LOCK:
+                EMBY_EPISODE_CACHE.pop(cache_key, None)
             return {}
 
         episodes_response = requests.get(
@@ -2082,6 +2085,8 @@ def emby_series_episode_progress(
             ):
                 latest_season, latest_episode = season_number, episode_number
         if latest_episode <= 0:
+            with CACHE_LOCK:
+                EMBY_EPISODE_CACHE.pop(cache_key, None)
             return {}
         result = {
             "emby_latest_season_number": latest_season,
@@ -3782,6 +3787,42 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+        configured = bool(
+            setting(connection, "emby_url")
+            and setting(connection, "emby_api_key")
+        )
+    if not row or str(row["media_type"] or "tv") != "tv" or not configured:
+        return row
+
+    tmdb_id = int(row["tmdb_id"])
+    library_ids = emby_library_tmdb_ids(force=True)
+    progress = (
+        emby_series_episode_progress(
+            tmdb_id,
+            known_in_library=True,
+            force=True,
+        )
+        if tmdb_id in library_ids
+        else {}
+    )
+    season_number = int(progress.get("emby_latest_season_number") or 1)
+    episode_number = int(progress.get("emby_latest_episode_number") or 0)
+    with db() as connection:
+        connection.execute(
+            "UPDATE tv_follows SET baseline_season = ?, baseline_episode = ?, "
+            "updated_at = ? WHERE id = ?",
+            (season_number, episode_number, now_iso(), follow_id),
+        )
+        return connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+
+
 @APP.get("/api/follows")
 def list_follows(
     movie_session: Optional[str] = Cookie(default=None),
@@ -4128,6 +4169,7 @@ def follow_resources(
         ).fetchone()
     if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
         raise HTTPException(404, "没有找到这条追更")
+    row = refresh_follow_emby_baseline(follow_id)
     hdhive_items: list[dict[str, Any]] = []
     dian_items: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
@@ -4229,6 +4271,7 @@ async def hdhive_transfer(
             ).fetchone()
         if follow:
             follow_id = int(follow["id"])
+            follow = refresh_follow_emby_baseline(follow_id)
             baseline_episode = int(follow["baseline_episode"])
         else:
             progress = emby_series_episode_progress(

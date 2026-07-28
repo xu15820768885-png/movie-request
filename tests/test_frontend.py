@@ -14,6 +14,7 @@ class FollowResourceActionsTest(unittest.TestCase):
         self.assertIn("transferFollowResource(follow", html)
         self.assertIn("await api('/api/hdhive/transfer'", html)
         self.assertIn("allow_existing:scope==='whole'&&hasLocal", html)
+        self.assertIn("Object.assign(follow,result.follow)", html)
         self.assertNotIn(">更换为此资源</button>", html)
 
 
