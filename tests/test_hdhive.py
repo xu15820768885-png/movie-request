@@ -74,6 +74,24 @@ class HDHiveFoundationTests(unittest.TestCase):
         selected = app.select_missing_episode_files(items, baseline_episode=232)
         self.assertEqual([item["_share_id"] for item in selected], ["233"])
 
+    def test_largest_missing_file_is_selected_with_subtitle(self):
+        items = [
+            {"_share_name": "S01E110.small.mkv", "_share_id": "small", "s": 100, "_share_is_dir": False},
+            {"_share_name": "S01E110.large.mkv", "_share_id": "large", "s": 900, "_share_is_dir": False},
+            {"_share_name": "S01E110.zh.ass", "_share_id": "sub", "s": 10, "_share_is_dir": False},
+            {"_share_name": "S01E111.mkv", "_share_id": "111", "s": 800, "_share_is_dir": False},
+            {"_share_name": "poster.jpg", "_share_id": "poster", "s": 1, "_share_is_dir": False},
+        ]
+        selected, episodes = app.select_largest_missing_episode_files(
+            items,
+            {110, 111},
+        )
+        self.assertEqual(episodes, {110, 111})
+        self.assertEqual(
+            {item["_share_id"] for item in selected},
+            {"large", "sub", "111"},
+        )
+
     def test_hdhive_secrets_are_encrypted_at_rest(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(app, "DATA_DIR", Path(temporary)):
@@ -168,6 +186,18 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertTrue(resource["is_pack"])
         self.assertEqual(resource["episode_end"], 233)
         self.assertTrue(resource["chn_sub"])
+
+    def test_hdhive_resource_prefers_detailed_resource_title(self):
+        resource = app.normalize_hdhive_resource(
+            {
+                "slug": "abc",
+                "title": "仙逆 (2023)",
+                "resource_title": "仙逆 S01E150-S01E151 4K WEB-DL",
+                "share_size": "4.3GB",
+            }
+        )
+        self.assertEqual(resource["title"], "仙逆 S01E150-S01E151 4K WEB-DL")
+        self.assertEqual(resource["episode_numbers"], [150, 151])
 
 
 class HDHiveFollowRouteTests(unittest.TestCase):

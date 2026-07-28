@@ -190,6 +190,16 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tv_follow_resources (
+                follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY(follow_id, source, resource_key)
+            );
+            CREATE INDEX IF NOT EXISTS tv_follow_resource_time_idx
+                ON tv_follow_resources(follow_id, observed_at DESC);
             """
         )
 
@@ -811,6 +821,68 @@ def select_missing_episode_files(
     return selected
 
 
+def p115_share_item_size(item: dict[str, Any]) -> int:
+    for key in ("s", "file_size", "size", "bytes"):
+        value = item.get(key)
+        if value is None:
+            continue
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            parsed = resource_size_bytes(value)
+            if parsed > 0:
+                return parsed
+    return 0
+
+
+def select_largest_missing_episode_files(
+    items: list[dict[str, Any]],
+    missing_episodes: set[int],
+) -> tuple[list[dict[str, Any]], set[int]]:
+    """Pick the largest media file for every missing episode.
+
+    A single file may cover several explicitly named episodes. Subtitle files
+    for the selected episodes are included as companions, while posters and
+    unrelated extras remain excluded.
+    """
+
+    media_extensions = {
+        ".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".wmv", ".flv", ".webm"
+    }
+    subtitle_extensions = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+    best_by_episode: dict[int, dict[str, Any]] = {}
+    subtitles: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("_share_is_dir"):
+            continue
+        name = str(item.get("_share_name") or "")
+        suffix = Path(name).suffix.lower()
+        parsed = parse_episode_spec(name)
+        episodes = set(parsed["episode_numbers"]) & missing_episodes
+        if not episodes:
+            continue
+        if suffix in subtitle_extensions:
+            subtitles.append(item)
+            continue
+        if suffix and suffix not in media_extensions:
+            continue
+        size = p115_share_item_size(item)
+        for episode in episodes:
+            current = best_by_episode.get(episode)
+            if current is None or size > p115_share_item_size(current):
+                best_by_episode[episode] = item
+
+    selected: dict[str, dict[str, Any]] = {}
+    for item in best_by_episode.values():
+        selected[str(item.get("_share_id") or id(item))] = item
+    selected_episodes = set(best_by_episode)
+    for item in subtitles:
+        parsed = parse_episode_spec(item.get("_share_name"))
+        if set(parsed["episode_numbers"]) & selected_episodes:
+            selected[str(item.get("_share_id") or id(item))] = item
+    return list(selected.values()), selected_episodes
+
+
 def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> bool:
     with db() as connection:
         return bool(
@@ -1013,7 +1085,30 @@ def parse_episode_spec(text: Any) -> dict[str, Any]:
 
 
 def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
-    title = str(item.get("title") or "影巢资源").strip()
+    details = item.get("resource")
+    if not isinstance(details, dict):
+        details = item.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    title_candidates = (
+        item.get("resource_title"),
+        item.get("share_title"),
+        item.get("remark"),
+        item.get("description"),
+        item.get("content"),
+        details.get("title"),
+        details.get("remark"),
+        details.get("description"),
+        item.get("title"),
+    )
+    title = next(
+        (
+            str(value).strip()
+            for value in title_candidates
+            if value is not None and str(value).strip()
+        ),
+        "影巢资源",
+    )
     episode = parse_episode_spec(title)
 
     def joined(value: Any, fallback: str = "") -> str:
@@ -1058,6 +1153,41 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "media_slug": str(item.get("media_slug") or ""),
         "hot": "-",
     }
+
+
+def resource_size_bytes(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return int(number if number > 1024 * 1024 else number * 1024**3)
+    text = str(value).strip().upper().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(TB|T|GB|G|MB|M|KB|K|B)?", text)
+    if not match:
+        return 0
+    number = float(match.group(1))
+    unit = match.group(2) or "GB"
+    factor = {
+        "TB": 1024**4,
+        "T": 1024**4,
+        "GB": 1024**3,
+        "G": 1024**3,
+        "MB": 1024**2,
+        "M": 1024**2,
+        "KB": 1024,
+        "K": 1024,
+        "B": 1,
+    }[unit]
+    return int(number * factor)
+
+
+def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int]:
+    episode_count = len(resource.get("episode_numbers") or [])
+    return (
+        1 if resource.get("is_pack") or episode_count > 1 else 0,
+        resource_size_bytes(resource.get("size_gb")),
+        episode_count,
+    )
 
 
 def hdhive_response_data(result: dict[str, Any]) -> Any:
@@ -1640,11 +1770,16 @@ def emby_series_episode_progress(
         episodes_response.raise_for_status()
         latest_season = 0
         latest_episode = 0
+        episode_numbers_by_season: dict[int, set[int]] = {}
         for episode in episodes_response.json().get("Items", []):
             if episode.get("IsMissing") is True or episode.get("LocationType") == "Virtual":
                 continue
             season_number = int(episode.get("ParentIndexNumber") or 0)
             episode_number = int(episode.get("IndexNumber") or 0)
+            if season_number > 0 and episode_number > 0:
+                episode_numbers_by_season.setdefault(season_number, set()).add(
+                    episode_number
+                )
             if episode_number > 0 and (season_number, episode_number) > (
                 latest_season,
                 latest_episode,
@@ -1660,6 +1795,10 @@ def emby_series_episode_progress(
                 latest_episode,
                 "已入库至",
             ),
+            "emby_episode_numbers": {
+                str(season): sorted(numbers)
+                for season, numbers in sorted(episode_numbers_by_season.items())
+            },
         }
         with CACHE_LOCK:
             EMBY_EPISODE_CACHE[cache_key] = (now + 300, dict(result))
@@ -2264,6 +2403,220 @@ def maybe_perform_hdhive_signin() -> bool:
     return False
 
 
+def cache_follow_resources(
+    follow_id: int,
+    source: str,
+    resources: list[dict[str, Any]],
+) -> None:
+    observed_at = now_iso()
+    with db() as connection:
+        for index, resource in enumerate(resources):
+            resource_key = str(
+                resource.get("slug")
+                or resource.get("resource_id")
+                or resource.get("share_id")
+                or index
+            )
+            connection.execute(
+                "INSERT INTO tv_follow_resources("
+                "follow_id, source, resource_key, payload_json, observed_at"
+                ") VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(follow_id, source, resource_key) DO UPDATE SET "
+                "payload_json = excluded.payload_json, "
+                "observed_at = excluded.observed_at",
+                (
+                    follow_id,
+                    source,
+                    resource_key,
+                    json.dumps(resource, ensure_ascii=False),
+                    observed_at,
+                ),
+            )
+
+
+def transferred_episode_set(tmdb_id: int, season_number: int) -> set[int]:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT episode_number FROM resource_transfer_log "
+            "WHERE tmdb_id = ? AND season_number = ? AND status = 'success' "
+            "AND episode_number > 0",
+            (tmdb_id, season_number),
+        ).fetchall()
+    return {int(row["episode_number"]) for row in rows}
+
+
+def auto_replenish_hdhive_follow(
+    follow_id: int,
+    resources: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Fill exact missing episodes from HDHive, largest multi-episode shares first."""
+
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1",
+            (follow_id,),
+        ).fetchone()
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    if not follow:
+        return {"transferred": [], "message": "追更已停止"}
+
+    tmdb_id = int(follow["tmdb_id"])
+    progress = emby_series_episode_progress(tmdb_id, known_in_library=True)
+    season_number = int(
+        progress.get("emby_latest_season_number")
+        or follow["last_seen_season"]
+        or follow["baseline_season"]
+        or 1
+    )
+    by_season = progress.get("emby_episode_numbers") or {}
+    present = {
+        int(value)
+        for value in by_season.get(str(season_number), [])
+        if int(value) > 0
+    }
+    present.update(transferred_episode_set(tmdb_id, season_number))
+
+    if resources is None:
+        result = hdhive_call("resources", "tv", tmdb_id)
+        resources = [
+            normalize_hdhive_resource(item)
+            for item in extract_share_items(result)
+        ]
+    cache_follow_resources(follow_id, "hdhive", resources)
+    ordered = sorted(resources, key=hdhive_resource_priority, reverse=True)
+    client = p115_client()
+    transferred: set[int] = set()
+    used_resources: list[str] = []
+
+    # Limit the number of possible unlocks for a single notification. Packs are
+    # considered before single episodes and larger shares before smaller ones.
+    for resource in ordered[:12]:
+        slug = str(resource.get("slug") or "").strip()
+        if not slug:
+            continue
+        advertised = {
+            int(value)
+            for value in resource.get("episode_numbers") or []
+            if int(value) > 0
+        }
+        if advertised and advertised.issubset(present):
+            continue
+        try:
+            unlocked = hdhive_call("unlock", slug)
+            data = unlocked.get("data", unlocked)
+            share_url = (
+                str(data.get("full_url") or data.get("url") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
+            if not is_115_share_url(share_url):
+                continue
+            tree = p115_share_tree(client, share_url)
+            available: set[int] = set()
+            for item in tree:
+                if item.get("_share_is_dir"):
+                    continue
+                available.update(
+                    int(value)
+                    for value in parse_episode_spec(item.get("_share_name"))[
+                        "episode_numbers"
+                    ]
+                    if int(value) > 0
+                )
+            missing = available - present
+            if not missing:
+                continue
+            selected, selected_episodes = select_largest_missing_episode_files(
+                tree,
+                missing,
+            )
+            selected_ids = [
+                str(item.get("_share_id") or "")
+                for item in selected
+                if item.get("_share_id")
+            ]
+            if not selected_ids or not selected_episodes:
+                continue
+            before_files = p115_folder_snapshot(client, target_cid)
+            received = p115_call(
+                "接收115分享失败",
+                client.share_receive,
+                {"file_id": ",".join(selected_ids), "cid": target_cid},
+                share_url=share_url,
+            )
+            if not response_ok(received):
+                continue
+            if not wait_for_p115_change(
+                lambda: p115_folder_snapshot(client, target_cid),
+                before_files,
+            ):
+                continue
+            message = (
+                f"自动补齐第{compact_episode_numbers(selected_episodes)}集，"
+                f"按每集最大文件选择"
+            )
+            record_transfer(
+                user_id=int(follow["user_id"]),
+                source="hdhive",
+                resource_key=slug,
+                tmdb_id=tmdb_id,
+                transfer_scope="auto_missing",
+                status="success",
+                detail=message,
+                follow_id=follow_id,
+                season_number=season_number,
+                episode_numbers=sorted(selected_episodes),
+            )
+            present.update(selected_episodes)
+            transferred.update(selected_episodes)
+            used_resources.append(str(resource.get("title") or slug))
+        except HTTPException:
+            continue
+
+    checked_at = now_iso()
+    if transferred:
+        latest = max(transferred)
+        message = (
+            f"已自动补齐第{compact_episode_numbers(transferred)}集；"
+            "多集资源优先，同集选择最大文件"
+        )
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET last_transferred_season = ?, "
+                "last_transferred_episode = MAX(last_transferred_episode, ?), "
+                "last_seen_season = ?, "
+                "last_seen_episode = MAX(last_seen_episode, ?), "
+                "last_checked_at = ?, last_message = ?, updated_at = ? "
+                "WHERE id = ?",
+                (
+                    season_number,
+                    latest,
+                    season_number,
+                    latest,
+                    checked_at,
+                    message,
+                    checked_at,
+                    follow_id,
+                ),
+            )
+        send_telegram(
+            f"✅ 影巢追更已自动补齐\n\n{follow['title']}\n{message}"
+        )
+    else:
+        message = "已检查影巢更新，没有找到可安全识别并补齐的缺失集"
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET last_checked_at = ?, "
+                "last_message = ?, updated_at = ? WHERE id = ?",
+                (checked_at, message, checked_at, follow_id),
+            )
+    return {
+        "transferred": sorted(transferred),
+        "resources": used_resources,
+        "message": message,
+    }
+
+
 def refresh_hdhive_subscribed_follows() -> int:
     with db() as connection:
         follows = connection.execute(
@@ -2273,11 +2626,19 @@ def refresh_hdhive_subscribed_follows() -> int:
     changed = 0
     for follow in follows:
         result = hdhive_call("resources", "tv", int(follow["tmdb_id"]))
+        resources = [
+            normalize_hdhive_resource(item)
+            for item in extract_share_items(result)
+        ]
+        cache_follow_resources(int(follow["id"]), "hdhive", resources)
         candidates: set[tuple[int, int]] = set()
-        for item in extract_share_items(result):
-            parsed = parse_episode_spec(item.get("title"))
-            season = int(parsed["season_number"] or follow["last_seen_season"] or 1)
-            for episode in parsed["episode_numbers"]:
+        for resource in resources:
+            season = int(
+                resource.get("season_number")
+                or follow["last_seen_season"]
+                or 1
+            )
+            for episode in resource.get("episode_numbers") or []:
                 if int(episode) > 0:
                     candidates.add((season, int(episode)))
         current = (
@@ -2305,7 +2666,7 @@ def refresh_hdhive_subscribed_follows() -> int:
                 )
             send_telegram(
                 f"🆕 影巢追更提醒\n\n{follow['title']}\n"
-                f"发现第{latest[1]}集资源，请到映单“我的追更”中确认规格并转存。"
+                f"发现第{latest[1]}集资源，正在按缺集与最大文件规则自动补齐。"
             )
         else:
             with db() as connection:
@@ -2314,6 +2675,10 @@ def refresh_hdhive_subscribed_follows() -> int:
                     "WHERE id = ?",
                     (checked_at, checked_at, follow["id"]),
                 )
+        try:
+            auto_replenish_hdhive_follow(int(follow["id"]), resources)
+        except Exception:
+            pass
     return changed
 
 
@@ -2514,7 +2879,7 @@ def logout(response: Response, movie_session: Optional[str] = Cookie(default=Non
 
 @APP.get("/api/search")
 def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_user(movie_session)
+    user = require_user(movie_session)
     query = q.strip()
     if len(query) < 1:
         return {"results": []}
@@ -2534,6 +2899,19 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
     for item in source_items:
         media_type = item.get("media_type")
         results.append(tmdb_media_item(item, media_type, library_ids))
+    with db() as connection:
+        followed_ids = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT tmdb_id FROM tv_follows WHERE user_id = ? AND active = 1",
+                (user["id"],),
+            ).fetchall()
+        }
+    for item in results:
+        item["is_following"] = (
+            item.get("media_type") == "tv"
+            and int(item.get("tmdb_id") or 0) in followed_ids
+        )
     return {"results": results}
 
 
@@ -3129,18 +3507,56 @@ async def create_follow(
             "WHERE f.user_id = ? AND f.tmdb_id = ?",
             (user["id"], tmdb_id),
         ).fetchone()
-    return {"ok": True, "follow": serialize_follow(row)}
+    bind_error = ""
+    try:
+        resources_result = hdhive_call("resources", "tv", tmdb_id)
+        resources = [
+            normalize_hdhive_resource(item)
+            for item in extract_share_items(resources_result)
+        ]
+        resources.sort(key=hdhive_resource_priority, reverse=True)
+        cache_follow_resources(int(row["id"]), "hdhive", resources)
+        selected = next(
+            (resource for resource in resources if resource.get("slug")),
+            None,
+        )
+        if not selected:
+            raise HTTPException(404, "影巢暂时没有可用于原生订阅的资源")
+        row = bind_hdhive_follow_subscription(int(row["id"]), selected["slug"])
+        Thread(
+            target=auto_replenish_hdhive_follow,
+            args=(int(row["id"]), resources),
+            daemon=True,
+        ).start()
+    except HTTPException as error:
+        bind_error = str(error.detail)
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET last_message = ?, updated_at = ? "
+                "WHERE id = ?",
+                (
+                    f"本地追更已建立；影巢原生订阅等待重试：{bind_error}",
+                    now_iso(),
+                    row["id"],
+                ),
+            )
+            row = connection.execute(
+                "SELECT f.*, u.display_name, u.username FROM tv_follows f "
+                "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
+                (row["id"],),
+            ).fetchone()
+    return {
+        "ok": True,
+        "follow": serialize_follow(row),
+        "native_subscription_error": bind_error,
+    }
 
 
-@APP.post("/api/follows/{follow_id}/hdhive-subscription")
-async def create_hdhive_follow_subscription(
+def bind_hdhive_follow_subscription(
     follow_id: int,
-    request: Request,
-    movie_session: Optional[str] = Cookie(default=None),
-) -> dict[str, Any]:
-    require_admin(movie_session)
-    payload = await request.json()
-    slug = str(payload.get("slug") or "").strip()
+    slug: str,
+) -> sqlite3.Row:
+    slug = str(slug or "").strip()
     if not slug:
         raise HTTPException(400, "请选择一个影巢长期更新资源")
     with db() as connection:
@@ -3180,6 +3596,21 @@ async def create_hdhive_follow_subscription(
             "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
             (follow_id,),
         ).fetchone()
+    return row
+
+
+@APP.post("/api/follows/{follow_id}/hdhive-subscription")
+async def create_hdhive_follow_subscription(
+    follow_id: int,
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    row = bind_hdhive_follow_subscription(
+        follow_id,
+        str(payload.get("slug") or ""),
+    )
     return {"ok": True, "follow": serialize_follow(row)}
 
 
@@ -3261,12 +3692,14 @@ def follow_resources(
         hdhive_items = hdhive_resources("tv", row["tmdb_id"], movie_session)[
             "resources"
         ]
+        cache_follow_resources(follow_id, "hdhive", hdhive_items)
     except HTTPException as error:
         errors["hdhive"] = str(error.detail)
     try:
         dian_items = dian_resources("tv", row["tmdb_id"], None, movie_session)[
             "resources"
         ]
+        cache_follow_resources(follow_id, "dian", dian_items)
     except HTTPException as error:
         errors["dian"] = str(error.detail)
     return {
