@@ -9,6 +9,8 @@ services:
       HTTP_PROXY: http://192.168.31.129:7890
       HTTPS_PROXY: http://192.168.31.129:7890
       NO_PROXY: localhost,127.0.0.1,192.168.31.0/24
+      # 仅影巢请求使用；填写云服务器上的 HTTP CONNECT 代理地址。
+      HDHIVE_PROXY_URL: ${HDHIVE_PROXY_URL:-}
     ports:
       - "1802:5056"
     volumes:
