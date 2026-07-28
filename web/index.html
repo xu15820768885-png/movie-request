@@ -761,15 +761,39 @@
       const root=$('followList').querySelector(`[data-follow-results="${follow.id}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在同时查询影巢和癫影…</div>';button.disabled=true;
       try {
         const result=preview?{hdhive_resources:previewHDHiveResources({...follow,media_type:follow.media_type||'tv'}),dian_resources:previewResources({...follow,media_type:follow.media_type||'tv'})}:await api(`/api/follows/${follow.id}/resources`);
-        const list=(provider,label,items)=>`<section class="resource-panel ${provider==='hdhive'?'':'hidden'}" data-follow-resource-panel="${provider}"><div class="resource-source-title"><h4>${label} · ${items.length} 个</h4></div>${items.length?items.slice(0,12).map((resource,index)=>`<div class="integration-line"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="request-meta">${escapeHtml(resource.episode_label||resource.files||'集数待确认')} · ${escapeHtml(resource.res||'')} · ${escapeHtml(resource.size_gb||'')}</div></div>${provider==='hdhive'&&currentUser?.role==='admin'?`<button class="btn btn-primary btn-small" data-native-subscribe="${follow.id}" data-resource-index="${index}">${follow.hdhive_subscribed?'更换为此资源':'订阅此资源更新'}</button>`:''}</div>`).join(''):'<div class="empty">暂无资源</div>'}</section>`;
+        const list=(provider,label,items)=>`<section class="resource-panel ${provider==='hdhive'?'':'hidden'}" data-follow-resource-panel="${provider}"><div class="resource-source-title"><h4>${label} · ${items.length} 个</h4></div>${items.length?items.slice(0,12).map((resource,index)=>`<div class="integration-line"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="request-meta">${escapeHtml(resource.episode_label||resource.files||'集数待确认')} · ${escapeHtml(resource.res||'')} · ${escapeHtml(resource.size_gb||'')}</div></div>${provider==='hdhive'&&currentUser?.role==='admin'?`<button class="btn btn-primary btn-small" data-follow-transfer="${follow.id}" data-resource-index="${index}">转存此资源</button>`:''}</div>`).join(''):'<div class="empty">暂无资源</div>'}</section>`;
         root.innerHTML=`<div class="resource-tabs"><button class="resource-tab active" data-follow-resource-provider="hdhive">影巢 · ${(result.hdhive_resources||[]).length}</button><button class="resource-tab" data-follow-resource-provider="dian">癫影 · ${(result.dian_resources||[]).length}</button></div>${list('hdhive','影巢',result.hdhive_resources||[])}${list('dian','癫影',result.dian_resources||[])}<div class="transfer-note">${follow.media_type==='movie'?'电影已排除 ISO/BDMV 原盘，并按可播放文件大小从大到小排序。':'影巢原生订阅发现更新后，会重新搜索并保存资源，按实际缺集自动安全补齐。'}</div>`;
         root.querySelectorAll('[data-follow-resource-provider]').forEach(tab=>tab.onclick=()=>{
           const provider=tab.dataset.followResourceProvider;
           root.querySelectorAll('[data-follow-resource-provider]').forEach(item=>item.classList.toggle('active',item.dataset.followResourceProvider===provider));
           root.querySelectorAll('[data-follow-resource-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.followResourcePanel!==provider));
         });
-        root.querySelectorAll('[data-native-subscribe]').forEach(nativeButton=>nativeButton.onclick=()=>subscribeNativeResource(follow,(result.hdhive_resources||[])[Number(nativeButton.dataset.resourceIndex)],nativeButton));
+        root.querySelectorAll('[data-follow-transfer]').forEach(transferButton=>transferButton.onclick=()=>transferFollowResource(follow,(result.hdhive_resources||[])[Number(transferButton.dataset.resourceIndex)],transferButton));
       } catch(error){root.innerHTML=`<div class="empty">${escapeHtml(error.message)}</div>`;} finally {button.disabled=false;}
+    }
+    async function transferFollowResource(follow,resource,button) {
+      if(!resource?.slug)return toast('这个资源缺少影巢标识，不能转存',true);
+      const mediaType=follow.media_type||'tv';
+      const hasLocal=mediaType==='tv'&&Number(follow.baseline_episode||0)>0;
+      const scope=mediaType!=='tv'?'single':hasLocal?'missing':resource.is_pack?'whole':'single';
+      if(scope==='whole'&&!confirm(`《${follow.title}》当前未在 Emby 检测到任何集数。确定手动转存这个整部资源吗？`))return;
+      if(preview){button.disabled=true;button.textContent='已完成转存';return toast(`《${follow.title}》已模拟转存此资源`);}
+      button.disabled=true;button.textContent='转存中…';
+      try {
+        const result=await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({
+          slug:resource.slug,
+          tmdb_id:follow.tmdb_id,
+          media_type:mediaType,
+          title:follow.title,
+          resource_title:resource.title,
+          transfer_scope:scope,
+          confirm_whole:scope==='whole'
+        })});
+        button.textContent=result.mode==='offline'?'离线下载中':'已完成转存';
+        toast(result.message||`《${follow.title}》已提交到 115`);
+      } catch(error) {
+        button.disabled=false;button.textContent='重新转存';toast(error.message,true);
+      }
     }
     async function subscribeNativeResource(follow,resource,button) {
       if(!resource?.slug)return toast('这个资源缺少影巢标识，不能订阅',true);
