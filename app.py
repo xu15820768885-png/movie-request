@@ -992,6 +992,89 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def hdhive_response_data(result: dict[str, Any]) -> Any:
+    return result.get("data", result) if isinstance(result, dict) else result
+
+
+def hdhive_subscription_target(
+    share_result: dict[str, Any], expected_tmdb_id: int
+) -> dict[str, Any]:
+    data = hdhive_response_data(share_result)
+    if not isinstance(data, dict):
+        raise HTTPException(502, "影巢分享详情没有返回可订阅的媒体信息")
+    media = data.get("media")
+    if not isinstance(media, dict):
+        raise HTTPException(502, "这个影巢资源没有关联可订阅的电视剧")
+
+    target_id = 0
+    for key in ("id", "tv_id", "media_id"):
+        try:
+            target_id = int(media.get(key) or 0)
+        except (TypeError, ValueError):
+            target_id = 0
+        if target_id > 0:
+            break
+
+    media_type = str(
+        media.get("media_type") or media.get("type") or media.get("kind") or "tv"
+    ).lower()
+    if media_type not in ("tv", "series", "television"):
+        raise HTTPException(400, "只能把影巢电视剧资源加入原生追更")
+
+    try:
+        returned_tmdb_id = int(media.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        returned_tmdb_id = 0
+    if returned_tmdb_id and returned_tmdb_id != expected_tmdb_id:
+        raise HTTPException(400, "影巢资源关联的电视剧与当前追更项目不一致")
+    if target_id <= 0:
+        raise HTTPException(502, "影巢分享详情缺少电视剧内部编号，无法创建订阅")
+
+    return {
+        "target_type": "media_resource",
+        "target_id": target_id,
+        "target_key": f"tv:{target_id}",
+        "title": str(
+            media.get("title")
+            or media.get("name")
+            or data.get("title")
+            or "影巢电视剧资源"
+        ).strip(),
+    }
+
+
+def hdhive_created_subscription_id(
+    result: dict[str, Any], target_key: str
+) -> int:
+    data = hdhive_response_data(result)
+    if isinstance(data, dict):
+        try:
+            subscription_id = int(data.get("id") or data.get("subscription_id") or 0)
+        except (TypeError, ValueError):
+            subscription_id = 0
+        if subscription_id > 0:
+            return subscription_id
+
+    listed = hdhive_call(
+        "subscriptions",
+        target_type="media_resource",
+        status="active",
+        q=target_key,
+        page=1,
+        page_size=20,
+    )
+    for item in extract_share_items(listed):
+        if str(item.get("target_key") or "") != target_key:
+            continue
+        try:
+            subscription_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            subscription_id = 0
+        if subscription_id > 0:
+            return subscription_id
+    raise HTTPException(502, "影巢已接受订阅，但没有返回订阅编号")
+
+
 def dian_number_values(value: Any, *, allow_zero: bool = False) -> set[int]:
     """Parse Dian's CSV/range fields, including arrays returned by v2."""
     if isinstance(value, (list, tuple, set)):
@@ -1999,24 +2082,79 @@ def dian_signin_loop() -> None:
         time.sleep(30)
 
 
+def refresh_hdhive_subscribed_follows() -> int:
+    with db() as connection:
+        follows = connection.execute(
+            "SELECT * FROM tv_follows WHERE active = 1 "
+            "AND hdhive_subscription_id IS NOT NULL"
+        ).fetchall()
+    changed = 0
+    for follow in follows:
+        result = hdhive_call("resources", "tv", int(follow["tmdb_id"]))
+        candidates: set[tuple[int, int]] = set()
+        for item in extract_share_items(result):
+            parsed = parse_episode_spec(item.get("title"))
+            season = int(parsed["season_number"] or follow["last_seen_season"] or 1)
+            for episode in parsed["episode_numbers"]:
+                if int(episode) > 0:
+                    candidates.add((season, int(episode)))
+        current = (
+            int(follow["last_seen_season"] or follow["baseline_season"] or 1),
+            int(follow["last_seen_episode"] or follow["baseline_episode"] or 0),
+        )
+        latest = max(candidates, default=current)
+        checked_at = now_iso()
+        if latest > current:
+            changed += 1
+            message = f"影巢订阅发现第{latest[1]}集资源，请确认规格后安全转存"
+            with db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET last_seen_season = ?, "
+                    "last_seen_episode = ?, last_checked_at = ?, "
+                    "last_message = ?, updated_at = ? WHERE id = ?",
+                    (
+                        latest[0],
+                        latest[1],
+                        checked_at,
+                        message,
+                        checked_at,
+                        follow["id"],
+                    ),
+                )
+            send_telegram(
+                f"🆕 影巢追更提醒\n\n{follow['title']}\n"
+                f"发现第{latest[1]}集资源，请到映单“我的追更”中确认规格并转存。"
+            )
+        else:
+            with db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET last_checked_at = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (checked_at, checked_at, follow["id"]),
+                )
+    return changed
+
+
 def poll_hdhive_follow_messages() -> int:
     with db() as connection:
         active_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM tv_follows WHERE active = 1"
+                "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
+                "AND hdhive_subscription_id IS NOT NULL"
             ).fetchone()[0]
         )
     if not active_count:
         return 0
-    result = hdhive_call("messages", status="unread", page=1, page_size=50)
-    data = result.get("data", [])
-    if isinstance(data, dict):
-        items = extract_share_items({"data": data})
-    elif isinstance(data, list):
-        items = [item for item in data if isinstance(item, dict)]
-    else:
-        items = []
+    result = hdhive_call(
+        "messages",
+        type="subscription",
+        status="unread",
+        page=1,
+        page_size=50,
+    )
+    items = extract_share_items(result)
     created = 0
+    message_ids: list[int] = []
     for item in items:
         message_key = str(
             item.get("id")
@@ -2040,8 +2178,16 @@ def poll_hdhive_follow_messages() -> int:
             )
         if cursor.rowcount:
             created += 1
-            title = str(item.get("title") or item.get("subject") or "订阅资源有更新")
-            send_telegram(f"🆕 影巢追更提醒\n\n{title}\n请到映单“我的追更”中查看并确认转存。")
+        try:
+            message_id = int(item.get("id") or item.get("message_id") or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+        if message_id > 0:
+            message_ids.append(message_id)
+    if created:
+        refresh_hdhive_subscribed_follows()
+    if message_ids:
+        hdhive_call("mark_messages_read", sorted(set(message_ids)))
     return created
 
 
@@ -2647,6 +2793,7 @@ def hdhive_resources(
 def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["active"] = bool(item["active"])
+    item["hdhive_subscribed"] = bool(item.get("hdhive_subscription_id"))
     item["poster_url"] = (
         f"https://image.tmdb.org/t/p/w342{item['poster_path']}"
         if item["poster_path"]
@@ -2745,6 +2892,81 @@ async def create_follow(
     return {"ok": True, "follow": serialize_follow(row)}
 
 
+@APP.post("/api/follows/{follow_id}/hdhive-subscription")
+async def create_hdhive_follow_subscription(
+    follow_id: int,
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    slug = str(payload.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(400, "请选择一个影巢长期更新资源")
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1",
+            (follow_id,),
+        ).fetchone()
+    if not follow:
+        raise HTTPException(404, "没有找到这条有效追更")
+
+    share_result = hdhive_call("share", slug)
+    target = hdhive_subscription_target(share_result, int(follow["tmdb_id"]))
+    created = hdhive_call(
+        "create_subscription",
+        target_type=target["target_type"],
+        target_id=target["target_id"],
+        target_key=target["target_key"],
+    )
+    subscription_id = hdhive_created_subscription_id(created, target["target_key"])
+
+    previous_id = int(follow["hdhive_subscription_id"] or 0)
+    if previous_id > 0 and previous_id != subscription_id:
+        try:
+            hdhive_call("delete_subscription", previous_id)
+        except HTTPException:
+            pass
+
+    message = f"已开启影巢原生订阅：{target['title']}"
+    with db() as connection:
+        connection.execute(
+            "UPDATE tv_follows SET hdhive_subscription_id = ?, "
+            "last_message = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
+            (subscription_id, message, now_iso(), now_iso(), follow_id),
+        )
+        row = connection.execute(
+            "SELECT f.*, u.display_name, u.username FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
+            (follow_id,),
+        ).fetchone()
+    return {"ok": True, "follow": serialize_follow(row)}
+
+
+@APP.delete("/api/follows/{follow_id}/hdhive-subscription")
+def delete_hdhive_follow_subscription(
+    follow_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+    if not follow:
+        raise HTTPException(404, "没有找到这条追更")
+    subscription_id = int(follow["hdhive_subscription_id"] or 0)
+    if subscription_id > 0:
+        hdhive_call("delete_subscription", subscription_id)
+    with db() as connection:
+        connection.execute(
+            "UPDATE tv_follows SET hdhive_subscription_id = NULL, "
+            "last_message = ?, updated_at = ? WHERE id = ?",
+            ("影巢原生订阅已取消，本地追更仍保留", now_iso(), follow_id),
+        )
+    return {"ok": True}
+
+
 @APP.delete("/api/follows/{follow_id}")
 def delete_follow(
     follow_id: int,
@@ -2757,8 +2979,24 @@ def delete_follow(
         ).fetchone()
         if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
             raise HTTPException(404, "没有找到这条追更")
+        subscription_id = int(row["hdhive_subscription_id"] or 0)
+        remaining = (
+            int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM tv_follows "
+                    "WHERE active = 1 AND id != ? AND hdhive_subscription_id = ?",
+                    (follow_id, subscription_id),
+                ).fetchone()[0]
+            )
+            if subscription_id > 0
+            else 0
+        )
+    if subscription_id > 0 and remaining == 0:
+        hdhive_call("delete_subscription", subscription_id)
+    with db() as connection:
         connection.execute(
-            "UPDATE tv_follows SET active = 0, updated_at = ? WHERE id = ?",
+            "UPDATE tv_follows SET active = 0, hdhive_subscription_id = NULL, "
+            "updated_at = ? WHERE id = ?",
             (now_iso(), follow_id),
         )
     return {"ok": True}
