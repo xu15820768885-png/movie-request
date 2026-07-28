@@ -160,6 +160,12 @@ class HDHiveOpenAPI:
             json_body={"slugs": [value.strip() for value in slugs if value.strip()]},
         )
 
+    def share(self, slug: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/open/shares/{slug.strip()}",
+        )
+
     def subscriptions(self, **params: Any) -> dict[str, Any]:
         return self._request("GET", "/api/open/subscriptions", params=params)
 

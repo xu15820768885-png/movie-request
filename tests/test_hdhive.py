@@ -119,6 +119,24 @@ class HDHiveFoundationTests(unittest.TestCase):
         result = client.resources("tv", 101172)
         self.assertEqual(result["meta"]["total"], 1)
 
+    def test_client_reads_share_detail_for_subscription_target(self):
+        session = FakeSession(
+            [
+                FakeResponse(
+                    {
+                        "success": True,
+                        "data": {"slug": "abc", "media": {"id": 77, "type": "tv"}},
+                    }
+                )
+            ]
+        )
+        client = HDHiveOpenAPI(
+            api_key="secret", access_token="access", session=session
+        )
+        result = client.share("abc")
+        self.assertEqual(result["data"]["media"]["id"], 77)
+        self.assertTrue(session.calls[0][1].endswith("/api/open/shares/abc"))
+
     def test_hdhive_resource_normalization_marks_pack(self):
         resource = app.normalize_hdhive_resource(
             {
@@ -144,6 +162,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         app.DB_PATH = Path(self.temporary.name) / "test.db"
         app.init_db()
         self.token = "follow-session"
+        self.admin_token = "admin-session"
         with app.db() as connection:
             cursor = connection.execute(
                 "INSERT INTO users(username, display_name, password_hash, role, created_at) "
@@ -155,6 +174,19 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 (
                     hashlib.sha256(self.token.encode()).hexdigest(),
                     cursor.lastrowid,
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                ),
+            )
+            admin = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                "VALUES('admin', '管理员', ?, 'admin', ?)",
+                (app.hash_password("password123"), app.now_iso()),
+            )
+            connection.execute(
+                "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES(?, ?, ?)",
+                (
+                    hashlib.sha256(self.admin_token.encode()).hexdigest(),
+                    admin.lastrowid,
                     (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
                 ),
             )
@@ -188,6 +220,133 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                     )
         self.assertEqual(result["follow"]["baseline_episode"], 232)
         self.assertEqual(app.list_follows(self.token)["follows"][0]["title"], "吞噬星空")
+
+    def test_admin_can_bind_native_subscription_to_follow(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "created_at, updated_at"
+                ") VALUES(?, 101172, '吞噬星空', 232, 232, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        calls = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method == "share":
+                return {
+                    "data": {
+                        "slug": "resource-slug",
+                        "title": "吞噬星空长期更新",
+                        "media": {
+                            "id": 77,
+                            "type": "tv",
+                            "tmdb_id": 101172,
+                            "name": "吞噬星空",
+                        },
+                    }
+                }
+            if method == "create_subscription":
+                return {"data": {"id": 55, "target_key": "tv:77"}}
+            raise AssertionError(method)
+
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            result = asyncio.run(
+                app.create_hdhive_follow_subscription(
+                    follow_id,
+                    FakeRequest({"slug": "resource-slug"}),
+                    self.admin_token,
+                )
+            )
+
+        self.assertTrue(result["follow"]["hdhive_subscribed"])
+        self.assertEqual(result["follow"]["hdhive_subscription_id"], 55)
+        self.assertEqual(calls[1][0], "create_subscription")
+        self.assertEqual(calls[1][2]["target_type"], "media_resource")
+        self.assertEqual(calls[1][2]["target_key"], "tv:77")
+
+    def test_member_cannot_bind_native_subscription_directly(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, created_at, updated_at"
+                ") VALUES(?, 101172, '吞噬星空', ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+        with self.assertRaises(app.HTTPException) as error:
+            asyncio.run(
+                app.create_hdhive_follow_subscription(
+                    follow_id,
+                    FakeRequest({"slug": "resource-slug"}),
+                    self.token,
+                )
+            )
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_subscription_message_refreshes_episode_and_is_marked_read(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "hdhive_subscription_id, created_at, updated_at"
+                ") VALUES(?, 101172, '吞噬星空', 232, 232, 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        calls = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method == "messages":
+                return {
+                    "data": [
+                        {
+                            "id": 9001,
+                            "type": "subscription",
+                            "title": "订阅资源有更新",
+                        }
+                    ]
+                }
+            if method == "resources":
+                return {
+                    "data": [
+                        {
+                            "slug": "episode-233",
+                            "title": "吞噬星空 S01E233 2160p WEB-DL",
+                        }
+                    ]
+                }
+            if method == "mark_messages_read":
+                return {"success": True}
+            raise AssertionError(method)
+
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(app, "send_telegram") as telegram:
+                created = app.poll_hdhive_follow_messages()
+
+        self.assertEqual(created, 1)
+        with app.db() as connection:
+            follow = connection.execute(
+                "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+            ).fetchone()
+        self.assertEqual(follow["last_seen_episode"], 233)
+        self.assertIn("第233集", follow["last_message"])
+        self.assertTrue(telegram.called)
+        message_call = next(call for call in calls if call[0] == "messages")
+        self.assertEqual(message_call[2]["type"], "subscription")
+        read_call = next(call for call in calls if call[0] == "mark_messages_read")
+        self.assertEqual(read_call[1][0], [9001])
 
     def test_whole_transfer_is_rejected_when_library_already_has_episodes(self):
         with app.db() as connection:
