@@ -989,12 +989,65 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     visited: set[int] = set()
 
+    def add_link(value: str) -> None:
+        link = value.strip()
+        if link and link not in seen:
+            links.append(link)
+            seen.add(link)
+
     def add(value: Any) -> None:
         if isinstance(value, dict):
             identity = id(value)
             if identity in visited:
                 return
             visited.add(identity)
+            share_code = str(
+                value.get("share_code")
+                or value.get("sharecode")
+                or value.get("shareCode")
+                or ""
+            ).strip()
+            receive_code = str(
+                value.get("receive_code")
+                or value.get("receiveCode")
+                or value.get("password")
+                or ""
+            ).strip()
+            share_kind = str(
+                value.get("share_kind")
+                or value.get("share_type")
+                or ""
+            ).strip().lower()
+            if share_code and (
+                share_kind == "115"
+                or "115" in share_kind
+                or bool(receive_code)
+            ):
+                if is_115_share_url(share_code):
+                    share_url = share_code
+                else:
+                    normalized_code = re.sub(
+                        r"^(?:https?://(?:[^/]+\.)?115(?:cdn)?\.com)?/s/",
+                        "",
+                        share_code,
+                        flags=re.I,
+                    ).split("?", 1)[0].strip("/")
+                    share_url = (
+                        f"https://115.com/s/{quote(normalized_code, safe='')}"
+                        if normalized_code
+                        else ""
+                    )
+                if (
+                    share_url
+                    and receive_code
+                    and "password=" not in share_url.lower()
+                ):
+                    separator = "&" if "?" in share_url else "?"
+                    share_url += (
+                        f"{separator}password={quote(receive_code, safe='')}"
+                    )
+                if share_url:
+                    add_link(share_url)
             for nested in value.values():
                 add(nested)
             return
@@ -1022,10 +1075,8 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
                 and link.lower().startswith(
                     ("http://", "https://", "ed2k://", "magnet:", "ftp://")
                 )
-                and link not in seen
             ):
-                links.append(link)
-                seen.add(link)
+                add_link(link)
 
     add(data)
     return links

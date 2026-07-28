@@ -1169,6 +1169,84 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(len(app.extract_dian_transfer_links(nested)), 1)
         self.assertEqual(len(app.extract_dian_transfer_links(encoded)), 1)
 
+    def test_dian_transfer_builds_115_url_from_unlock_share_codes(self):
+        links = app.extract_dian_transfer_links(
+            {
+                "payload": {
+                    "file_extension": "mkv",
+                    "file_id": "123",
+                    "file_name": "仙逆",
+                    "mode": "share",
+                    "receive_code": "a1b2",
+                    "share_code": "swexample",
+                    "share_id": 11,
+                    "share_kind": "115",
+                }
+            }
+        )
+
+        self.assertEqual(
+            links,
+            ["https://115.com/s/swexample?password=a1b2"],
+        )
+
+    def test_dian_transfer_accepts_structured_115_unlock_payload(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                items = (
+                    [{"fid": "900", "n": "仙逆"}]
+                    if hasattr(self, "received")
+                    else []
+                )
+                return {"state": True, "data": {"list": items}}
+
+            def share_snap(self, *_args, **kwargs):
+                self.share_url = kwargs["share_url"]
+                return {"state": True, "data": {"list": [{"fid": "101"}]}}
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with patch.object(
+            app,
+            "dian_call",
+            return_value={
+                "payload": {
+                    "file_id": "123",
+                    "file_list": [],
+                    "file_name": "仙逆",
+                    "mode": "share",
+                    "receive_code": "a1b2",
+                    "share_code": "swexample",
+                    "share_id": 11,
+                    "share_kind": "115",
+                }
+            },
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_telegram"):
+                    result = asyncio.run(
+                        app.dian_transfer(
+                            FakeRequest(
+                                {
+                                    "share_id": 11,
+                                    "resource_id": 22,
+                                    "title": "仙逆",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+
+        self.assertEqual(result["mode"], "share")
+        self.assertEqual(
+            client.share_url,
+            "https://115.com/s/swexample?password=a1b2",
+        )
+        self.assertEqual(client.received["file_id"], "101")
+
     def test_dian_transfer_submits_ed2k_as_offline_download(self):
         class FakeP115:
             def clouddownload_task_list(self, _payload):
