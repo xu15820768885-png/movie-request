@@ -725,6 +725,7 @@ class MovieRequestTests(unittest.TestCase):
                         "share_id": 11,
                         "resource_id": 22,
                         "title": "星际穿越 2160p",
+                        "share_kind": "115",
                     }
                 ]
             }
@@ -751,6 +752,7 @@ class MovieRequestTests(unittest.TestCase):
                         "id": 11,
                         "title": "鬼谜东宫",
                         "source": "user_upload",
+                        "share_kind": "115",
                         "resource": {
                             "id": 22,
                             "name": "鬼谜东宫 S01 2160p",
@@ -781,6 +783,32 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(resource["episode_label"], "全 8 集")
         self.assertEqual(resource["hot"], 88)
         self.assertTrue(resource["chn_sub"])
+
+    def test_dian_resources_only_keep_115_and_offline_links(self):
+        response = {
+            "data": {
+                "list": [
+                    {"id": 1, "title": "115", "share_kind": "115"},
+                    {
+                        "id": 2,
+                        "title": "ED2K",
+                        "share_kind": "offline",
+                        "offline_type": "ed2k",
+                    },
+                    {"id": 3, "title": "夸克", "share_kind": "quark"},
+                    {"id": 4, "title": "百度", "share_kind": "baidu"},
+                ]
+            }
+        }
+        with patch.object(app, "dian_call", return_value=response):
+            resources = app.dian_resources("tv", 279323, None, self.token)[
+                "resources"
+            ]
+
+        self.assertEqual(
+            [resource["title"] for resource in resources],
+            ["115", "ED2K"],
+        )
 
     def test_dian_resource_derives_episode_range_from_title_and_count(self):
         resource = app.normalize_dian_resource(

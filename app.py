@@ -1194,6 +1194,43 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
     )
     unlock_points = item.get("unlock_points")
     vip_free = is_official_group or unlock_points == 0 or bool(item.get("is_unlocked"))
+    pan_type = str(item.get("pan_type") or details.get("pan_type") or "").strip()
+    share_kind = str(
+        item.get("share_kind")
+        or item.get("share_type")
+        or details.get("share_kind")
+        or details.get("share_type")
+        or ""
+    ).strip().lower()
+    offline_type = str(
+        item.get("offline_type")
+        or item.get("link_type")
+        or details.get("offline_type")
+        or details.get("link_type")
+        or ""
+    ).strip().lower()
+    raw_link = str(
+        item.get("url")
+        or item.get("link")
+        or details.get("url")
+        or details.get("link")
+        or ""
+    ).strip()
+    is_offline = (
+        share_kind == "offline"
+        or offline_type in ("ed2k", "magnet")
+        or raw_link.lower().startswith(("ed2k://", "magnet:"))
+        or pan_type.strip().lower() in ("ed2k", "magnet", "offline", "离线")
+    )
+    share_type_label = (
+        "ED2K"
+        if offline_type == "ed2k" or raw_link.lower().startswith("ed2k://")
+        else "磁力"
+        if offline_type == "magnet" or raw_link.lower().startswith("magnet:")
+        else "离线"
+        if is_offline
+        else pan_type or "网盘"
+    )
     return {
         "provider": "hdhive",
         "slug": str(item.get("slug") or ""),
@@ -1215,7 +1252,11 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "is_pack": episode["is_pack"],
         "is_complete_series": episode["is_complete_series"],
         "safe_single_episode": episode["safe_single_episode"],
-        "share_type_label": str(item.get("pan_type") or "网盘"),
+        "share_type_label": share_type_label,
+        "pan_type": pan_type,
+        "share_kind": share_kind,
+        "offline_type": offline_type,
+        "is_offline": is_offline,
         "unlock_points": unlock_points,
         "is_unlocked": bool(item.get("is_unlocked")),
         "is_official_group": is_official_group,
@@ -1225,6 +1266,25 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "media_slug": str(item.get("media_slug") or ""),
         "hot": "-",
     }
+
+
+def hdhive_resource_is_supported(resource: dict[str, Any]) -> bool:
+    """Only expose resources that 115 can receive directly or download offline."""
+
+    pan_type = str(
+        resource.get("pan_type") or resource.get("share_type_label") or ""
+    ).strip().lower()
+    return "115" in pan_type or bool(resource.get("is_offline"))
+
+
+def normalize_supported_hdhive_resources(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    resources = [normalize_hdhive_resource(item) for item in items]
+    return [
+        resource for resource in resources
+        if hdhive_resource_is_supported(resource)
+    ]
 
 
 def resource_size_bytes(value: Any) -> int:
@@ -1934,6 +1994,23 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
         }
     )
     return normalized
+
+
+def dian_resource_is_supported(resource: dict[str, Any]) -> bool:
+    """Only expose 115 shares and links that 115 can download offline."""
+
+    share_type = str(resource.get("share_type_label") or "").strip().lower()
+    return "115" in share_type or share_type in {"ed2k", "磁力", "离线"}
+
+
+def normalize_supported_dian_resources(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    resources = [normalize_dian_resource(item) for item in items]
+    return [
+        resource for resource in resources
+        if dian_resource_is_supported(resource)
+    ]
 
 
 def session_user(token: Optional[str]) -> Optional[dict[str, Any]]:
@@ -2780,10 +2857,13 @@ def auto_replenish_hdhive_follow(
 
     if resources is None:
         result = hdhive_call("resources", "tv", tmdb_id)
-        resources = [
-            normalize_hdhive_resource(item)
-            for item in extract_share_items(result)
-        ]
+        resources = normalize_supported_hdhive_resources(
+            extract_share_items(result)
+        )
+    resources = [
+        resource for resource in resources
+        if hdhive_resource_is_supported(resource)
+    ]
     cache_follow_resources(follow_id, "hdhive", resources)
     ordered = sorted(resources, key=hdhive_resource_priority, reverse=True)
     client = p115_client()
@@ -2956,10 +3036,9 @@ def refresh_hdhive_subscribed_follows() -> int:
     for follow in follows:
         media_type = str(follow["media_type"] or "tv")
         result = hdhive_call("resources", media_type, int(follow["tmdb_id"]))
-        resources = [
-            normalize_hdhive_resource(item)
-            for item in extract_share_items(result)
-        ]
+        resources = normalize_supported_hdhive_resources(
+            extract_share_items(result)
+        )
         if media_type == "movie":
             resources = [
                 resource for resource in resources
@@ -3769,7 +3848,7 @@ def hdhive_resources(
     else:
         items = []
     return {
-        "resources": [normalize_hdhive_resource(item) for item in items],
+        "resources": normalize_supported_hdhive_resources(items),
         "meta": result.get("meta", {}),
     }
 
@@ -3927,10 +4006,9 @@ async def create_follow(
     bind_error = ""
     try:
         resources_result = hdhive_call("resources", media_type, tmdb_id)
-        resources = [
-            normalize_hdhive_resource(item)
-            for item in extract_share_items(resources_result)
-        ]
+        resources = normalize_supported_hdhive_resources(
+            extract_share_items(resources_result)
+        )
         resources.sort(
             key=(
                 hdhive_movie_resource_priority
@@ -4025,10 +4103,9 @@ def bind_hdhive_follow_subscription(
             media_url = hdhive_media_page_url(selected, share_result, media_type)
             if not media_url:
                 resources_result = hdhive_call("resources", media_type, tmdb_id)
-                resources = [
-                    normalize_hdhive_resource(item)
-                    for item in extract_share_items(resources_result)
-                ]
+                resources = normalize_supported_hdhive_resources(
+                    extract_share_items(resources_result)
+                )
                 cache_follow_resources(follow_id, "hdhive", resources)
                 selected = next(
                     (
@@ -4244,10 +4321,9 @@ def dian_resources(
         payload["season"] = max(0, season)
     result = dian_call("list_shares", payload)
     return {
-        "resources": [
-            normalize_dian_resource(item)
-            for item in extract_share_items(result)
-        ]
+        "resources": normalize_supported_dian_resources(
+            extract_share_items(result)
+        )
     }
 
 

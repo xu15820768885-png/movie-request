@@ -239,6 +239,35 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(resource["title"], "仙逆 S01E150-S01E151 4K WEB-DL")
         self.assertEqual(resource["episode_numbers"], [150, 151])
 
+    def test_supported_hdhive_resources_only_keep_115_and_offline_links(self):
+        resources = app.normalize_supported_hdhive_resources(
+            [
+                {"slug": "115", "title": "第151集", "pan_type": "115"},
+                {
+                    "slug": "ed2k",
+                    "title": "第151集",
+                    "url": "ed2k://|file|episode.mkv|123|HASH|/",
+                },
+                {
+                    "slug": "magnet",
+                    "title": "第151集",
+                    "offline_type": "magnet",
+                },
+                {"slug": "baidu", "title": "全集", "pan_type": "baiDu"},
+                {"slug": "quark", "title": "全集", "pan_type": "quark"},
+                {"slug": "aliyun", "title": "全集", "pan_type": "aliyun"},
+            ]
+        )
+
+        self.assertEqual(
+            [resource["slug"] for resource in resources],
+            ["115", "ed2k", "magnet"],
+        )
+        self.assertEqual(
+            [resource["share_type_label"] for resource in resources],
+            ["115", "ED2K", "磁力"],
+        )
+
     def test_subscription_target_accepts_documented_root_tv_id(self):
         target = app.hdhive_subscription_target(
             {
@@ -758,6 +787,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                         {
                             "slug": "episode-233",
                             "title": "吞噬星空 S01E233 2160p WEB-DL",
+                            "pan_type": "115",
                         }
                     ]
                 }
