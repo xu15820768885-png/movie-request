@@ -1125,6 +1125,41 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         )
         if value
     )
+    publisher = item.get("user")
+    if not isinstance(publisher, dict):
+        publisher = {}
+    official_values = (
+        item.get("is_official"),
+        item.get("official"),
+        item.get("is_official_group"),
+        publisher.get("is_official"),
+        publisher.get("official"),
+        publisher.get("is_official_group"),
+        publisher.get("official_group"),
+    )
+    publisher_labels = (
+        publisher.get("role"),
+        publisher.get("group"),
+        publisher.get("group_name"),
+        publisher.get("badge"),
+        publisher.get("badges"),
+        publisher.get("label"),
+        publisher.get("labels"),
+    )
+    publisher_text = " ".join(
+        (
+            " ".join(str(entry) for entry in value)
+            if isinstance(value, list)
+            else str(value or "")
+        )
+        for value in publisher_labels
+    ).lower()
+    is_official_group = any(value is True for value in official_values) or any(
+        marker in publisher_text
+        for marker in ("官组", "官方", "official")
+    )
+    unlock_points = item.get("unlock_points")
+    vip_free = is_official_group or unlock_points == 0 or bool(item.get("is_unlocked"))
     return {
         "provider": "hdhive",
         "slug": str(item.get("slug") or ""),
@@ -1147,8 +1182,11 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "is_complete_series": episode["is_complete_series"],
         "safe_single_episode": episode["safe_single_episode"],
         "share_type_label": str(item.get("pan_type") or "网盘"),
-        "unlock_points": item.get("unlock_points"),
+        "unlock_points": unlock_points,
         "is_unlocked": bool(item.get("is_unlocked")),
+        "is_official_group": is_official_group,
+        "vip_free": vip_free,
+        "publisher": publisher,
         "media_url": str(item.get("media_url") or ""),
         "media_slug": str(item.get("media_slug") or ""),
         "hot": "-",
@@ -1181,9 +1219,14 @@ def resource_size_bytes(value: Any) -> int:
     return int(number * factor)
 
 
-def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int]:
+def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int, int]:
     episode_count = len(resource.get("episode_numbers") or [])
     return (
+        2
+        if resource.get("is_official_group")
+        else 1
+        if resource.get("vip_free")
+        else 0,
         1 if resource.get("is_pack") or episode_count > 1 else 0,
         resource_size_bytes(resource.get("size_gb")),
         episode_count,
@@ -2448,6 +2491,7 @@ def transferred_episode_set(tmdb_id: int, season_number: int) -> set[int]:
 def auto_replenish_hdhive_follow(
     follow_id: int,
     resources: Optional[list[dict[str, Any]]] = None,
+    notify_noop: bool = False,
 ) -> dict[str, Any]:
     """Fill exact missing episodes from HDHive, largest multi-episode shares first."""
 
@@ -2488,8 +2532,8 @@ def auto_replenish_hdhive_follow(
     transferred: set[int] = set()
     used_resources: list[str] = []
 
-    # Limit the number of possible unlocks for a single notification. Packs are
-    # considered before single episodes and larger shares before smaller ones.
+    # Limit the number of possible unlocks for a single notification. Official
+    # group/VIP-free resources are preferred, then packs and larger shares.
     for resource in ordered[:12]:
         slug = str(resource.get("slug") or "").strip()
         if not slug:
@@ -2569,7 +2613,17 @@ def auto_replenish_hdhive_follow(
             )
             present.update(selected_episodes)
             transferred.update(selected_episodes)
-            used_resources.append(str(resource.get("title") or slug))
+            priority_label = (
+                "官组 · VIP免积分"
+                if resource.get("is_official_group")
+                else "当前账号免积分"
+                if resource.get("vip_free")
+                else "普通资源"
+            )
+            used_resources.append(
+                f"{priority_label}｜{resource.get('title') or slug}｜"
+                f"{resource.get('size_gb') or '大小未知'}"
+            )
         except HTTPException:
             continue
 
@@ -2599,8 +2653,17 @@ def auto_replenish_hdhive_follow(
                     follow_id,
                 ),
             )
+        resource_summary = "\n".join(
+            f"• {resource}" for resource in used_resources
+        )
         send_telegram(
-            f"✅ 影巢追更已自动补齐\n\n{follow['title']}\n{message}"
+            f"✅ 影巢追更自动转存成功\n\n"
+            f"剧集：{follow['title']}\n"
+            f"补齐：第{compact_episode_numbers(transferred)}集\n"
+            f"季数：第{season_number}季\n"
+            f"规则：官组/免积分优先 → 多集包 → 文件最大\n"
+            f"资源：\n{resource_summary}\n"
+            f"115：已确认转存完成"
         )
     else:
         message = "已检查影巢更新，没有找到可安全识别并补齐的缺失集"
@@ -2609,6 +2672,13 @@ def auto_replenish_hdhive_follow(
                 "UPDATE tv_follows SET last_checked_at = ?, "
                 "last_message = ?, updated_at = ? WHERE id = ?",
                 (checked_at, message, checked_at, follow_id),
+            )
+        if notify_noop:
+            send_telegram(
+                f"ℹ️ 影巢追更本次未转存\n\n"
+                f"剧集：{follow['title']}\n"
+                f"结果：{message}\n"
+                f"说明：未覆盖已有集数，也未转存无法识别集数的文件"
             )
     return {
         "transferred": sorted(transferred),
@@ -2649,7 +2719,7 @@ def refresh_hdhive_subscribed_follows() -> int:
         checked_at = now_iso()
         if latest > current:
             changed += 1
-            message = f"影巢订阅发现第{latest[1]}集资源，请确认规格后安全转存"
+            message = f"影巢订阅发现第{latest[1]}集资源，正在自动检查并补齐缺集"
             with db() as connection:
                 connection.execute(
                     "UPDATE tv_follows SET last_seen_season = ?, "
@@ -2676,7 +2746,11 @@ def refresh_hdhive_subscribed_follows() -> int:
                     (checked_at, checked_at, follow["id"]),
                 )
         try:
-            auto_replenish_hdhive_follow(int(follow["id"]), resources)
+            auto_replenish_hdhive_follow(
+                int(follow["id"]),
+                resources,
+                notify_noop=latest > current,
+            )
         except Exception:
             pass
     return changed
