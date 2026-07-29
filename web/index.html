@@ -409,7 +409,7 @@
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
-        <button id="followTab" class="tab hidden" data-view="follow">我的想看 <span id="followCount"></span></button>
+        <button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button>
         <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
         <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
         <button id="storageTab" class="tab hidden" data-view="storage">资源与 115</button>
@@ -421,7 +421,7 @@
         <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
         <div id="movieResults" class="empty">输入片名后，会显示准确匹配的海报、年份和类型。<br>这样就不会找错版本。</div>
       </section>
-      <section id="followView" class="view hidden"><div class="section-head"><div><h2>影视想看</h2><span id="followHelp">查看影巢追更状态；更新资源仍由你手动转存</span></div></div><div id="followList" class="follow-grid"></div></section>
+      <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看自己开启的影巢追更；更新资源仍由管理员手动转存</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
@@ -539,7 +539,7 @@
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
       const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
-      $('followTab').classList.add('hidden');
+      $('followTab').classList.remove('hidden');
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
       $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
@@ -757,7 +757,7 @@
     async function loadFollows() {
       const follows=preview?demoFollows:(await api('/api/follows')).follows;
       $('followCount').textContent=follows.filter(item=>item.active).length?`· ${follows.filter(item=>item.active).length}`:'';
-      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note">${movie?'已排除 ISO/BDMV 原盘，按可播放文件大小优先':escapeHtml(item.baseline_episode?`Emby 已有至第${item.baseline_episode}集，从下一集开始追更`:'Emby 暂无此剧，可手动选择整部转存')}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'本地想看已建立，尚未绑定影巢资源'}</div>${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">同时搜索两个资源源</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有想看的影视。点击任意电影或电视剧海报下方的“想看”。</div>';
+      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note">${movie?'请选择资源后手动转存':escapeHtml(item.baseline_episode?`Emby 已有至第${item.baseline_episode}集，影巢更新时会发送提醒`:'影巢更新时会发送提醒')}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'追更记录已建立，影巢订阅尚未开启'}</div>${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
       $('followList').querySelectorAll('[data-follow-search]').forEach(button=>button.onclick=()=>searchFollowResources(follows.find(item=>Number(item.id)===Number(button.dataset.followSearch)),button));
       $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.baseline_episode)>0,emby_latest_episode_number:Number(item.baseline_episode||0),emby_episode_label:item.baseline_episode?`已入库至第${item.baseline_episode}集`:'尚未入库'});});
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(Number(button.dataset.followDelete),button));

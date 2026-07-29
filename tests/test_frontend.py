@@ -9,7 +9,9 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         )
 
         self.assertIn('id="followTab" class="tab hidden"', html)
-        self.assertIn("$('followTab').classList.add('hidden')", html)
+        self.assertIn("$('followTab').classList.remove('hidden')", html)
+        self.assertIn("我的追更", html)
+        self.assertIn("查看自己开启的影巢追更", html)
         self.assertNotIn('data-follow-index="${index}"', html)
         self.assertIn('id="detailFollow"', html)
         self.assertIn("item.series_status==='ongoing'", html)
