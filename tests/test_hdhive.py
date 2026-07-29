@@ -441,7 +441,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
 
         status = app.hdhive_public_status()
 
-        self.assertFalse(app.FOLLOW_FEATURE_ENABLED)
+        self.assertFalse(app.HDHIVE_MESSAGE_POLLING_ENABLED)
         self.assertFalse(status["poll_enabled"])
 
     def test_follow_uses_emby_episode_as_baseline(self):
@@ -469,6 +469,68 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                     )
         self.assertEqual(result["follow"]["baseline_episode"], 232)
         self.assertEqual(app.list_follows(self.token)["follows"][0]["title"], "吞噬星空")
+
+    def test_follow_binds_the_requested_resource_without_auto_transfer(self):
+        detail = {
+            "id": 223911,
+            "name": "仙逆",
+            "original_name": "Renegade Immortal",
+            "first_air_date": "2023-09-25",
+            "poster_path": "/poster.jpg",
+        }
+        selected = {
+            "slug": "selected-subscription-resource",
+            "title": "仙逆 长期更新",
+            "media_url": "https://hdhive.com/tv/example",
+        }
+
+        def fake_bind(follow_id, slug, resource):
+            self.assertEqual(slug, selected["slug"])
+            self.assertEqual(resource, selected)
+            with app.db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET hdhive_subscription_id = 55 "
+                    "WHERE id = ?",
+                    (follow_id,),
+                )
+                return connection.execute(
+                    "SELECT * FROM tv_follows WHERE id = ?",
+                    (follow_id,),
+                ).fetchone()
+
+        with patch.object(app, "tmdb_get", return_value=detail):
+            with patch.object(app, "emby_library_tmdb_ids", return_value=set()):
+                with patch.object(
+                    app, "emby_series_episode_progress", return_value={}
+                ):
+                    with patch.object(
+                        app,
+                        "hdhive_call",
+                        side_effect=AssertionError(
+                            "create_follow must not search, unlock, or transfer"
+                        ),
+                    ):
+                        with patch.object(
+                            app,
+                            "bind_hdhive_follow_subscription",
+                            side_effect=fake_bind,
+                        ) as bind:
+                            result = asyncio.run(
+                                app.create_follow(
+                                    FakeRequest(
+                                        {
+                                            "tmdb_id": 223911,
+                                            "media_type": "tv",
+                                            "slug": selected["slug"],
+                                            "resource": selected,
+                                        }
+                                    ),
+                                    self.token,
+                                )
+                            )
+
+        self.assertTrue(result["follow"]["hdhive_subscribed"])
+        bind.assert_called_once()
 
     def test_admin_can_bind_native_subscription_to_follow(self):
         with app.db() as connection:

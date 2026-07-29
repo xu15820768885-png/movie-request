@@ -30,7 +30,10 @@ DB_PATH = DATA_DIR / "movie-request.db"
 WEB_PATH = Path(__file__).parent / "web" / "index.html"
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
-FOLLOW_FEATURE_ENABLED = False
+# Native HDHive subscriptions are created on demand.  The website deliberately
+# does not poll subscription messages or transfer updated resources; HDHive's
+# own bot sends the update link and the user decides what to save.
+HDHIVE_MESSAGE_POLLING_ENABLED = False
 STATUS_NAMES = {
     "pending": "待处理",
     "approved": "已收到",
@@ -3133,7 +3136,10 @@ def refresh_hdhive_subscribed_follows() -> int:
         checked_at = now_iso()
         if latest > current:
             changed += 1
-            message = f"影巢订阅发现第{latest[1]}集资源，正在自动检查并补齐缺集"
+            message = (
+                f"影巢订阅发现第{latest[1]}集资源；"
+                "请通过影巢机器人发送的链接手动转存"
+            )
             with db() as connection:
                 connection.execute(
                     "UPDATE tv_follows SET last_seen_season = ?, "
@@ -3150,7 +3156,7 @@ def refresh_hdhive_subscribed_follows() -> int:
                 )
             send_telegram(
                 f"🆕 影巢追更提醒\n\n{follow['title']}\n"
-                f"发现第{latest[1]}集资源，正在按缺集与最大文件规则自动补齐。"
+                f"发现第{latest[1]}集资源，请打开影巢机器人链接手动转存。"
             )
         else:
             with db() as connection:
@@ -3159,14 +3165,6 @@ def refresh_hdhive_subscribed_follows() -> int:
                     "WHERE id = ?",
                     (checked_at, checked_at, follow["id"]),
                 )
-        try:
-            auto_replenish_hdhive_follow(
-                int(follow["id"]),
-                resources,
-                notify_noop=latest > current,
-            )
-        except Exception:
-            pass
     return changed
 
 
@@ -3252,7 +3250,7 @@ def hdhive_follow_loop() -> None:
                 else 0
             )
             if (
-                FOLLOW_FEATURE_ENABLED
+                HDHIVE_MESSAGE_POLLING_ENABLED
                 and enabled
                 and configured
                 and time.time() - last_time >= interval
@@ -3532,7 +3530,7 @@ def media_details(
     tmdb_id: int,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
-    require_user(movie_session)
+    user = require_user(movie_session)
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片信息无效")
     data = tmdb_get(
@@ -3595,6 +3593,16 @@ def media_details(
             "recommendations": recommendations,
         }
     )
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT hdhive_subscription_id FROM tv_follows "
+            "WHERE user_id = ? AND tmdb_id = ? AND active = 1",
+            (user["id"], tmdb_id),
+        ).fetchone()
+    basic["is_following"] = follow is not None
+    basic["hdhive_subscribed"] = bool(
+        follow and follow["hdhive_subscription_id"]
+    )
     return basic
 
 
@@ -3626,7 +3634,7 @@ def hdhive_public_status() -> dict[str, Any]:
     with db() as connection:
         row = hdhive_oauth_row(connection)
         poll_enabled = (
-            FOLLOW_FEATURE_ENABLED
+            HDHIVE_MESSAGE_POLLING_ENABLED
             and setting(connection, "hdhive_poll_enabled") != "0"
         )
         poll_interval = max(
@@ -3756,7 +3764,7 @@ async def update_hdhive_config(
                 connection,
                 "hdhive_poll_enabled",
                 "1"
-                if FOLLOW_FEATURE_ENABLED and payload["poll_enabled"]
+                if HDHIVE_MESSAGE_POLLING_ENABLED and payload["poll_enabled"]
                 else "0",
             )
         if payload.get("poll_interval"):
@@ -4004,6 +4012,10 @@ async def create_follow(
     payload = await request.json()
     tmdb_id = int(payload.get("tmdb_id") or 0)
     media_type = str(payload.get("media_type") or "tv").strip().lower()
+    subscription_slug = str(payload.get("slug") or "").strip()
+    subscription_resource = payload.get("resource")
+    if not isinstance(subscription_resource, dict):
+        subscription_resource = None
     if tmdb_id <= 0 or media_type not in ("movie", "tv"):
         raise HTTPException(400, "影片编号无效")
     detail = tmdb_get(
@@ -4067,62 +4079,32 @@ async def create_follow(
             (user["id"], tmdb_id),
         ).fetchone()
     bind_error = ""
-    try:
-        resources_result = hdhive_call("resources", media_type, tmdb_id)
-        resources = normalize_supported_hdhive_resources(
-            extract_share_items(resources_result)
-        )
-        resources.sort(
-            key=(
-                hdhive_movie_resource_priority
-                if media_type == "movie"
-                else hdhive_resource_priority
-            ),
-            reverse=True,
-        )
-        cache_follow_resources(int(row["id"]), "hdhive", resources)
-        selected = next(
-            (
-                resource
-                for resource in resources
-                if resource.get("slug")
-                and (
-                    media_type != "movie"
-                    or hdhive_movie_resource_is_playable(resource)
-                )
-            ),
-            None,
-        )
-        if not selected:
-            raise HTTPException(404, "影巢暂时没有可订阅的可播放资源")
-        row = bind_hdhive_follow_subscription(
-            int(row["id"]),
-            selected["slug"],
-            selected,
-        )
-        if media_type == "tv":
-            Thread(
-                target=auto_replenish_hdhive_follow,
-                args=(int(row["id"]), resources),
-                daemon=True,
-            ).start()
-    except HTTPException as error:
-        bind_error = str(error.detail)
-        with db() as connection:
-            connection.execute(
-                "UPDATE tv_follows SET last_message = ?, updated_at = ? "
-                "WHERE id = ?",
-                (
-                    f"本地想看已建立；影巢原生订阅等待重试：{bind_error}",
-                    now_iso(),
-                    row["id"],
-                ),
+    if subscription_slug:
+        try:
+            row = bind_hdhive_follow_subscription(
+                int(row["id"]),
+                subscription_slug,
+                subscription_resource,
             )
-            row = connection.execute(
-                "SELECT f.*, u.display_name, u.username FROM tv_follows f "
-                "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
-                (row["id"],),
-            ).fetchone()
+        except HTTPException as error:
+            bind_error = str(error.detail)
+            with db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET last_message = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (
+                        f"影巢原生订阅未开启：{bind_error}",
+                        now_iso(),
+                        row["id"],
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT f.*, u.display_name, u.username FROM tv_follows f "
+                    "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
+                    (row["id"],),
+                ).fetchone()
+    else:
+        bind_error = "缺少影巢订阅资源，请刷新详情后重试"
     return {
         "ok": True,
         "follow": serialize_follow(row),
