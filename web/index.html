@@ -504,8 +504,11 @@
     let currentDetail = null;
     let detailLoadSequence = 0;
     let activeResourceProvider = 'hdhive';
+    let searchController = null;
+    let searchSequence = 0;
     const detailCache = new Map();
     const resourceCache = new Map();
+    const searchCache = new Map();
     const statusOptions = {pending:'待处理', approved:'已收到', searching:'寻找中', available:'已入库', rejected:'暂时无法完成'};
     const demoMovies = [
       {tmdb_id:157336,media_type:'movie',title:'星际穿越',original_title:'Interstellar',year:'2014',rating:8.5,in_library:true,poster_path:'/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',poster_url:'https://image.tmdb.org/t/p/w500/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg',overview:'一队探险家穿越虫洞，为人类寻找新的家园。'},
@@ -680,7 +683,7 @@
       try {
         const result=await api(`/api/${provider}/resources/${item.media_type}/${item.tmdb_id}`);
         if(loadId!==detailLoadSequence||!currentDetail)return;
-        const resources=(result.resources||[]).map((resource,index)=>normalizeResource(resource,index,item));
+        const resources=result.resources||[];
         currentDetail={...currentDetail,[listKey]:resources,[errorKey]:'',[loadingKey]:false};
         const cached=resourceCache.get(tmdbKey)||{};
         cached[provider]={resources,error:'',loaded:true};
@@ -705,33 +708,6 @@
       } catch(error) {
         if(currentDetail&&Number(currentDetail.tmdb_id)===Number(item.tmdb_id)){currentDetail={...currentDetail,details_loading:false,details_error:error.message};renderCurrentDetail();}
       }
-    }
-    function normalizeResource(resource,index,item) {
-      const details=resource.resource||resource.details||resource.metadata||{};
-      const tags=resource.tags||resource.tag||details.tags||details.tag||{};
-      const rawSize=resource.size_gb??details.size_gb??resource.size??details.size??resource.total_size_gb??details.total_size_gb??'';
-      const size=typeof rawSize==='number'&&rawSize>1024*1024?Math.round(rawSize/1024/1024/1024*10)/10:rawSize;
-      const shareKind=String(resource.share_kind||resource.share?.share_kind||details.share_kind||'').toLowerCase();
-      const offlineType=String(resource.offline_type||resource.share?.offline_type||details.offline_type||'').toLowerCase();
-      const shareType=resource.share_type_label||(shareKind==='offline'?(offlineType==='ed2k'?'ED2K':offlineType==='magnet'?'磁力':'离线'):(shareKind==='115'||resource.url_115||details.url_115?'115':''));
-      return {
-        ...resource,
-        provider:resource.provider||'dian',
-        share_id:resource.share_id??resource.share?.id??resource.id,
-        resource_id:resource.resource_id??details.id??resource.id,
-        title:resource.title||details.title||details.name||resource.name||resource.display_name||`${item.title} 资源 ${index+1}`,
-        res:resource.res||resource.resolution||details.res||details.resolution||details.quality||details.definition||tags.res||tags.resolution||'版本',
-        codec:resource.codec||resource.video_codec||details.codec||details.video_codec||details.vcodec||tags.codec||'编码未知',
-        hdr:resource.hdr||resource.video_hdr||details.hdr||details.video_hdr||details.dynamic_range||tags.hdr||'',
-        audio:resource.audio||resource.audio_info||details.audio||details.audio_info||details.audio_codec||tags.audio||'音轨未知',
-        chn_sub:Boolean(resource.chn_sub??details.chn_sub??details.chinese_subtitle??tags.chn_sub),
-        size_gb:size||'未知',
-        source:resource.source||resource.source_tag||details.source||details.source_tag||tags.source_tag||'115分享',
-        files:resource.files||resource.file_summary||resource.episode_summary||details.files||details.file_summary||details.episode_summary||details.file_count||'点击后转存',
-        episode_label:resource.episode_label||details.episode_label||details.episode_summary||resource.episode_summary||'',
-        share_type_label:shareType,
-        hot:resource.hot||resource.heat||resource.score||details.hot||details.heat||details.score||'-'
-      };
     }
     function formatResourceSize(value) {
       if(value===null||value===undefined||value===''||value==='未知')return '';
@@ -767,8 +743,9 @@
         const actionLabel='转存此资源';
         const points=provider==='hdhive'&&resource.unlock_points!=null?`<span class="resource-tag">${escapeHtml(resource.unlock_points)} 积分</span>`:'';
         const official=provider==='hdhive'&&resource.is_official_group?'<span class="resource-tag accent">官组 · VIP免积分</span>':provider==='hdhive'&&resource.vip_free?'<span class="resource-tag accent">当前账号免积分</span>':'';
-        const size=formatResourceSize(resource.size_gb);
-        return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${resource.episode_label?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div><div class="resource-tags">${official}${resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:''}<span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${size?`<span class="resource-tag">${escapeHtml(size)}</span>`:''}${resource.chn_sub?'<span class="resource-tag">中文字幕</span>':''}${points}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)}<br>${escapeHtml(resource.files)}${provider==='dian'?` · 热度 ${escapeHtml(resource.hot)}`:''}</div></div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${index}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${index}"></div></div></article>`;
+        const size=resource.size_label||formatResourceSize(resource.size_gb);
+        const subtitle=resource.subtitle_label||(resource.chn_sub?'中文字幕':'字幕未标明');
+        return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${resource.episode_label?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div><div class="resource-tags">${official}${resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:''}<span class="resource-tag accent">${escapeHtml(resource.res)}</span><span class="resource-tag">${escapeHtml(resource.codec)}</span>${resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:''}${size?`<span class="resource-tag">${escapeHtml(size)}</span>`:''}<span class="resource-tag">${escapeHtml(subtitle)}</span>${points}</div><div class="resource-meta">${escapeHtml(resource.audio)} · ${escapeHtml(resource.source)}<br>${escapeHtml(resource.files)}${provider==='dian'?` · 热度 ${escapeHtml(resource.hot)}`:''}</div></div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${index}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${index}"></div></div></article>`;
       }).join('');
       const sourcePanel=(provider,label,resources,loading,error)=>`<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${loading?'<div class="dian-source">后台独立读取中，不会等待另一个资源源。</div>':resources.length?`<div class="resource-list">${resourceCards(resources,provider)}</div>`:error?`<div class="load-error"><span>${escapeHtml(error)}</span><button class="btn btn-small" type="button" data-retry-resource="${provider}">单独重试${label}</button></div>`:`<div class="empty">${label}暂时没有匹配资源</div>`}</section>`;
       const requestDisabled=item.media_type==='movie'&&item.in_library;
@@ -867,7 +844,7 @@
       try {
         const result=preview?{hdhive_resources:previewHDHiveResources({...follow,media_type:follow.media_type||'tv'}),dian_resources:previewResources({...follow,media_type:follow.media_type||'tv'})}:await api(`/api/follows/${follow.id}/resources`);
         if(result.follow)Object.assign(follow,result.follow);
-        const list=(provider,label,items)=>`<section class="resource-panel ${provider==='hdhive'?'':'hidden'}" data-follow-resource-panel="${provider}"><div class="resource-source-title"><h4>${label} · ${items.length} 个</h4></div>${items.length?items.slice(0,12).map((resource,index)=>{const episodes=resource.episode_numbers||[];const actionLabel=resource.is_pack?'转存整包':episodes.length===1?`转存第${episodes[0]}集`:'转存此资源';const size=formatResourceSize(resource.size_gb);return `<div class="integration-line"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="request-meta">${escapeHtml(resource.episode_label||resource.files||'集数待确认')} · ${escapeHtml(resource.res||'')}${size?` · ${escapeHtml(size)}`:''}</div></div>${provider==='hdhive'&&currentUser?.role==='admin'?`<button class="btn btn-primary btn-small" data-follow-transfer="${follow.id}" data-resource-index="${index}">${actionLabel}</button>`:''}</div>`;}).join(''):'<div class="empty">暂无资源</div>'}</section>`;
+        const list=(provider,label,items)=>`<section class="resource-panel ${provider==='hdhive'?'':'hidden'}" data-follow-resource-panel="${provider}"><div class="resource-source-title"><h4>${label} · ${items.length} 个</h4></div>${items.length?items.slice(0,12).map((resource,index)=>{const episodes=resource.episode_numbers||[];const actionLabel=resource.is_pack?'转存整包':episodes.length===1?`转存第${episodes[0]}集`:'转存此资源';const size=resource.size_label||formatResourceSize(resource.size_gb);return `<div class="integration-line"><div><div class="resource-title">${escapeHtml(resource.title)}</div><div class="request-meta">${escapeHtml(resource.episode_label||resource.files||'集数待确认')} · ${escapeHtml(resource.res||'')}${size?` · ${escapeHtml(size)}`:''}</div></div>${provider==='hdhive'&&currentUser?.role==='admin'?`<button class="btn btn-primary btn-small" data-follow-transfer="${follow.id}" data-resource-index="${index}">${actionLabel}</button>`:''}</div>`;}).join(''):'<div class="empty">暂无资源</div>'}</section>`;
         root.innerHTML=`<div class="resource-tabs"><button class="resource-tab active" data-follow-resource-provider="hdhive">影巢 · ${(result.hdhive_resources||[]).length}</button><button class="resource-tab" data-follow-resource-provider="dian">癫影 · ${(result.dian_resources||[]).length}</button></div>${list('hdhive','影巢',result.hdhive_resources||[])}${list('dian','癫影',result.dian_resources||[])}<div class="transfer-note">${follow.media_type==='movie'?'请选择资源后手动转存。':'影巢机器人发现更新后会发送资源链接，由你手动点击转存。'}</div>`;
         root.querySelectorAll('[data-follow-resource-provider]').forEach(tab=>tab.onclick=()=>{
           const provider=tab.dataset.followResourceProvider;
@@ -1076,7 +1053,41 @@
       } catch(error){toast(error.message,true);}
     }
     $('authForm').onsubmit=async event=>{event.preventDefault(); try { const path=needsSetup?'/api/bootstrap':'/api/login'; const body={username:$('username').value,password:$('password').value,display_name:$('displayName').value,tmdb_token:$('tmdbToken').value}; await api(path,{method:'POST',body:JSON.stringify(body)}); location.reload(); } catch(error){toast(error.message,true);} };
-    $('searchForm').onsubmit=async event=>{event.preventDefault(); const query=$('searchInput').value.trim(); if(!query)return; $('searchButton').disabled=true; $('searchButton').textContent='搜索中…'; try { const items=preview?demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase())):((await api(`/api/search?q=${encodeURIComponent(query)}`)).results); renderMovies(items.length?items:(preview?demoMovies:[]),`“${query}”的搜索结果`); switchView('discover'); if(!items.length){$('movieResults').className='empty';$('movieResults').textContent='没有找到匹配结果，换个片名试试。';} } catch(error){toast(error.message,true);} finally {$('searchButton').disabled=false;$('searchButton').textContent='搜索影片';} };
+    $('searchForm').onsubmit=async event=>{
+      event.preventDefault();
+      const query=$('searchInput').value.trim();
+      if(!query)return;
+      const sequence=++searchSequence;
+      if(searchController)searchController.abort();
+      searchController=new AbortController();
+      $('searchButton').textContent='搜索中…';
+      try {
+        const cacheKey=query.toLocaleLowerCase('zh-CN');
+        const cached=searchCache.get(cacheKey);
+        let items;
+        if(preview){
+          items=demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase()));
+        }else if(cached&&Date.now()-cached.savedAt<10*60*1000){
+          items=cached.items;
+        }else{
+          const result=await api(`/api/search?q=${encodeURIComponent(query)}`,{signal:searchController.signal});
+          items=result.results||[];
+          searchCache.set(cacheKey,{items,savedAt:Date.now()});
+          if(searchCache.size>30)searchCache.delete(searchCache.keys().next().value);
+        }
+        if(sequence!==searchSequence)return;
+        renderMovies(items,`“${query}”的搜索结果`);
+        switchView('discover');
+        if(!items.length){
+          $('movieResults').className='empty';
+          $('movieResults').textContent='没有找到匹配结果，换个片名试试。';
+        }
+      } catch(error){
+        if(error.name!=='AbortError'&&sequence===searchSequence)toast(error.message,true);
+      } finally {
+        if(sequence===searchSequence)$('searchButton').textContent='搜索影片';
+      }
+    };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
     $('detailOverlay').onclick=event=>{if(event.target===$('detailOverlay'))closeDetails();};
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});

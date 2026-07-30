@@ -102,13 +102,13 @@ class MovieRequestTests(unittest.TestCase):
             def json(self):
                 return {"id": 101172, "name": "吞噬星空"}
 
-        with patch.object(app.requests, "get", return_value=FakeJsonResponse()):
+        with patch.object(app.TMDB_HTTP, "get", return_value=FakeJsonResponse()):
             expected = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
         with app.CACHE_LOCK:
             key = next(iter(app.TMDB_RESPONSE_CACHE))
             _, cached = app.TMDB_RESPONSE_CACHE[key]
             app.TMDB_RESPONSE_CACHE[key] = (0.0, cached)
-        with patch.object(app.requests, "get", side_effect=app.requests.Timeout):
+        with patch.object(app.TMDB_HTTP, "get", side_effect=app.requests.Timeout):
             actual = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
 
         self.assertEqual(actual, expected)
@@ -499,11 +499,32 @@ class MovieRequestTests(unittest.TestCase):
             def json(self):
                 return {"id": 157336, "title": "星际穿越"}
 
-        with patch.object(app.requests, "get", return_value=FakeResponse()) as get:
+        with patch.object(app.TMDB_HTTP, "get", return_value=FakeResponse()) as get:
             first = app.tmdb_get("/movie/157336", {"language": "zh-CN", "append_to_response": "credits"})
             second = app.tmdb_get("/movie/157336", {"language": "zh-CN", "append_to_response": "credits"})
         self.assertEqual(first, second)
         self.assertEqual(get.call_count, 1)
+
+    def test_tmdb_cache_survives_memory_cache_clear(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": 157336, "title": "星际穿越"}
+
+        with patch.object(app.TMDB_HTTP, "get", return_value=FakeResponse()):
+            expected = app.tmdb_get("/movie/157336", {"language": "zh-CN"})
+        with app.CACHE_LOCK:
+            app.TMDB_RESPONSE_CACHE.clear()
+        with patch.object(
+            app.TMDB_HTTP,
+            "get",
+            side_effect=AssertionError("persistent cache should avoid a request"),
+        ):
+            actual = app.tmdb_get("/movie/157336", {"language": "zh-CN"})
+
+        self.assertEqual(actual, expected)
 
     def test_tmdb_tv_status_is_normalized(self):
         ended = app.tmdb_media_item(
@@ -563,6 +584,10 @@ class MovieRequestTests(unittest.TestCase):
         emby.assert_called_once_with(prefer_cached=True)
         self.assertNotIn("series_status_label", result["results"][0])
         self.assertNotIn("series_status_label", result["results"][1])
+        self.assertEqual(
+            set(result["timing_ms"]),
+            {"tmdb", "emby", "database", "total"},
+        )
 
     def test_emby_fast_path_returns_stale_ids_and_refreshes_in_background(self):
         with app.db() as connection:
@@ -896,7 +921,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(resource["resource_id"], 22)
         self.assertEqual(resource["title"], "鬼谜东宫 S01 2160p")
         self.assertEqual(resource["res"], "4K")
-        self.assertEqual(resource["codec"], "HEVC")
+        self.assertEqual(resource["codec"], "H.265/HEVC")
         self.assertEqual(resource["audio"], "韩语 Atmos")
         self.assertEqual(resource["hdr"], "HDR10")
         self.assertEqual(resource["size_gb"], 32.0)
@@ -904,6 +929,25 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(resource["episode_label"], "全 8 集")
         self.assertEqual(resource["hot"], 88)
         self.assertTrue(resource["chn_sub"])
+        self.assertEqual(resource["size_label"], "32 GB")
+        self.assertEqual(resource["subtitle_label"], "中文字幕")
+        self.assertEqual(resource["field_sources"]["codec"], "api")
+
+    def test_dian_unknown_fields_are_labeled_without_false_guessing(self):
+        resource = app.canonical_resource(
+            app.normalize_dian_resource(
+                {
+                    "id": 11,
+                    "share_kind": "115",
+                    "title": "未标注版本",
+                }
+            ),
+            "dian",
+        )
+        self.assertEqual(resource["codec"], "编码未标明")
+        self.assertEqual(resource["subtitle_label"], "字幕未标明")
+        self.assertEqual(resource["size_label"], "容量未知")
+        self.assertEqual(resource["field_sources"]["codec"], "unknown")
 
     def test_dian_resources_only_keep_115_and_offline_links(self):
         response = {

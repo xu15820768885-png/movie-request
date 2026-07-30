@@ -21,6 +21,7 @@ import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
+from requests.adapters import HTTPAdapter
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
 from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
 
@@ -42,6 +43,11 @@ STATUS_NAMES = {
     "rejected": "暂时无法完成",
 }
 TMDB_IMAGE_SIZES = {"w342", "w500", "original"}
+TMDB_HTTP = requests.Session()
+TMDB_HTTP.mount(
+    "https://",
+    HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=0),
+)
 
 APP = FastAPI(title="映单", docs_url=None, redoc_url=None)
 TELEGRAM_OFFSET = 0
@@ -114,6 +120,14 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS tmdb_cache (
+                cache_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS tmdb_cache_expiry_idx
+                ON tmdb_cache(expires_at);
             CREATE TABLE IF NOT EXISTS movie_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id),
@@ -1132,6 +1146,11 @@ def parse_episode_spec(text: Any) -> dict[str, Any]:
     episodes: set[int] = set()
     complete_words = bool(re.search(r"(全集|合集|全\d+\s*集|完结)", value, re.I))
 
+    for match in re.finditer(r"全\s*(\d{1,4})\s*集", value, re.I):
+        total = int(match.group(1))
+        if 0 < total <= 10000:
+            episodes.update(range(1, total + 1))
+
     for match in re.finditer(
         r"(?i)\bS(\d{1,3})\s*E(\d{1,4})"
         r"(?:\s*[-–~至]\s*(?:S(\d{1,3})\s*)?E?(\d{1,4}))?",
@@ -1236,11 +1255,19 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
             return " · ".join(clean) or fallback
         return str(value or fallback)
 
+    def first_value(*keys: str) -> Any:
+        for source in (item, details):
+            for key in keys:
+                value = source.get(key)
+                if value is not None and str(value).strip():
+                    return value
+        return ""
+
     subtitle = " · ".join(
         value
         for value in (
-            joined(item.get("subtitle_language")),
-            joined(item.get("subtitle_type")),
+            joined(first_value("subtitle_language", "subtitle_lang")),
+            joined(first_value("subtitle_type", "subtitles", "subtitle")),
         )
         if value
     )
@@ -1320,13 +1347,24 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "provider": "hdhive",
         "slug": str(item.get("slug") or ""),
         "title": title,
-        "res": joined(item.get("video_resolution"), "规格待确认"),
-        "codec": "编码待解锁后确认",
-        "hdr": "",
-        "audio": "音轨待解锁后确认",
+        "res": joined(
+            first_value("video_resolution", "resolution", "quality"),
+            "规格待确认",
+        ),
+        "codec": joined(
+            first_value("video_codec", "codec", "video_encoding"),
+            "编码待解锁后确认",
+        ),
+        "hdr": joined(
+            first_value("dynamic_range", "hdr", "hdr_type"),
+        ),
+        "audio": joined(
+            first_value("audio_info", "audio_codec", "audio"),
+            "音轨待解锁后确认",
+        ),
         "chn_sub": "中" in subtitle or "简" in subtitle,
         "subtitle": subtitle or "字幕信息未知",
-        "size_gb": str(item.get("share_size") or "未知"),
+        "size_gb": str(first_value("share_size", "size", "file_size") or "未知"),
         "source": joined(item.get("source"), "影巢"),
         "files": episode["episode_label"] or "标题未标明具体集数",
         "episode_label": episode["episode_label"],
@@ -1365,7 +1403,10 @@ def hdhive_resource_is_supported(resource: dict[str, Any]) -> bool:
 def normalize_supported_hdhive_resources(
     items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    resources = [normalize_hdhive_resource(item) for item in items]
+    resources = [
+        canonical_resource(normalize_hdhive_resource(item), "hdhive")
+        for item in items
+    ]
     return [
         resource for resource in resources
         if hdhive_resource_is_supported(resource)
@@ -1396,6 +1437,142 @@ def resource_size_bytes(value: Any) -> int:
         "B": 1,
     }[unit]
     return int(number * factor)
+
+
+def resource_size_label(value: Any) -> str:
+    size_bytes = resource_size_bytes(value)
+    if size_bytes <= 0:
+        return "容量未知"
+    if size_bytes >= 1024**4:
+        amount = size_bytes / 1024**4
+        unit = "TB"
+    else:
+        amount = size_bytes / 1024**3
+        unit = "GB"
+    precision = 0 if amount >= 100 else 1 if amount >= 10 else 2
+    text = f"{amount:.{precision}f}".rstrip("0").rstrip(".")
+    return f"{text} {unit}"
+
+
+def title_media_value(title: str, field: str) -> str:
+    text = str(title or "")
+    upper = text.upper()
+    patterns: dict[str, list[tuple[str, str]]] = {
+        "res": [
+            (r"(?<!\d)(?:2160P|4K)(?!\d)", "4K"),
+            (r"(?<!\d)1080P(?!\d)", "1080P"),
+            (r"(?<!\d)720P(?!\d)", "720P"),
+        ],
+        "codec": [
+            (r"(?:H[.\s_-]?265|X265|HEVC)", "H.265/HEVC"),
+            (r"(?:H[.\s_-]?264|X264|AVC)", "H.264/AVC"),
+            (r"(?:^|[.\s_-])AV1(?:$|[.\s_-])", "AV1"),
+        ],
+        "hdr": [
+            (r"(?:DOLBY[.\s_-]*VISION|DOVI|(?:^|[.\s_-])DV(?:$|[.\s_-]))", "Dolby Vision"),
+            (r"HDR10\+", "HDR10+"),
+            (r"HDR10", "HDR10"),
+            (r"(?:^|[.\s_-])SDR(?:$|[.\s_-])", "SDR"),
+        ],
+        "audio": [
+            (r"(?:TRUEHD.*ATMOS|ATMOS.*TRUEHD)", "TrueHD Atmos"),
+            (r"(?:DTS[.\s_-]*HD|DTSHD)", "DTS-HD"),
+            (r"(?:^|[.\s_-])DTS(?:$|[.\s_-]|\d)", "DTS"),
+            (r"(?:E[.\s_-]*AC3|DDP)", "E-AC-3"),
+            (r"(?:^|[.\s_-])AC3(?:$|[.\s_-])", "AC-3"),
+            (r"(?:^|[.\s_-])AAC(?:$|[.\s_-]|\d)", "AAC"),
+        ],
+    }
+    for pattern, label in patterns.get(field, []):
+        if re.search(pattern, upper):
+            return label
+    return ""
+
+
+def canonical_resource(
+    resource: dict[str, Any],
+    provider: str,
+) -> dict[str, Any]:
+    item = dict(resource)
+    title = str(item.get("title") or "未命名资源").strip()
+    sources: dict[str, str] = {}
+
+    def canonical_field(key: str, unknown_markers: tuple[str, ...]) -> str:
+        current = str(item.get(key) or "").strip()
+        if current and not any(marker in current for marker in unknown_markers):
+            sources[key] = "api"
+            return title_media_value(current, key) or current
+        inferred = title_media_value(title, key)
+        if inferred:
+            sources[key] = "title"
+            return inferred
+        sources[key] = "unknown"
+        return {
+            "res": "规格未标明",
+            "codec": "编码未标明",
+            "hdr": "",
+            "audio": "音轨未标明",
+        }[key]
+
+    item["provider"] = provider
+    item["title"] = title
+    item["res"] = canonical_field("res", ("未知", "待确认"))
+    item["codec"] = canonical_field("codec", ("未知", "待解锁", "待确认"))
+    item["hdr"] = canonical_field("hdr", ("未知", "待确认"))
+    item["audio"] = canonical_field("audio", ("未知", "待解锁", "待确认"))
+
+    subtitle = str(item.get("subtitle") or "").strip()
+    title_has_chinese_subtitle = bool(
+        re.search(r"(中字|中文字幕|简中|繁中|CHS|CHT)", title, re.I)
+    )
+    has_chinese_subtitle = bool(item.get("chn_sub")) or title_has_chinese_subtitle
+    if has_chinese_subtitle:
+        subtitle_label = "中文字幕"
+        sources["subtitle"] = "api" if item.get("chn_sub") else "title"
+    elif subtitle and "未知" not in subtitle:
+        subtitle_label = subtitle
+        sources["subtitle"] = "api"
+    else:
+        subtitle_label = "字幕未标明"
+        sources["subtitle"] = "unknown"
+    item["chn_sub"] = has_chinese_subtitle
+    item["subtitle_label"] = subtitle_label
+
+    item["size_bytes"] = resource_size_bytes(item.get("size_gb"))
+    item["size_label"] = resource_size_label(item.get("size_gb"))
+    sources["size"] = "api" if item["size_bytes"] else "unknown"
+
+    provided_episode_label = str(item.get("episode_label") or "").strip()
+    parsed = parse_episode_spec(
+        " ".join(
+            str(value or "")
+            for value in (item.get("episode_label"), item.get("files"), title)
+        )
+    )
+    existing_numbers = [
+        int(number)
+        for number in item.get("episode_numbers") or []
+        if str(number).isdigit() and int(number) > 0
+    ]
+    if not existing_numbers and parsed["episode_numbers"]:
+        item["episode_numbers"] = parsed["episode_numbers"]
+        item["episode_start"] = parsed["episode_start"]
+        item["episode_end"] = parsed["episode_end"]
+        item["season_number"] = parsed["season_number"]
+        item["episode_label"] = provided_episode_label or parsed["episode_label"]
+        item["is_pack"] = parsed["is_pack"]
+        item["safe_single_episode"] = parsed["safe_single_episode"]
+        sources["episodes"] = "title"
+    else:
+        item["episode_numbers"] = existing_numbers
+        sources["episodes"] = "api" if existing_numbers else "unknown"
+    item["files"] = (
+        str(item.get("files") or "").strip()
+        or str(item.get("episode_label") or "").strip()
+        or "集数未标明"
+    )
+    item["field_sources"] = sources
+    return item
 
 
 def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -2091,7 +2268,10 @@ def dian_resource_is_supported(resource: dict[str, Any]) -> bool:
 def normalize_supported_dian_resources(
     items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    resources = [normalize_dian_resource(item) for item in items]
+    resources = [
+        canonical_resource(normalize_dian_resource(item), "dian")
+        for item in items
+    ]
     return [
         resource for resource in resources
         if dian_resource_is_supported(resource)
@@ -2383,8 +2563,30 @@ def tmdb_get(
         if cached and cached[0] > now:
             return cached[1]
         stale = cached[1] if cached else None
+    if cached is None:
+        with db() as connection:
+            disk_cache = connection.execute(
+                "SELECT payload_json, expires_at FROM tmdb_cache "
+                "WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        if disk_cache:
+            try:
+                disk_data = json.loads(disk_cache["payload_json"])
+            except (TypeError, ValueError):
+                disk_data = None
+            if isinstance(disk_data, dict):
+                stale = disk_data
+                remaining = float(disk_cache["expires_at"]) - time.time()
+                if remaining > 0:
+                    with CACHE_LOCK:
+                        TMDB_RESPONSE_CACHE[cache_key] = (
+                            time.monotonic() + remaining,
+                            disk_data,
+                        )
+                    return disk_data
     try:
-        response = requests.get(
+        response = TMDB_HTTP.get(
             f"https://api.themoviedb.org/3{path}",
             params=params,
             headers=headers,
@@ -2401,6 +2603,24 @@ def tmdb_get(
                 if len(TMDB_RESPONSE_CACHE) >= 512:
                     TMDB_RESPONSE_CACHE.pop(next(iter(TMDB_RESPONSE_CACHE)))
             TMDB_RESPONSE_CACHE[cache_key] = (now + cache_seconds, data)
+        timestamp = time.time()
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO tmdb_cache(cache_key, payload_json, expires_at, updated_at) "
+                "VALUES(?, ?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET "
+                "payload_json = excluded.payload_json, "
+                "expires_at = excluded.expires_at, updated_at = excluded.updated_at",
+                (
+                    cache_key,
+                    json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                    timestamp + cache_seconds,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM tmdb_cache WHERE updated_at < ?",
+                (timestamp - 7 * 86400,),
+            )
         return data
     except requests.RequestException as error:
         if stale is not None:
@@ -3448,19 +3668,24 @@ def logout(response: Response, movie_session: Optional[str] = Cookie(default=Non
 
 @APP.get("/api/search")
 def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    total_started = time.perf_counter()
     user = require_user(movie_session)
     query = q.strip()
     if len(query) < 1:
-        return {"results": []}
+        return {"results": [], "timing_ms": {"total": 0}}
+    tmdb_started = time.perf_counter()
     data = tmdb_get(
         "/search/multi",
         {"query": query, "language": "zh-CN", "include_adult": "false", "page": 1},
         timeout=(3, 6),
     )
+    tmdb_ms = round((time.perf_counter() - tmdb_started) * 1000)
     # Search must not wait for a full Emby library scan. The cached IDs are
     # enough to paint results immediately; an expired cache refreshes behind
     # the scenes.
+    emby_started = time.perf_counter()
     library_ids = emby_library_tmdb_ids(prefer_cached=True)
+    emby_ms = round((time.perf_counter() - emby_started) * 1000)
     source_items = [
         item for item in data.get("results", [])
         if item.get("media_type") in ("movie", "tv")
@@ -3469,6 +3694,7 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
     for item in source_items:
         media_type = item.get("media_type")
         results.append(tmdb_media_item(item, media_type, library_ids))
+    db_started = time.perf_counter()
     with db() as connection:
         followed_items = {
             (str(row[0] or "tv"), int(row[1]))
@@ -3494,7 +3720,15 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         item["has_manual_transfer"] = (
             int(item.get("tmdb_id") or 0) in transferred_items
         )
-    return {"results": results}
+    return {
+        "results": results,
+        "timing_ms": {
+            "tmdb": tmdb_ms,
+            "emby": emby_ms,
+            "database": round((time.perf_counter() - db_started) * 1000),
+            "total": round((time.perf_counter() - total_started) * 1000),
+        },
+    }
 
 
 @APP.get("/api/charts/{chart_name}")
@@ -5015,7 +5249,7 @@ def probe_tmdb() -> None:
         headers["Authorization"] = f"Bearer {credential}"
     else:
         params["api_key"] = credential
-    response = requests.get(
+    response = TMDB_HTTP.get(
         "https://api.themoviedb.org/3/configuration",
         params=params,
         headers=headers,

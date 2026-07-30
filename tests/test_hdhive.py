@@ -255,6 +255,36 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(resource["title"], "仙逆 S01E150-S01E151 4K WEB-DL")
         self.assertEqual(resource["episode_numbers"], [150, 151])
 
+    def test_hdhive_resource_uses_structured_fields_then_title_fallbacks(self):
+        resources = app.normalize_supported_hdhive_resources(
+            [
+                {
+                    "slug": "official-shape",
+                    "resource_title": (
+                        "S01E01-S01E04 4K WEB-DL HQ 60FPS DV DTS5.1 HiveWeb"
+                    ),
+                    "pan_type": "115",
+                    "share_size": "18.64G",
+                    "subtitle_language": "简中",
+                    "resource": {
+                        "video_codec": "HEVC",
+                    },
+                }
+            ]
+        )
+
+        resource = resources[0]
+        self.assertEqual(resource["episode_numbers"], [1, 2, 3, 4])
+        self.assertEqual(resource["episode_label"], "第1季 · 第1–4集")
+        self.assertEqual(resource["size_label"], "18.6 GB")
+        self.assertEqual(resource["res"], "4K")
+        self.assertEqual(resource["codec"], "H.265/HEVC")
+        self.assertEqual(resource["hdr"], "Dolby Vision")
+        self.assertEqual(resource["audio"], "DTS")
+        self.assertEqual(resource["subtitle_label"], "中文字幕")
+        self.assertEqual(resource["field_sources"]["codec"], "api")
+        self.assertEqual(resource["field_sources"]["hdr"], "title")
+
     def test_supported_hdhive_resources_only_keep_115_and_offline_links(self):
         resources = app.normalize_supported_hdhive_resources(
             [
