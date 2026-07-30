@@ -48,6 +48,22 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(single["episode_numbers"], [233])
         self.assertTrue(single["safe_single_episode"])
 
+        short_range = app.parse_episode_spec(
+            "S01E01-E04 4K WEB-DL HQ 60FPS DV DTS5.1 HiveWeb"
+        )
+        repeated_season_range = app.parse_episode_spec(
+            "S01E01-S01E04 4K DV DTS5.1 HiveWeb"
+        )
+        self.assertEqual(short_range["episode_numbers"], [1, 2, 3, 4])
+        self.assertEqual(
+            repeated_season_range["episode_numbers"],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(
+            repeated_season_range["episode_label"],
+            "第1季 · 第1–4集",
+        )
+
         pack = app.parse_episode_spec("吞噬星空 1-233不缺集 长期更新")
         self.assertEqual(pack["episode_start"], 1)
         self.assertEqual(pack["episode_end"], 233)

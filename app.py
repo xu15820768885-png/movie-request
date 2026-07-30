@@ -1133,14 +1133,21 @@ def parse_episode_spec(text: Any) -> dict[str, Any]:
     complete_words = bool(re.search(r"(全集|合集|全\d+\s*集|完结)", value, re.I))
 
     for match in re.finditer(
-        r"(?i)\bS(\d{1,3})\s*E(\d{1,4})(?:\s*[-–~至]\s*E?(\d{1,4}))?",
+        r"(?i)\bS(\d{1,3})\s*E(\d{1,4})"
+        r"(?:\s*[-–~至]\s*(?:S(\d{1,3})\s*)?E?(\d{1,4}))?",
         value,
     ):
-        seasons.add(int(match.group(1)))
+        start_season = int(match.group(1))
+        end_season = int(match.group(3) or start_season)
+        seasons.update((start_season, end_season))
         start = int(match.group(2))
-        end = int(match.group(3) or start)
-        if 0 < start <= end <= 10000:
+        end = int(match.group(4) or start)
+        if start_season == end_season and 0 < start <= end <= 10000:
             episodes.update(range(start, end + 1))
+        elif 0 < start <= 10000 and 0 < end <= 10000:
+            # A cross-season range cannot be expanded without knowing the
+            # episode count of each season, so retain only its explicit ends.
+            episodes.update((start, end))
 
     for match in re.finditer(
         r"(?i)\bE(\d{1,4})(?:\s*[-–~至]\s*E?(\d{1,4}))\b",
