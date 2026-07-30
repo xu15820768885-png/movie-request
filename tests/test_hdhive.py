@@ -483,6 +483,19 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             "title": "仙逆 长期更新",
             "media_url": "https://hdhive.com/tv/example",
         }
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+        app.record_transfer(
+            user_id=user_id,
+            source="dian",
+            resource_key="initial-resource",
+            tmdb_id=223911,
+            transfer_scope="manual",
+            status="success",
+            detail="已手动转存初始版本",
+        )
 
         def fake_bind(follow_id, slug, resource):
             self.assertEqual(slug, selected["slug"])
@@ -531,6 +544,30 @@ class HDHiveFollowRouteTests(unittest.TestCase):
 
         self.assertTrue(result["follow"]["hdhive_subscribed"])
         bind.assert_called_once()
+
+    def test_follow_requires_initial_transfer_when_not_in_emby(self):
+        detail = {
+            "id": 223911,
+            "name": "仙逆",
+            "first_air_date": "2023-09-25",
+        }
+        with patch.object(app, "tmdb_get", return_value=detail):
+            with patch.object(app, "emby_library_tmdb_ids", return_value=set()):
+                with self.assertRaises(app.HTTPException) as error:
+                    asyncio.run(
+                        app.create_follow(
+                            FakeRequest(
+                                {
+                                    "tmdb_id": 223911,
+                                    "media_type": "tv",
+                                    "slug": "resource-slug",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+        self.assertEqual(error.exception.status_code, 409)
+        self.assertIn("先手动转存初始版本", error.exception.detail)
 
     def test_admin_can_bind_native_subscription_to_follow(self):
         with app.db() as connection:

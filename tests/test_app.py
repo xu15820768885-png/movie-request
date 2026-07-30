@@ -57,6 +57,62 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(app.verify_password("hello123", encoded))
         self.assertFalse(app.verify_password("wrong123", encoded))
 
+    def test_tmdb_image_proxy_caches_image_on_nas(self):
+        class FakeImageResponse:
+            content = b"fake-jpeg"
+            headers = {"Content-Type": "image/jpeg"}
+
+            def raise_for_status(self):
+                return None
+
+        with patch.object(app.requests, "get", return_value=FakeImageResponse()) as get:
+            first = app.tmdb_image("w500", "poster.jpg", self.token)
+        with patch.object(
+            app.requests,
+            "get",
+            side_effect=AssertionError("cached image should not be fetched again"),
+        ):
+            second = app.tmdb_image("w500", "poster.jpg", self.token)
+
+        self.assertEqual(Path(first.path).read_bytes(), b"fake-jpeg")
+        self.assertEqual(first.path, second.path)
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(
+            app.tmdb_image_proxy_url("/poster.jpg"),
+            "/api/tmdb/image/w500/poster.jpg",
+        )
+
+    def test_integration_probe_returns_latency_without_failing_route(self):
+        with patch.object(app, "probe_tmdb"):
+            result = app.test_integration("tmdb", self.token)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["service"], "tmdb")
+        self.assertGreaterEqual(result["latency_ms"], 0)
+
+        with patch.object(app, "probe_tmdb", side_effect=app.requests.Timeout):
+            result = app.test_integration("tmdb", self.token)
+        self.assertFalse(result["ok"])
+        self.assertIn("代理", result["message"])
+
+    def test_tmdb_get_uses_stale_cache_when_external_api_fails(self):
+        class FakeJsonResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"id": 101172, "name": "吞噬星空"}
+
+        with patch.object(app.requests, "get", return_value=FakeJsonResponse()):
+            expected = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
+        with app.CACHE_LOCK:
+            key = next(iter(app.TMDB_RESPONSE_CACHE))
+            _, cached = app.TMDB_RESPONSE_CACHE[key]
+            app.TMDB_RESPONSE_CACHE[key] = (0.0, cached)
+        with patch.object(app.requests, "get", side_effect=app.requests.Timeout):
+            actual = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
+
+        self.assertEqual(actual, expected)
+
     def test_movie_watch_rejects_iso_and_bdmv_but_keeps_remux(self):
         self.assertFalse(
             app.hdhive_movie_resource_is_playable(
@@ -489,8 +545,9 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(canceled["series_status_label"], "已取消")
 
     def test_search_does_not_wait_for_each_tv_detail(self):
-        def fake_tmdb(path, _params):
+        def fake_tmdb(path, _params, timeout=15):
             if path == "/search/multi":
+                self.assertEqual(timeout, (3, 6))
                 return {
                     "results": [
                         {"id": 10, "media_type": "tv", "name": "完结剧"},

@@ -41,6 +41,7 @@ STATUS_NAMES = {
     "available": "已入库",
     "rejected": "暂时无法完成",
 }
+TMDB_IMAGE_SIZES = {"w342", "w500", "original"}
 
 APP = FastAPI(title="映单", docs_url=None, redoc_url=None)
 TELEGRAM_OFFSET = 0
@@ -72,6 +73,14 @@ P115_APPS = {
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def tmdb_image_proxy_url(path: Any, size: str = "w500") -> str:
+    clean_path = str(path or "").strip().lstrip("/")
+    if not clean_path:
+        return ""
+    clean_size = size if size in TMDB_IMAGE_SIZES else "w500"
+    return f"/api/tmdb/image/{clean_size}/{quote(clean_path, safe='._-')}"
 
 
 def db() -> sqlite3.Connection:
@@ -929,6 +938,20 @@ def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> b
                 "WHERE source = ? AND resource_key = ? AND transfer_scope = ? "
                 "AND status = 'success' LIMIT 1",
                 (source, resource_key, transfer_scope),
+            ).fetchone()
+        )
+
+
+def has_manual_transfer(tmdb_id: int) -> bool:
+    if tmdb_id <= 0:
+        return False
+    with db() as connection:
+        return bool(
+            connection.execute(
+                "SELECT 1 FROM resource_transfer_log "
+                "WHERE tmdb_id = ? AND transfer_scope = 'manual' "
+                "AND status = 'success' LIMIT 1",
+                (tmdb_id,),
             ).fetchone()
         )
 
@@ -2098,11 +2121,7 @@ def require_admin(movie_session: Optional[str]) -> dict[str, Any]:
 
 def serialize_request(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
-    item["poster_url"] = (
-        f"https://image.tmdb.org/t/p/w500{item['poster_path']}"
-        if item.get("poster_path")
-        else ""
-    )
+    item["poster_url"] = tmdb_image_proxy_url(item.get("poster_path"))
     item["status_name"] = STATUS_NAMES.get(item["status"], item["status"])
     return item
 
@@ -2328,7 +2347,11 @@ def sync_emby_requests(force: bool = False) -> int:
         return cursor.rowcount
 
 
-def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+def tmdb_get(
+    path: str,
+    params: dict[str, Any],
+    timeout: Any = 15,
+) -> dict[str, Any]:
     with db() as connection:
         credential = setting(connection, "tmdb_token")
     if not credential:
@@ -2352,12 +2375,13 @@ def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
         cached = TMDB_RESPONSE_CACHE.get(cache_key)
         if cached and cached[0] > now:
             return cached[1]
+        stale = cached[1] if cached else None
     try:
         response = requests.get(
             f"https://api.themoviedb.org/3{path}",
             params=params,
             headers=headers,
-            timeout=15,
+            timeout=timeout,
         )
         response.raise_for_status()
         data = response.json()
@@ -2372,6 +2396,8 @@ def tmdb_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
             TMDB_RESPONSE_CACHE[cache_key] = (now + cache_seconds, data)
         return data
     except requests.RequestException as error:
+        if stale is not None:
+            return stale
         code = getattr(error.response, "status_code", "")
         if code in (401, 403):
             raise HTTPException(502, "TMDB 凭证无效，请管理员检查设置") from error
@@ -2394,7 +2420,7 @@ def tmdb_media_item(
         "year": str(date)[:4],
         "overview": item.get("overview") or "暂无简介",
         "poster_path": poster_path,
-        "poster_url": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else "",
+        "poster_url": tmdb_image_proxy_url(poster_path),
         "rating": round(float(item.get("vote_average") or 0), 1),
         "vote_count": int(item.get("vote_count") or 0),
         "in_library": tmdb_id in library_ids,
@@ -3283,6 +3309,51 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@APP.get("/api/tmdb/image/{size}/{image_path:path}")
+def tmdb_image(
+    size: str,
+    image_path: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> FileResponse:
+    require_user(movie_session)
+    clean_path = str(image_path or "").strip().lstrip("/")
+    if (
+        size not in TMDB_IMAGE_SIZES
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,180}", clean_path)
+        or not clean_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+    ):
+        raise HTTPException(400, "TMDB 图片地址无效")
+
+    image_url = f"https://image.tmdb.org/t/p/{size}/{clean_path}"
+    suffix = Path(clean_path).suffix.lower() or ".jpg"
+    cache_dir = DATA_DIR / "tmdb-images" / size
+    cache_path = cache_dir / (
+        hashlib.sha256(image_url.encode()).hexdigest() + suffix
+    )
+    headers = {"Cache-Control": "private, max-age=604800"}
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return FileResponse(cache_path, headers=headers)
+
+    try:
+        response = requests.get(image_url, timeout=15)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        raise HTTPException(502, "TMDB 图片暂时无法读取") from error
+    content_type = str(response.headers.get("Content-Type") or "")
+    if not content_type.startswith("image/") or not response.content:
+        raise HTTPException(502, "TMDB 图片返回了无效内容")
+    if len(response.content) > 20 * 1024 * 1024:
+        raise HTTPException(502, "TMDB 图片文件过大")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_name(
+        f"{cache_path.name}.{secrets.token_hex(6)}.tmp"
+    )
+    temporary.write_bytes(response.content)
+    os.replace(temporary, cache_path)
+    return FileResponse(cache_path, media_type=content_type, headers=headers)
+
+
 @APP.get("/api/bootstrap")
 def bootstrap(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     with db() as connection:
@@ -3377,6 +3448,7 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
     data = tmdb_get(
         "/search/multi",
         {"query": query, "language": "zh-CN", "include_adult": "false", "page": 1},
+        timeout=(3, 6),
     )
     # Search must not wait for a full Emby library scan. The cached IDs are
     # enough to paint results immediately; an expired cache refreshes behind
@@ -3399,10 +3471,21 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
                 (user["id"],),
             ).fetchall()
         }
+        transferred_items = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT tmdb_id FROM resource_transfer_log "
+                "WHERE transfer_scope = 'manual' "
+                "AND status = 'success' AND tmdb_id > 0",
+            ).fetchall()
+        }
     for item in results:
         item["is_following"] = (
             (str(item.get("media_type") or ""), int(item.get("tmdb_id") or 0))
             in followed_items
+        )
+        item["has_manual_transfer"] = (
+            int(item.get("tmdb_id") or 0) in transferred_items
         )
     return {"results": results}
 
@@ -3577,7 +3660,7 @@ def media_details(
     basic.update(
         {
             "backdrop_url": (
-                f"https://image.tmdb.org/t/p/original{data.get('backdrop_path')}"
+                tmdb_image_proxy_url(data.get("backdrop_path"), "original")
                 if data.get("backdrop_path")
                 else ""
             ),
@@ -3599,10 +3682,17 @@ def media_details(
             "WHERE user_id = ? AND tmdb_id = ? AND active = 1",
             (user["id"], tmdb_id),
         ).fetchone()
+        manual_transfer = connection.execute(
+            "SELECT 1 FROM resource_transfer_log "
+            "WHERE tmdb_id = ? AND transfer_scope = 'manual' "
+            "AND status = 'success' LIMIT 1",
+            (tmdb_id,),
+        ).fetchone()
     basic["is_following"] = follow is not None
     basic["hdhive_subscribed"] = bool(
         follow and follow["hdhive_subscription_id"]
     )
+    basic["has_manual_transfer"] = bool(manual_transfer)
     return basic
 
 
@@ -3928,11 +4018,7 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["active"] = bool(item["active"])
     item["hdhive_subscribed"] = bool(item.get("hdhive_subscription_id"))
-    item["poster_url"] = (
-        f"https://image.tmdb.org/t/p/w342{item['poster_path']}"
-        if item["poster_path"]
-        else ""
-    )
+    item["poster_url"] = tmdb_image_proxy_url(item["poster_path"], "w342")
     item["baseline_label"] = episode_progress_label(
         int(item["baseline_season"]),
         int(item["baseline_episode"]),
@@ -4024,10 +4110,21 @@ async def create_follow(
     )
     if int(detail.get("id") or 0) != tmdb_id:
         raise HTTPException(400, "TMDB 没有返回对应影片")
+    known_in_library = (
+        tmdb_id in emby_library_tmdb_ids(prefer_cached=True)
+        if media_type == "tv"
+        else False
+    )
+    if (
+        media_type == "tv"
+        and not known_in_library
+        and not has_manual_transfer(tmdb_id)
+    ):
+        raise HTTPException(409, "请先手动转存初始版本，再开启影巢追更")
     progress = (
         emby_series_episode_progress(
             tmdb_id,
-            known_in_library=tmdb_id in emby_library_tmdb_ids(prefer_cached=True),
+            known_in_library=known_in_library,
         )
         if media_type == "tv"
         else {}
@@ -4898,6 +4995,88 @@ async def dian_signin(
     result = perform_dian_signin(mode, source="manual")
     message = signin_result_message(result, "癫影签到成功")
     return {"ok": True, "message": message, "result": result}
+
+
+def probe_tmdb() -> None:
+    with db() as connection:
+        credential = setting(connection, "tmdb_token")
+    if not credential:
+        raise HTTPException(503, "尚未配置 TMDB 凭证")
+    params: dict[str, Any] = {}
+    headers = {"Accept": "application/json"}
+    if credential.startswith("eyJ") or len(credential) > 80:
+        headers["Authorization"] = f"Bearer {credential}"
+    else:
+        params["api_key"] = credential
+    response = requests.get(
+        "https://api.themoviedb.org/3/configuration",
+        params=params,
+        headers=headers,
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+def probe_hdhive() -> None:
+    hdhive_call("ping")
+
+
+def probe_dian() -> None:
+    dian_call(
+        "list_shares",
+        {
+            "tmdb_id": 1,
+            "media_type": "movie",
+            "page": 1,
+            "size": 1,
+            "sort": "hot",
+        },
+    )
+
+
+def integration_probe(service: str) -> dict[str, Any]:
+    probes = {
+        "tmdb": ("TMDB", probe_tmdb),
+        "hdhive": ("影巢", probe_hdhive),
+        "dian": ("癫影", probe_dian),
+    }
+    if service not in probes:
+        raise HTTPException(404, "不支持这个接口测速")
+    label, callback = probes[service]
+    started = time.perf_counter()
+    try:
+        callback()
+        return {
+            "service": service,
+            "label": label,
+            "ok": True,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+            "message": "连接正常",
+        }
+    except HTTPException as error:
+        message = str(error.detail)
+    except requests.Timeout:
+        message = "连接超时，请检查代理线路"
+    except requests.RequestException as error:
+        message = f"连接失败：{error.__class__.__name__}"
+    except Exception as error:
+        message = f"检测失败：{error}"
+    return {
+        "service": service,
+        "label": label,
+        "ok": False,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "message": message,
+    }
+
+
+@APP.post("/api/admin/integrations/test/{service}")
+def test_integration(
+    service: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    return integration_probe(service)
 
 
 @APP.get("/api/admin/integrations")
