@@ -52,7 +52,11 @@ TMDB_HTTP.mount(
 APP = FastAPI(title="映单", docs_url=None, redoc_url=None)
 TELEGRAM_OFFSET = 0
 CACHE_LOCK = Lock()
-TMDB_RESPONSE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+TMDB_RESPONSE_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}
+TMDB_REFRESHING: set[str] = set()
+SETTINGS_CACHE: dict[tuple[str, str], str] = {}
+TMDB_SEARCH_FRESH_SECONDS = 3600
+TMDB_STALE_SECONDS = 7 * 86400
 EMBY_LIBRARY_CACHE: dict[str, Any] = {
     "key": "",
     "expires": 0.0,
@@ -94,12 +98,14 @@ def db() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
     return connection
 
 
 def init_db() -> None:
     with db() as connection:
+        # WAL is persistent database state. Setting it once during startup
+        # avoids an extra PRAGMA and possible lock on every short-lived read.
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -128,6 +134,17 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS tmdb_cache_expiry_idx
                 ON tmdb_cache(expires_at);
+            CREATE TABLE IF NOT EXISTS tmdb_search_catalog (
+                media_type TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL,
+                search_text TEXT NOT NULL,
+                popularity REAL NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(media_type, tmdb_id)
+            );
+            CREATE INDEX IF NOT EXISTS tmdb_search_catalog_updated_idx
+                ON tmdb_search_catalog(updated_at DESC);
             CREATE TABLE IF NOT EXISTS movie_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id),
@@ -190,6 +207,8 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS tv_follow_active_idx
                 ON tv_follows(active, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS tv_follow_user_search_idx
+                ON tv_follows(user_id, active, media_type, tmdb_id);
             CREATE TABLE IF NOT EXISTS resource_transfer_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -212,6 +231,10 @@ def init_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS resource_episode_success_idx
                 ON resource_transfer_log(tmdb_id, season_number, episode_number)
                 WHERE status = 'success' AND episode_number > 0;
+            CREATE INDEX IF NOT EXISTS resource_manual_success_tmdb_idx
+                ON resource_transfer_log(tmdb_id)
+                WHERE transfer_scope = 'manual'
+                  AND status = 'success' AND tmdb_id > 0;
             CREATE TABLE IF NOT EXISTS hdhive_message_log (
                 message_key TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL DEFAULT '',
@@ -249,6 +272,17 @@ def init_db() -> None:
                 "ALTER TABLE tv_follows "
                 "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'tv'"
             )
+        hot_setting_keys = ("tmdb_token", "emby_url", "emby_api_key")
+        hot_settings = {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute(
+                "SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+                hot_setting_keys,
+            ).fetchall()
+        }
+        with CACHE_LOCK:
+            for key in hot_setting_keys:
+                SETTINGS_CACHE[(str(DB_PATH), key)] = hot_settings.get(key, "")
 
 
 def hash_password(password: str, salt: Optional[bytes] = None) -> str:
@@ -288,12 +322,44 @@ def setting(connection: sqlite3.Connection, key: str) -> str:
     return str(row["value"]) if row else ""
 
 
+def cached_settings(*keys: str) -> dict[str, str]:
+    path = str(DB_PATH)
+    with CACHE_LOCK:
+        cached_values = {
+            key: SETTINGS_CACHE[(path, key)]
+            for key in keys
+            if (path, key) in SETTINGS_CACHE
+        }
+    missing = [key for key in keys if key not in cached_values]
+    if missing:
+        placeholders = ",".join("?" for _ in missing)
+        with db() as connection:
+            rows = connection.execute(
+                f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+                missing,
+            ).fetchall()
+        loaded = {str(row["key"]): str(row["value"]) for row in rows}
+        with CACHE_LOCK:
+            for key in missing:
+                value = loaded.get(key, "")
+                SETTINGS_CACHE[(path, key)] = value
+                cached_values[key] = value
+    return {key: cached_values.get(key, "") for key in keys}
+
+
+def cached_setting(key: str) -> str:
+    return cached_settings(key)[key]
+
+
 def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
+    clean_value = str(value or "").strip()
     connection.execute(
         "INSERT INTO settings(key, value) VALUES(?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (key, str(value or "").strip()),
+        (key, clean_value),
     )
+    with CACHE_LOCK:
+        SETTINGS_CACHE[(str(DB_PATH), key)] = clean_value
 
 
 HDHIVE_SCOPES = "meta query unlock write vip"
@@ -2450,9 +2516,9 @@ def emby_library_tmdb_ids(
     force: bool = False,
     prefer_cached: bool = False,
 ) -> set[int]:
-    with db() as connection:
-        base_url = setting(connection, "emby_url")
-        api_key = setting(connection, "emby_api_key")
+    emby_settings = cached_settings("emby_url", "emby_api_key")
+    base_url = emby_settings["emby_url"]
+    api_key = emby_settings["emby_api_key"]
     if not base_url or not api_key:
         return set()
     cache_key = hashlib.sha256(f"{base_url}|{api_key}".encode()).hexdigest()
@@ -2534,16 +2600,172 @@ def sync_emby_requests(force: bool = False) -> int:
         return cursor.rowcount
 
 
+def normalize_search_text(value: Any) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").casefold())
+
+
+def cache_tmdb_search_catalog(items: list[dict[str, Any]]) -> None:
+    rows = []
+    timestamp = time.time()
+    for item in items:
+        media_type = str(item.get("media_type") or "")
+        try:
+            tmdb_id = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            tmdb_id = 0
+        if media_type not in ("movie", "tv") or tmdb_id <= 0:
+            continue
+        titles = (
+            item.get("title"),
+            item.get("name"),
+            item.get("original_title"),
+            item.get("original_name"),
+        )
+        search_text = " ".join(
+            value for value in (normalize_search_text(title) for title in titles) if value
+        )
+        if not search_text:
+            continue
+        try:
+            popularity = float(item.get("popularity") or 0)
+        except (TypeError, ValueError):
+            popularity = 0
+        rows.append(
+            (
+                media_type,
+                tmdb_id,
+                search_text,
+                popularity,
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                timestamp,
+            )
+        )
+    if not rows:
+        return
+    with db() as connection:
+        connection.executemany(
+            "INSERT INTO tmdb_search_catalog("
+            "media_type, tmdb_id, search_text, popularity, payload_json, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(media_type, tmdb_id) DO UPDATE SET "
+            "search_text = excluded.search_text, popularity = excluded.popularity, "
+            "payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+            rows,
+        )
+        connection.execute(
+            "DELETE FROM tmdb_search_catalog WHERE updated_at < ?",
+            (timestamp - 365 * 86400,),
+        )
+
+
+def local_tmdb_search(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    normalized = normalize_search_text(query)
+    if not normalized:
+        return []
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT payload_json FROM tmdb_search_catalog "
+            "WHERE search_text LIKE ? "
+            "ORDER BY popularity DESC, updated_at DESC LIMIT ?",
+            (f"%{normalized}%", limit),
+        ).fetchall()
+    results = []
+    for row in rows:
+        try:
+            item = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict):
+            results.append(item)
+    return results
+
+
+def search_db_context(
+    user_id: int,
+    query: str,
+) -> tuple[list[dict[str, Any]], set[tuple[str, int]], set[int]]:
+    normalized = normalize_search_text(query)
+    with db() as connection:
+        catalog_rows = (
+            connection.execute(
+                "SELECT payload_json FROM tmdb_search_catalog "
+                "WHERE search_text LIKE ? "
+                "ORDER BY popularity DESC, updated_at DESC LIMIT 20",
+                (f"%{normalized}%",),
+            ).fetchall()
+            if normalized
+            else []
+        )
+        followed_items = {
+            (str(row[0] or "tv"), int(row[1]))
+            for row in connection.execute(
+                "SELECT media_type, tmdb_id FROM tv_follows "
+                "WHERE user_id = ? AND active = 1",
+                (user_id,),
+            ).fetchall()
+        }
+        transferred_items = {
+            int(row[0])
+            for row in connection.execute(
+                "SELECT DISTINCT tmdb_id FROM resource_transfer_log "
+                "WHERE transfer_scope = 'manual' "
+                "AND status = 'success' AND tmdb_id > 0",
+            ).fetchall()
+        }
+    catalog_items = []
+    for row in catalog_rows:
+        try:
+            item = json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict):
+            catalog_items.append(item)
+    return catalog_items, followed_items, transferred_items
+
+
+def schedule_tmdb_refresh(
+    path: str,
+    params: dict[str, Any],
+    timeout: Any,
+    cache_key: str,
+) -> None:
+    with CACHE_LOCK:
+        if cache_key in TMDB_REFRESHING:
+            return
+        TMDB_REFRESHING.add(cache_key)
+
+    def worker() -> None:
+        try:
+            data = tmdb_get(path, params, timeout=timeout, force_refresh=True)
+            if path == "/search/multi":
+                cache_tmdb_search_catalog(
+                    [
+                        item for item in data.get("results", [])
+                        if item.get("media_type") in ("movie", "tv")
+                    ]
+                )
+        finally:
+            with CACHE_LOCK:
+                TMDB_REFRESHING.discard(cache_key)
+
+    Thread(
+        target=worker,
+        name="tmdb-cache-refresh",
+        daemon=True,
+    ).start()
+
+
 def tmdb_get(
     path: str,
     params: dict[str, Any],
     timeout: Any = 15,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
-    with db() as connection:
-        credential = setting(connection, "tmdb_token")
+    credential = cached_setting("tmdb_token")
     if not credential:
         raise HTTPException(503, "管理员还没有配置 TMDB 凭证")
-    params = dict(params)
+    original_params = dict(params)
+    params = dict(original_params)
     headers = {"Accept": "application/json"}
     if credential.startswith("eyJ") or len(credential) > 80:
         headers["Authorization"] = f"Bearer {credential}"
@@ -2558,15 +2780,21 @@ def tmdb_get(
         ).encode()
     ).hexdigest()
     now = time.monotonic()
+    stale = None
     with CACHE_LOCK:
         cached = TMDB_RESPONSE_CACHE.get(cache_key)
-        if cached and cached[0] > now:
-            return cached[1]
-        stale = cached[1] if cached else None
+        if cached and cached[1] <= now:
+            TMDB_RESPONSE_CACHE.pop(cache_key, None)
+            cached = None
+        if cached:
+            fresh_until, _, cached_data = cached
+            stale = cached_data
+            if not force_refresh and fresh_until > now:
+                return cached_data
     if cached is None:
         with db() as connection:
             disk_cache = connection.execute(
-                "SELECT payload_json, expires_at FROM tmdb_cache "
+                "SELECT payload_json, expires_at, updated_at FROM tmdb_cache "
                 "WHERE cache_key = ?",
                 (cache_key,),
             ).fetchone()
@@ -2576,15 +2804,23 @@ def tmdb_get(
             except (TypeError, ValueError):
                 disk_data = None
             if isinstance(disk_data, dict):
-                stale = disk_data
                 remaining = float(disk_cache["expires_at"]) - time.time()
-                if remaining > 0:
+                stale_remaining = (
+                    float(disk_cache["updated_at"]) + TMDB_STALE_SECONDS - time.time()
+                )
+                if stale_remaining > 0:
+                    stale = disk_data
                     with CACHE_LOCK:
                         TMDB_RESPONSE_CACHE[cache_key] = (
-                            time.monotonic() + remaining,
+                            time.monotonic() + max(0, remaining),
+                            time.monotonic() + stale_remaining,
                             disk_data,
                         )
-                    return disk_data
+                    if not force_refresh and remaining > 0:
+                        return disk_data
+    if stale is not None and not force_refresh:
+        schedule_tmdb_refresh(path, original_params, timeout, cache_key)
+        return stale
     try:
         response = TMDB_HTTP.get(
             f"https://api.themoviedb.org/3{path}",
@@ -2594,15 +2830,29 @@ def tmdb_get(
         )
         response.raise_for_status()
         data = response.json()
-        cache_seconds = 3600 if "append_to_response" in cache_params else 300
+        cache_seconds = (
+            TMDB_SEARCH_FRESH_SECONDS
+            if path == "/search/multi"
+            else 3600
+            if "append_to_response" in cache_params
+            else 300
+        )
         with CACHE_LOCK:
             if len(TMDB_RESPONSE_CACHE) >= 512:
-                expired = [key for key, value in TMDB_RESPONSE_CACHE.items() if value[0] <= now]
+                expired = [
+                    key
+                    for key, value in TMDB_RESPONSE_CACHE.items()
+                    if value[1] <= now
+                ]
                 for key in expired:
                     TMDB_RESPONSE_CACHE.pop(key, None)
                 if len(TMDB_RESPONSE_CACHE) >= 512:
                     TMDB_RESPONSE_CACHE.pop(next(iter(TMDB_RESPONSE_CACHE)))
-            TMDB_RESPONSE_CACHE[cache_key] = (now + cache_seconds, data)
+            TMDB_RESPONSE_CACHE[cache_key] = (
+                now + cache_seconds,
+                now + TMDB_STALE_SECONDS,
+                data,
+            )
         timestamp = time.time()
         with db() as connection:
             connection.execute(
@@ -3667,18 +3917,44 @@ def logout(response: Response, movie_session: Optional[str] = Cookie(default=Non
 
 
 @APP.get("/api/search")
-def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+def search(
+    q: str,
+    movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
+) -> dict[str, Any]:
     total_started = time.perf_counter()
     user = require_user(movie_session)
     query = q.strip()
     if len(query) < 1:
         return {"results": [], "timing_ms": {"total": 0}}
-    tmdb_started = time.perf_counter()
-    data = tmdb_get(
-        "/search/multi",
-        {"query": query, "language": "zh-CN", "include_adult": "false", "page": 1},
-        timeout=(3, 6),
+    database_started = time.perf_counter()
+    local_items, followed_items, transferred_items = search_db_context(
+        int(user["id"]),
+        query,
     )
+    database_ms = round((time.perf_counter() - database_started) * 1000)
+    tmdb_started = time.perf_counter()
+    if local_items and not refresh:
+        data = {"results": local_items}
+        result_source = "local"
+    else:
+        data = tmdb_get(
+            "/search/multi",
+            {
+                "query": query,
+                "language": "zh-CN",
+                "include_adult": "false",
+                "page": 1,
+            },
+            timeout=(3, 6),
+            force_refresh=refresh,
+        )
+        source_items = [
+            item for item in data.get("results", [])
+            if item.get("media_type") in ("movie", "tv")
+        ]
+        cache_tmdb_search_catalog(source_items)
+        result_source = "tmdb"
     tmdb_ms = round((time.perf_counter() - tmdb_started) * 1000)
     # Search must not wait for a full Emby library scan. The cached IDs are
     # enough to paint results immediately; an expired cache refreshes behind
@@ -3694,24 +3970,6 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
     for item in source_items:
         media_type = item.get("media_type")
         results.append(tmdb_media_item(item, media_type, library_ids))
-    db_started = time.perf_counter()
-    with db() as connection:
-        followed_items = {
-            (str(row[0] or "tv"), int(row[1]))
-            for row in connection.execute(
-                "SELECT media_type, tmdb_id FROM tv_follows "
-                "WHERE user_id = ? AND active = 1",
-                (user["id"],),
-            ).fetchall()
-        }
-        transferred_items = {
-            int(row[0])
-            for row in connection.execute(
-                "SELECT DISTINCT tmdb_id FROM resource_transfer_log "
-                "WHERE transfer_scope = 'manual' "
-                "AND status = 'success' AND tmdb_id > 0",
-            ).fetchall()
-        }
     for item in results:
         item["is_following"] = (
             (str(item.get("media_type") or ""), int(item.get("tmdb_id") or 0))
@@ -3722,10 +3980,12 @@ def search(q: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[
         )
     return {
         "results": results,
+        "source": result_source,
+        "refresh_recommended": result_source == "local",
         "timing_ms": {
             "tmdb": tmdb_ms,
             "emby": emby_ms,
-            "database": round((time.perf_counter() - db_started) * 1000),
+            "database": database_ms,
             "total": round((time.perf_counter() - total_started) * 1000),
         },
     }

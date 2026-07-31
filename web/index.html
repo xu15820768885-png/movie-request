@@ -1065,6 +1065,7 @@
         const cacheKey=query.toLocaleLowerCase('zh-CN');
         const cached=searchCache.get(cacheKey);
         let items;
+        let refreshRecommended=false;
         if(preview){
           items=demoMovies.filter(x=>(x.title+x.original_title).toLowerCase().includes(query.toLowerCase()));
         }else if(cached&&Date.now()-cached.savedAt<10*60*1000){
@@ -1072,6 +1073,7 @@
         }else{
           const result=await api(`/api/search?q=${encodeURIComponent(query)}`,{signal:searchController.signal});
           items=result.results||[];
+          refreshRecommended=Boolean(result.refresh_recommended);
           searchCache.set(cacheKey,{items,savedAt:Date.now()});
           if(searchCache.size>30)searchCache.delete(searchCache.keys().next().value);
         }
@@ -1081,6 +1083,24 @@
         if(!items.length){
           $('movieResults').className='empty';
           $('movieResults').textContent='没有找到匹配结果，换个片名试试。';
+        }
+        if(refreshRecommended){
+          api(`/api/search?q=${encodeURIComponent(query)}&refresh=true`)
+            .then(result=>{
+              if(sequence!==searchSequence)return;
+              const fresh=result.results||[];
+              const seen=new Set();
+              const merged=[...fresh,...items].filter(item=>{
+                const key=`${item.media_type}:${item.tmdb_id}`;
+                if(seen.has(key))return false;
+                seen.add(key);
+                return true;
+              });
+              items=merged;
+              searchCache.set(cacheKey,{items:merged,savedAt:Date.now()});
+              renderMovies(merged,`“${query}”的搜索结果`);
+            })
+            .catch(()=>{});
         }
       } catch(error){
         if(error.name!=='AbortError'&&sequence===searchSequence)toast(error.message,true);

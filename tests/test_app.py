@@ -22,6 +22,8 @@ class MovieRequestTests(unittest.TestCase):
     def setUp(self):
         with app.CACHE_LOCK:
             app.TMDB_RESPONSE_CACHE.clear()
+            app.TMDB_REFRESHING.clear()
+            app.SETTINGS_CACHE.clear()
             app.EMBY_LIBRARY_CACHE.update(
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
@@ -106,12 +108,14 @@ class MovieRequestTests(unittest.TestCase):
             expected = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
         with app.CACHE_LOCK:
             key = next(iter(app.TMDB_RESPONSE_CACHE))
-            _, cached = app.TMDB_RESPONSE_CACHE[key]
-            app.TMDB_RESPONSE_CACHE[key] = (0.0, cached)
-        with patch.object(app.TMDB_HTTP, "get", side_effect=app.requests.Timeout):
+            _, stale_until, cached = app.TMDB_RESPONSE_CACHE[key]
+            app.TMDB_RESPONSE_CACHE[key] = (0.0, stale_until, cached)
+        with patch.object(app, "Thread") as thread:
             actual = app.tmdb_get("/tv/101172", {"language": "zh-CN"})
 
         self.assertEqual(actual, expected)
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["name"], "tmdb-cache-refresh")
 
     def test_movie_watch_rejects_iso_and_bdmv_but_keeps_remux(self):
         self.assertFalse(
@@ -526,6 +530,181 @@ class MovieRequestTests(unittest.TestCase):
 
         self.assertEqual(actual, expected)
 
+    def test_tmdb_search_cache_is_fresh_for_one_hour(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"results": []}
+
+        started = app.time.monotonic()
+        with patch.object(app.TMDB_HTTP, "get", return_value=FakeResponse()):
+            app.tmdb_get(
+                "/search/multi",
+                {"query": "星际穿越", "language": "zh-CN"},
+            )
+        with app.CACHE_LOCK:
+            fresh_until, stale_until, _ = next(
+                iter(app.TMDB_RESPONSE_CACHE.values())
+            )
+        self.assertGreaterEqual(fresh_until - started, 3599)
+        self.assertGreaterEqual(stale_until - started, 7 * 86400 - 1)
+
+    def test_expired_disk_cache_returns_before_network_refresh(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"results": [{"id": 1, "media_type": "movie", "title": "缓存"}]}
+
+        with patch.object(app.TMDB_HTTP, "get", return_value=FakeResponse()):
+            expected = app.tmdb_get(
+                "/search/multi",
+                {"query": "缓存", "language": "zh-CN"},
+            )
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE tmdb_cache SET expires_at = ?",
+                (app.time.time() - 1,),
+            )
+        with app.CACHE_LOCK:
+            app.TMDB_RESPONSE_CACHE.clear()
+        with patch.object(app, "Thread") as thread:
+            with patch.object(
+                app.TMDB_HTTP,
+                "get",
+                side_effect=AssertionError("stale cache must return immediately"),
+            ):
+                actual = app.tmdb_get(
+                    "/search/multi",
+                    {"query": "缓存", "language": "zh-CN"},
+                )
+
+        self.assertEqual(actual, expected)
+        thread.assert_called_once()
+
+    def test_background_search_refresh_updates_local_catalog(self):
+        payload = {
+            "results": [
+                {
+                    "id": 157336,
+                    "media_type": "movie",
+                    "title": "星际穿越",
+                }
+            ]
+        }
+
+        class ImmediateThread:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch.object(app, "tmdb_get", return_value=payload):
+            with patch.object(app, "Thread", ImmediateThread):
+                app.schedule_tmdb_refresh(
+                    "/search/multi",
+                    {"query": "星际穿越"},
+                    (3, 6),
+                    "search-key",
+                )
+
+        self.assertEqual(app.local_tmdb_search("星际穿越")[0]["id"], 157336)
+        self.assertNotIn("search-key", app.TMDB_REFRESHING)
+
+    def test_tmdb_search_catalog_matches_chinese_and_original_title(self):
+        app.cache_tmdb_search_catalog(
+            [
+                {
+                    "id": 157336,
+                    "media_type": "movie",
+                    "title": "星际穿越",
+                    "original_title": "Interstellar",
+                    "popularity": 100,
+                }
+            ]
+        )
+
+        self.assertEqual(app.local_tmdb_search("星际 穿越")[0]["id"], 157336)
+        self.assertEqual(app.local_tmdb_search("interstellar")[0]["id"], 157336)
+
+    def test_search_returns_local_catalog_before_tmdb_refresh(self):
+        app.cache_tmdb_search_catalog(
+            [
+                {
+                    "id": 157336,
+                    "media_type": "movie",
+                    "title": "星际穿越",
+                    "original_title": "Interstellar",
+                    "release_date": "2014-11-07",
+                }
+            ]
+        )
+        with patch.object(
+            app,
+            "tmdb_get",
+            side_effect=AssertionError("local search should not wait for TMDB"),
+        ):
+            result = app.search("星际穿越", self.token)
+
+        self.assertEqual(result["source"], "local")
+        self.assertTrue(result["refresh_recommended"])
+        self.assertEqual(result["results"][0]["tmdb_id"], 157336)
+
+    def test_search_refresh_forces_tmdb_and_updates_catalog(self):
+        payload = {
+            "results": [
+                {
+                    "id": 157336,
+                    "media_type": "movie",
+                    "title": "星际穿越",
+                    "release_date": "2014-11-07",
+                }
+            ]
+        }
+        with patch.object(app, "tmdb_get", return_value=payload) as tmdb:
+            result = app.search("星际穿越", self.token, refresh=True)
+
+        self.assertEqual(result["source"], "tmdb")
+        self.assertFalse(result["refresh_recommended"])
+        self.assertTrue(tmdb.call_args.kwargs["force_refresh"])
+        self.assertEqual(app.local_tmdb_search("星际穿越")[0]["id"], 157336)
+
+    def test_cached_setting_avoids_reopening_database(self):
+        self.assertEqual(app.cached_setting("tmdb_token"), "test-token")
+        with patch.object(
+            app,
+            "db",
+            side_effect=AssertionError("cached setting should not open SQLite"),
+        ):
+            self.assertEqual(app.cached_setting("tmdb_token"), "test-token")
+
+    def test_multiple_cold_settings_share_one_database_read(self):
+        with app.CACHE_LOCK:
+            app.SETTINGS_CACHE.clear()
+        real_db = app.db
+        with patch.object(app, "db", side_effect=real_db) as database:
+            values = app.cached_settings("emby_url", "emby_api_key")
+            second = app.cached_settings("emby_url", "emby_api_key")
+
+        self.assertEqual(values, {"emby_url": "", "emby_api_key": ""})
+        self.assertEqual(second, values)
+        self.assertEqual(database.call_count, 1)
+
+    def test_search_database_indexes_exist(self):
+        with app.db() as connection:
+            indexes = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+        self.assertIn("tv_follow_user_search_idx", indexes)
+        self.assertIn("resource_manual_success_tmdb_idx", indexes)
+
     def test_tmdb_tv_status_is_normalized(self):
         ended = app.tmdb_media_item(
             {"id": 1, "name": "已播完", "status": "Ended"}, "tv", set()
@@ -566,9 +745,10 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(canceled["series_status_label"], "已取消")
 
     def test_search_does_not_wait_for_each_tv_detail(self):
-        def fake_tmdb(path, _params, timeout=15):
+        def fake_tmdb(path, _params, timeout=15, force_refresh=False):
             if path == "/search/multi":
                 self.assertEqual(timeout, (3, 6))
+                self.assertFalse(force_refresh)
                 return {
                     "results": [
                         {"id": 10, "media_type": "tv", "name": "完结剧"},
