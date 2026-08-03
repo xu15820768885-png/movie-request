@@ -1110,7 +1110,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(resource["hot"], 88)
         self.assertTrue(resource["chn_sub"])
         self.assertEqual(resource["size_label"], "32 GB")
-        self.assertEqual(resource["subtitle_label"], "中文字幕")
+        self.assertEqual(resource["subtitle_label"], "简中")
         self.assertEqual(resource["field_sources"]["codec"], "api")
 
     def test_dian_unknown_fields_are_labeled_without_false_guessing(self):

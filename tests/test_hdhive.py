@@ -281,9 +281,41 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(resource["codec"], "H.265/HEVC")
         self.assertEqual(resource["hdr"], "Dolby Vision")
         self.assertEqual(resource["audio"], "DTS")
-        self.assertEqual(resource["subtitle_label"], "中文字幕")
+        self.assertEqual(resource["subtitle_label"], "简中")
         self.assertEqual(resource["field_sources"]["codec"], "api")
         self.assertEqual(resource["field_sources"]["hdr"], "title")
+
+    def test_hdhive_resource_keeps_detailed_subtitle_language_and_type(self):
+        resource = app.canonical_resource(
+            app.normalize_hdhive_resource(
+                {
+                    "title": "S01 4K WEB-DL",
+                    "subtitle_language": ["简中", "繁中"],
+                    "subtitle_type": ["内封", "内嵌"],
+                    "pan_type": "115",
+                }
+            ),
+            "hdhive",
+        )
+
+        self.assertTrue(resource["chn_sub"])
+        self.assertEqual(resource["subtitle_label"], "简中 · 繁中 · 内封 · 内嵌")
+
+    def test_hdhive_resource_expands_subtitle_details_from_title(self):
+        resource = app.canonical_resource(
+            app.normalize_hdhive_resource(
+                {
+                    "title": "S01 4K WEB-DL DV DDP5.1 内封简繁+简/繁韩双语字幕",
+                    "pan_type": "115",
+                }
+            ),
+            "hdhive",
+        )
+
+        self.assertEqual(
+            resource["subtitle_label"],
+            "简中 · 繁中 · 简韩 · 繁韩 · 内封",
+        )
 
     def test_supported_hdhive_resources_only_keep_115_and_offline_links(self):
         resources = app.normalize_supported_hdhive_resources(

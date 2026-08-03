@@ -1588,15 +1588,47 @@ def canonical_resource(
     item["audio"] = canonical_field("audio", ("未知", "待解锁", "待确认"))
 
     subtitle = str(item.get("subtitle") or "").strip()
+    subtitle_api_text = "" if "未知" in subtitle else subtitle
+    subtitle_text = f"{subtitle_api_text} {title}".strip()
+    subtitle_patterns = (
+        ("简中", r"(?:简中|简体(?:中文)?|\bCHS\b)"),
+        ("繁中", r"(?:繁中|繁体(?:中文)?|\bCHT\b)"),
+        ("简韩", r"(?:简韩|简体韩文|简体中文[+／/]?韩文)"),
+        ("繁韩", r"(?:繁韩|繁体韩文|繁体中文[+／/]?韩文)"),
+        ("简英", r"(?:简英|简体英文|简体中文[+／/]?英文)"),
+        ("繁英", r"(?:繁英|繁体英文|繁体中文[+／/]?英文)"),
+        ("中英", r"(?:中英|中文[+／/]?英文)"),
+        ("内封", r"(?:内封|封装字幕|软字幕)"),
+        ("内嵌", r"(?:内嵌|硬字幕|硬字)"),
+        ("外挂", r"(?:外挂字幕|外挂中字)"),
+    )
+    subtitle_details = [
+        label
+        for label, pattern in subtitle_patterns
+        if re.search(pattern, subtitle_text, re.I)
+    ]
+    # HDHive titles commonly abbreviate two tracks as “简繁” or
+    # “简/繁韩”; expand those spellings to the same labels used on its site.
+    if re.search(r"简(?:体)?[+／/]?繁(?:体)?|简繁", subtitle_text):
+        subtitle_details = ["简中", "繁中", *subtitle_details]
+    if re.search(r"简[+／/]繁韩", subtitle_text):
+        subtitle_details.extend(("简韩", "繁韩"))
+    subtitle_detail_order = tuple(label for label, _pattern in subtitle_patterns)
+    subtitle_details = [
+        label for label in subtitle_detail_order if label in subtitle_details
+    ]
     title_has_chinese_subtitle = bool(
-        re.search(r"(中字|中文字幕|简中|繁中|CHS|CHT)", title, re.I)
+        re.search(r"(中字|中文字幕|简中|繁中|简繁|简韩|繁韩|简英|繁英|CHS|CHT)", title, re.I)
     )
     has_chinese_subtitle = bool(item.get("chn_sub")) or title_has_chinese_subtitle
-    if has_chinese_subtitle:
+    if subtitle_details:
+        subtitle_label = " · ".join(subtitle_details)
+        sources["subtitle"] = "api" if subtitle_api_text else "title"
+    elif has_chinese_subtitle:
         subtitle_label = "中文字幕"
         sources["subtitle"] = "api" if item.get("chn_sub") else "title"
-    elif subtitle and "未知" not in subtitle:
-        subtitle_label = subtitle
+    elif subtitle_api_text:
+        subtitle_label = subtitle_api_text
         sources["subtitle"] = "api"
     else:
         subtitle_label = "字幕未标明"
@@ -2208,6 +2240,10 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
         "chn_sub", "chinese_subtitle", "has_chinese_subtitle",
         "subtitle_chinese", "is_chinese_subtitle",
     )
+    subtitle_detail = pick(
+        "subtitle_info", "subtitle_language", "subtitle_lang",
+        "subtitle_type", "subtitles", "subtitle",
+    )
     if isinstance(subtitle_value, str):
         has_chinese_subtitle = subtitle_value.strip().lower() in {
             "1", "true", "yes", "y", "是", "有",
@@ -2219,6 +2255,11 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
             marker in tag_text.lower()
             for marker in ("中字", "中文字幕", "简中", "繁中", "chinese sub")
         )
+    if not subtitle_detail and any(
+        marker in tag_text
+        for marker in ("中字", "中文字幕", "简中", "繁中", "简韩", "繁韩", "内封", "内嵌")
+    ):
+        subtitle_detail = tag_text
 
     # Share IDs live on the outer wrapper while media details commonly live
     # inside ``resource``. Prefer the inner resource's descriptive title.
@@ -2307,6 +2348,7 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
                 "soundtrack",
             ),
             "chn_sub": has_chinese_subtitle,
+            "subtitle": subtitle_detail,
             "size_gb": raw_size,
             "source": pick("source", "source_tag", "origin", "channel"),
             "files": files,
