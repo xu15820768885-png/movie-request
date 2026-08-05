@@ -66,6 +66,9 @@ EMBY_LIBRARY_CACHE: dict[str, Any] = {
 EMBY_EPISODE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
+P123_API_LOCK = Lock()
+P123_WORKER_LOCK = Lock()
+P123_LAST_CALL_AT = 0.0
 P115_APPS = {
     "alipaymini": "115生活_支付宝小程序端",
     "wechatmini": "115生活_微信小程序端",
@@ -115,6 +118,9 @@ def init_db() -> None:
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'member',
                 active INTEGER NOT NULL DEFAULT 1,
+                storage_destination TEXT NOT NULL DEFAULT 'p115',
+                p123_target_id INTEGER NOT NULL DEFAULT 0,
+                p123_target_name TEXT NOT NULL DEFAULT '根目录',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -261,7 +267,55 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(media_type, tmdb_id)
             );
+            CREATE TABLE IF NOT EXISTS p123_transfer_jobs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                share_url TEXT NOT NULL,
+                source TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                season_number INTEGER NOT NULL DEFAULT 0,
+                episode_numbers_json TEXT NOT NULL DEFAULT '[]',
+                target_id INTEGER NOT NULL DEFAULT 0,
+                target_name TEXT NOT NULL DEFAULT '根目录',
+                status TEXT NOT NULL DEFAULT 'queued',
+                total_files INTEGER NOT NULL DEFAULT 0,
+                success_files INTEGER NOT NULL DEFAULT 0,
+                failed_files INTEGER NOT NULL DEFAULT 0,
+                skipped_files INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '任务已排队',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS p123_job_status_idx
+                ON p123_transfer_jobs(status, created_at);
             """
+        )
+        user_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "storage_destination" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN storage_destination "
+                "TEXT NOT NULL DEFAULT 'p115'"
+            )
+        if "p123_target_id" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN p123_target_id "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        if "p123_target_name" not in user_columns:
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN p123_target_name "
+                "TEXT NOT NULL DEFAULT '根目录'"
+            )
+        connection.execute(
+            "UPDATE p123_transfer_jobs SET status = 'queued', "
+            "message = '服务重启，任务已重新排队', updated_at = ? "
+            "WHERE status = 'running'",
+            (now_iso(),),
         )
         follow_columns = {
             str(row["name"])
@@ -885,6 +939,7 @@ def p115_share_tree(
     depth: int = 0,
     max_depth: int = 4,
     visited: Optional[set[str]] = None,
+    parent_path: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     visited = visited or set()
     result = p115_call(
@@ -902,6 +957,7 @@ def p115_share_tree(
         entry["_share_name"] = p115_share_item_name(item)
         entry["_share_depth"] = depth
         entry["_share_is_dir"] = p115_share_item_is_dir(item)
+        entry["_share_path"] = (*parent_path, entry["_share_name"])
         output.append(entry)
         folder_id = entry["_share_id"]
         if (
@@ -919,6 +975,7 @@ def p115_share_tree(
                     depth=depth + 1,
                     max_depth=max_depth,
                     visited=visited,
+                    parent_path=entry["_share_path"],
                 )
             )
     return output
@@ -960,6 +1017,350 @@ def p115_share_item_size(item: dict[str, Any]) -> int:
             if parsed > 0:
                 return parsed
     return 0
+
+
+def p115_share_item_sha1(item: dict[str, Any]) -> str:
+    for key in ("sha1", "sha", "file_sha1", "fileSha1", "sha1_value"):
+        value = str(item.get(key) or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+    return ""
+
+
+def p123_client():
+    try:
+        from p123client import P123OpenClient
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少 p123client") from error
+    with db() as connection:
+        client_id = setting(connection, "p123_client_id")
+        client_secret = setting(connection, "p123_client_secret")
+    if not client_id or not client_secret:
+        raise HTTPException(503, "123 开放平台尚未配置 Client ID 和 Client Secret")
+    try:
+        return P123OpenClient(client_id, client_secret)
+    except Exception as error:
+        raise HTTPException(502, f"123 开放平台登录失败：{error}") from error
+
+
+def p123_response_data(payload: dict[str, Any], label: str) -> dict[str, Any]:
+    code = payload.get("code", payload.get("Code", 0))
+    if code not in (0, "0", None):
+        message = (
+            payload.get("message")
+            or payload.get("msg")
+            or payload.get("Message")
+            or f"错误码 {code}"
+        )
+        raise HTTPException(502, f"{label}：{message}")
+    data = payload.get("data", payload.get("Data", {}))
+    return data if isinstance(data, dict) else {}
+
+
+def p123_call(label: str, method: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    global P123_LAST_CALL_AT
+    try:
+        with P123_API_LOCK:
+            delay = 1.05 - (time.monotonic() - P123_LAST_CALL_AT)
+            if delay > 0:
+                time.sleep(delay)
+            result = method(*args, **kwargs)
+            P123_LAST_CALL_AT = time.monotonic()
+        if not isinstance(result, dict):
+            raise RuntimeError("123返回了无效响应")
+        return result
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"{label}：{error}") from error
+
+
+def p123_file_id(data: dict[str, Any]) -> int:
+    for key in ("fileID", "fileId", "FileId", "dirID", "dirId"):
+        try:
+            value = int(data.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
+def p123_list_items(data: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("fileList", "FileList", "list", "items"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def p123_item_name(item: dict[str, Any]) -> str:
+    return str(item.get("filename") or item.get("fileName") or item.get("name") or "")
+
+
+def p123_item_id(item: dict[str, Any]) -> int:
+    return p123_file_id(item)
+
+
+def p123_safe_name(value: Any, fallback: str = "未命名") -> str:
+    name = re.sub(r'["\\/:*?|><]+', "_", str(value or "").strip())
+    return (name or fallback)[:240]
+
+
+def p123_ensure_folder(
+    client: Any,
+    parent_id: int,
+    name: str,
+) -> int:
+    safe_name = p123_safe_name(name, "文件夹")
+    listed = p123_call(
+        "读取123目录失败",
+        client.fs_list,
+        {
+            "parentFileId": parent_id,
+            "searchData": safe_name,
+            "searchMode": 1,
+            "limit": 100,
+        },
+    )
+    for item in p123_list_items(p123_response_data(listed, "读取123目录失败")):
+        if p123_item_name(item) == safe_name and p123_item_id(item):
+            return p123_item_id(item)
+    created = p123_call(
+        "创建123目录失败",
+        client.fs_mkdir,
+        {"name": safe_name, "parentID": parent_id},
+    )
+    folder_id = p123_file_id(p123_response_data(created, "创建123目录失败"))
+    if not folder_id:
+        raise HTTPException(502, "123创建目录后没有返回目录ID")
+    return folder_id
+
+
+def update_p123_job(job_id: str, **values: Any) -> None:
+    allowed = {
+        "status", "total_files", "success_files", "failed_files",
+        "skipped_files", "message",
+    }
+    fields = [key for key in values if key in allowed]
+    if not fields:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    params = [values[key] for key in fields]
+    params.extend((now_iso(), job_id))
+    with db() as connection:
+        connection.execute(
+            f"UPDATE p123_transfer_jobs SET {assignments}, updated_at = ? WHERE id = ?",
+            params,
+        )
+
+
+def p123_job_row(job_id: str) -> Optional[sqlite3.Row]:
+    with db() as connection:
+        return connection.execute(
+            "SELECT * FROM p123_transfer_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+
+
+def serialize_p123_job(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item.pop("share_url", None)
+    item["episode_numbers"] = json.loads(item.pop("episode_numbers_json") or "[]")
+    return item
+
+
+def run_p123_transfer_job(job_id: str) -> None:
+    row = p123_job_row(job_id)
+    if not row:
+        return
+    job = dict(row)
+    job["episode_numbers"] = json.loads(job.get("episode_numbers_json") or "[]")
+    update_p123_job(job_id, status="running", message="正在读取115分享目录")
+    succeeded = 0
+    failed = 0
+    skipped = 0
+    try:
+        source_client = p115_client()
+        items = p115_share_tree(
+            source_client,
+            job["share_url"],
+            max_depth=16,
+        )
+        files = [item for item in items if not item.get("_share_is_dir")]
+        if not files:
+            raise HTTPException(502, "115分享中没有找到文件")
+        if len(files) > 2000:
+            raise HTTPException(400, "单次最多处理2000个文件，请拆分分享后重试")
+        update_p123_job(
+            job_id,
+            total_files=len(files),
+            message=f"已读取 {len(files)} 个文件，开始向123请求秒传",
+        )
+        target_client = p123_client()
+        target_id = int(job.get("target_id") or 0)
+        folder_ids: dict[tuple[str, ...], int] = {(): target_id}
+        for index, item in enumerate(files, start=1):
+            path = tuple(
+                p123_safe_name(part, "文件夹")
+                for part in item.get("_share_path", ())
+                if str(part or "").strip()
+            )
+            parent_path = path[:-1]
+            current_path: tuple[str, ...] = ()
+            for part in parent_path:
+                next_path = (*current_path, part)
+                if next_path not in folder_ids:
+                    folder_ids[next_path] = p123_ensure_folder(
+                        target_client,
+                        folder_ids[current_path],
+                        part,
+                    )
+                current_path = next_path
+            sha1 = p115_share_item_sha1(item)
+            size = p115_share_item_size(item)
+            filename = p123_safe_name(path[-1] if path else item.get("_share_name"), "未命名文件")
+            if not sha1 or size <= 0:
+                skipped += 1
+            else:
+                try:
+                    result = p123_call(
+                        f"秒传 {filename} 失败",
+                        target_client.upload_sha1_reuse,
+                        {
+                            "sha1": sha1,
+                            "size": size,
+                            "filename": filename,
+                            "parentFileID": folder_ids.get(parent_path, target_id),
+                            "duplicate": 1,
+                        },
+                    )
+                    data = p123_response_data(result, f"秒传 {filename} 失败")
+                    if bool(data.get("reuse", data.get("Reuse", False))):
+                        succeeded += 1
+                    else:
+                        failed += 1
+                except HTTPException:
+                    failed += 1
+            update_p123_job(
+                job_id,
+                success_files=succeeded,
+                failed_files=failed,
+                skipped_files=skipped,
+                message=f"正在处理 {index}/{len(files)}",
+            )
+        status = "success" if succeeded and not failed and not skipped else "partial"
+        if not succeeded:
+            status = "failed"
+        message = (
+            f"123秒传完成：成功 {succeeded}，未命中 {failed}，缺少SHA1/大小 {skipped}"
+        )
+        update_p123_job(job_id, status=status, message=message)
+        if succeeded:
+            record_transfer(
+                user_id=int(job["user_id"]),
+                source=f"{job['source']}:p123",
+                resource_key=str(job["resource_key"]),
+                tmdb_id=int(job.get("tmdb_id") or 0),
+                transfer_scope="manual",
+                status="success",
+                detail=message,
+                season_number=int(job.get("season_number") or 0),
+                episode_numbers=list(job.get("episode_numbers") or []),
+            )
+            send_telegram(
+                f"⚡ 115 → 123 秒传完成\n\n{job.get('title') or '资源'}\n{message}"
+            )
+    except Exception as error:
+        message = str(error.detail) if isinstance(error, HTTPException) else str(error)
+        update_p123_job(job_id, status="failed", message=message or "123秒传失败")
+
+
+def process_p123_jobs_once() -> None:
+    if not P123_WORKER_LOCK.acquire(blocking=False):
+        return
+    try:
+        while True:
+            with db() as connection:
+                row = connection.execute(
+                    "SELECT id FROM p123_transfer_jobs "
+                    "WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if not row:
+                    return
+                connection.execute(
+                    "UPDATE p123_transfer_jobs SET status = 'running', "
+                    "message = '正在启动任务', updated_at = ? "
+                    "WHERE id = ? AND status = 'queued'",
+                    (now_iso(), row["id"]),
+                )
+            run_p123_transfer_job(str(row["id"]))
+    finally:
+        P123_WORKER_LOCK.release()
+
+
+def p123_worker_loop() -> None:
+    while True:
+        try:
+            process_p123_jobs_once()
+        except Exception:
+            pass
+        time.sleep(5)
+
+
+def queue_p123_transfer(
+    *,
+    user: sqlite3.Row,
+    share_url: str,
+    source: str,
+    resource_key: str,
+    title: str = "",
+    tmdb_id: int = 0,
+    season_number: int = 0,
+    episode_numbers: Optional[list[int]] = None,
+) -> dict[str, Any]:
+    if not is_115_share_url(share_url):
+        raise HTTPException(400, "123秒传仅支持115分享链接")
+    p115_client()
+    with db() as connection:
+        if not setting(connection, "p123_client_id") or not setting(connection, "p123_client_secret"):
+            raise HTTPException(503, "管理员尚未配置123开放平台")
+        target = connection.execute(
+            "SELECT storage_destination, p123_target_id, p123_target_name "
+            "FROM users WHERE id = ?",
+            (int(user["id"]),),
+        ).fetchone()
+        if not target or target["storage_destination"] != "p123":
+            raise HTTPException(403, "当前账号没有分配123转存目标")
+        target_id = int(target["p123_target_id"] or 0)
+        target_name = str(target["p123_target_name"] or "根目录")
+    job_id = secrets.token_urlsafe(18)
+    timestamp = now_iso()
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO p123_transfer_jobs("
+            "id, user_id, share_url, source, resource_key, title, tmdb_id, "
+            "season_number, episode_numbers_json, target_id, target_name, "
+            "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id, int(user["id"]), share_url, source, resource_key,
+                title, tmdb_id, season_number,
+                json.dumps(episode_numbers or [], ensure_ascii=False),
+                target_id, target_name, timestamp, timestamp,
+            ),
+        )
+    Thread(
+        target=process_p123_jobs_once,
+        name="p123-transfer-worker",
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "mode": "p123",
+        "job_id": job_id,
+        "status": "queued",
+        "message": "已提交115 → 123秒传任务",
+    }
 
 
 def select_largest_missing_episode_files(
@@ -2392,7 +2793,8 @@ def session_user(token: Optional[str]) -> Optional[dict[str, Any]]:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with db() as connection:
         row = connection.execute(
-            "SELECT u.id, u.username, u.display_name, u.role, u.active "
+            "SELECT u.id, u.username, u.display_name, u.role, u.active, "
+            "u.storage_destination, u.p123_target_id, u.p123_target_name "
             "FROM sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token_hash = ? AND s.expires_at > ?",
             (token_hash, now_iso()),
@@ -3816,6 +4218,7 @@ def startup() -> None:
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
+    Thread(target=p123_worker_loop, name="p123-transfer-scheduler", daemon=True).start()
 
 
 @APP.get("/")
@@ -5033,13 +5436,25 @@ async def hdhive_transfer(
     share_url = str(data.get("full_url") or data.get("url") or "").strip()
     if not share_url:
         raise HTTPException(502, "影巢解锁后没有返回资源链接")
-    client = p115_client()
-    with db() as connection:
-        target_cid = setting(connection, "p115_target_cid") or "0"
 
     title_spec = parse_episode_spec(payload.get("resource_title"))
     wanted_episodes = set(title_spec["episode_numbers"])
     selected_episode_numbers = sorted(wanted_episodes)
+    if user.get("storage_destination") == "p123":
+        return queue_p123_transfer(
+            user=user,
+            share_url=share_url,
+            source="hdhive",
+            resource_key=slug,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            tmdb_id=tmdb_id,
+            season_number=int(title_spec["season_number"]),
+            episode_numbers=selected_episode_numbers,
+        )
+
+    client = p115_client()
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
         before_tasks = p115_offline_snapshot(client)
@@ -5141,10 +5556,21 @@ async def dian_transfer(
             f"payload 类型：{payload_type}；payload 字段：{payload_fields}",
         )
     share_url = links[0]
+    if user.get("storage_destination") == "p123":
+        return queue_p123_transfer(
+            user=user,
+            share_url=share_url,
+            source="dian",
+            resource_key=resource_key,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            tmdb_id=tmdb_id,
+            season_number=int(title_spec["season_number"]),
+            episode_numbers=selected_episode_numbers,
+        )
+
     client = p115_client()
     with db() as connection:
         target_cid = setting(connection, "p115_target_cid") or "0"
-
     if not is_115_share_url(share_url):
         before_tasks = p115_offline_snapshot(client)
         if len(links) == 1:
@@ -5368,7 +5794,9 @@ def list_users(movie_session: Optional[str] = Cookie(default=None)) -> dict[str,
     require_admin(movie_session)
     with db() as connection:
         rows = connection.execute(
-            "SELECT id, username, display_name, role, active, created_at FROM users ORDER BY role, created_at"
+            "SELECT id, username, display_name, role, active, storage_destination, "
+            "p123_target_id, p123_target_name, created_at "
+            "FROM users ORDER BY role, created_at"
         ).fetchall()
     return {"users": [dict(row) for row in rows]}
 
@@ -5380,12 +5808,24 @@ async def create_user(request: Request, movie_session: Optional[str] = Cookie(de
     username = clean_username(payload.get("username"))
     password = clean_password(payload.get("password"))
     display_name = str(payload.get("display_name") or username).strip()[:40]
+    storage_destination = str(payload.get("storage_destination") or "p115")
+    if storage_destination not in ("p115", "p123"):
+        raise HTTPException(400, "转存目标无效")
+    try:
+        p123_target_id = max(0, int(payload.get("p123_target_id") or 0))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, "123目标目录ID无效") from error
+    p123_target_name = str(payload.get("p123_target_name") or "根目录").strip()[:200]
     try:
         with db() as connection:
             connection.execute(
-                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
-                "VALUES(?, ?, ?, 'member', ?)",
-                (username, display_name, hash_password(password), now_iso()),
+                "INSERT INTO users(username, display_name, password_hash, role, "
+                "storage_destination, p123_target_id, p123_target_name, created_at) "
+                "VALUES(?, ?, ?, 'member', ?, ?, ?, ?)",
+                (
+                    username, display_name, hash_password(password),
+                    storage_destination, p123_target_id, p123_target_name, now_iso(),
+                ),
             )
     except sqlite3.IntegrityError as error:
         raise HTTPException(409, "这个账号已经存在") from error
@@ -5411,6 +5851,23 @@ async def update_user(user_id: int, request: Request, movie_session: Optional[st
     if "active" in payload:
         fields.append("active = ?")
         values.append(1 if payload["active"] else 0)
+    if "storage_destination" in payload:
+        destination = str(payload["storage_destination"])
+        if destination not in ("p115", "p123"):
+            raise HTTPException(400, "转存目标无效")
+        fields.append("storage_destination = ?")
+        values.append(destination)
+    if "p123_target_id" in payload:
+        try:
+            target_id = max(0, int(payload["p123_target_id"] or 0))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "123目标目录ID无效") from error
+        fields.append("p123_target_id = ?")
+        values.append(target_id)
+    if "p123_target_name" in payload:
+        target_name = str(payload["p123_target_name"] or "根目录").strip()[:200]
+        fields.append("p123_target_name = ?")
+        values.append(target_name or "根目录")
     password_changed = False
     if payload.get("password"):
         fields.append("password_hash = ?")
@@ -5472,6 +5929,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
+        p123_client_id = setting(connection, "p123_client_id")
+        p123_client_secret = setting(connection, "p123_client_secret")
     return {
         "tmdb_configured": bool(tmdb),
         "telegram_configured": bool(telegram and chat_id),
@@ -5495,6 +5954,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p115_configured": p115_cookie_path().exists(),
         "p115_target_cid": p115_target_cid,
         "p115_target_name": p115_target_name,
+        "p123_configured": bool(p123_client_id and p123_client_secret),
+        "p123_client_id": p123_client_id,
     }
 
 
@@ -5511,12 +5972,19 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             raise HTTPException(400, "签到时间格式无效") from error
     if payload.get("p115_app") and payload["p115_app"] not in P115_APPS:
         raise HTTPException(400, "不支持这个115设备身份")
+    if "p123_target_id" in payload:
+        try:
+            if int(str(payload["p123_target_id"]).strip() or "0") < 0:
+                raise ValueError
+        except ValueError as error:
+            raise HTTPException(400, "123目标目录ID无效") from error
     with db() as connection:
         for key in (
             "tmdb_token", "telegram_token", "telegram_chat_id", "telegram_proxy",
             "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
-            "p115_target_cid", "p115_target_name"
+            "p115_target_cid", "p115_target_name", "p123_client_id",
+            "p123_client_secret"
         ):
             if key in payload and str(payload[key]).strip():
                 set_setting(connection, key, payload[key])
@@ -5636,6 +6104,85 @@ def integration_status(movie_session: Optional[str] = Cookie(default=None)) -> d
         "p115_online": p115_online,
         "p115_logged_in": p115_online,
     }
+
+
+@APP.post("/api/admin/p123/test")
+def p123_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    started = time.perf_counter()
+    client = p123_client()
+    result = p123_call("测试123连接失败", client.fs_list, {"parentFileId": 0, "limit": 1})
+    p123_response_data(result, "测试123连接失败")
+    return {
+        "ok": True,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+        "message": "123开放平台连接正常",
+    }
+
+
+@APP.get("/api/admin/p123/folders")
+def p123_folders(
+    parent_id: int = 0,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    client = p123_client()
+    result = p123_call(
+        "读取123目录失败",
+        client.fs_list,
+        {"parentFileId": max(0, parent_id), "limit": 100},
+    )
+    items = p123_list_items(p123_response_data(result, "读取123目录失败"))
+    folders = []
+    for item in items:
+        item_id = p123_item_id(item)
+        kind = item.get("type", item.get("Type", item.get("isDir")))
+        if item_id and (kind in (1, "1", True) or str(kind).lower() in ("folder", "dir")):
+            folders.append({"id": item_id, "name": p123_item_name(item)})
+    return {"folders": folders}
+
+
+@APP.post("/api/admin/p123/transfer")
+async def p123_manual_transfer(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_admin(movie_session)
+    payload = await request.json()
+    share_url = str(payload.get("share_url") or "").strip()
+    return queue_p123_transfer(
+        user=user,
+        share_url=share_url,
+        source="manual",
+        resource_key=hashlib.sha256(share_url.encode()).hexdigest()[:24],
+        title=str(payload.get("title") or "管理员手动秒传"),
+    )
+
+
+@APP.get("/api/p123/jobs/{job_id}")
+def p123_job_status(
+    job_id: str,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    job = p123_job_row(job_id)
+    if not job:
+        raise HTTPException(404, "没有找到这个秒传任务")
+    if user["role"] != "admin" and int(job["user_id"]) != int(user["id"]):
+        raise HTTPException(403, "无权查看这个秒传任务")
+    return serialize_p123_job(job)
+
+
+@APP.get("/api/admin/p123/jobs")
+def p123_jobs(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT j.*, u.display_name, u.username "
+            "FROM p123_transfer_jobs j JOIN users u ON u.id = j.user_id "
+            "ORDER BY j.created_at DESC LIMIT 50"
+        ).fetchall()
+    return {"jobs": [serialize_p123_job(row) for row in rows]}
 
 
 @APP.post("/api/admin/p115/qrcode")

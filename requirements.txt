@@ -3,4 +3,5 @@ requests==2.32.4
 uvicorn==0.34.3
 cryptography>=45,<47
 p115client==0.0.9.6.4
+p123client==0.0.9.3.1
 qrcode[pil]>=8,<9

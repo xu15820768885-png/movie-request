@@ -1722,6 +1722,188 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 502)
         self.assertIn("没有创建云下载任务", raised.exception.detail)
 
+    def test_p115_sha1_and_nested_share_paths_are_normalized(self):
+        sha1 = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+
+        class FakeP115:
+            def share_snap(self, cid, share_url):
+                self.share_url = share_url
+                if cid == 0:
+                    return {"state": True, "data": [{"cid": "7", "n": "电影"}]}
+                return {
+                    "state": True,
+                    "data": [{"fid": "8", "n": "正片.mkv", "sha": sha1, "s": "1024"}],
+                }
+
+        items = app.p115_share_tree(FakeP115(), "https://115.com/s/example")
+        self.assertEqual(items[1]["_share_path"], ("电影", "正片.mkv"))
+        self.assertEqual(app.p115_share_item_sha1(items[1]), sha1.lower())
+        self.assertEqual(app.p115_share_item_size(items[1]), 1024)
+
+    def test_p123_worker_preserves_folder_and_reports_reuse(self):
+        sha1 = "abcdef0123456789abcdef0123456789abcdef01"
+
+        class FakeP123:
+            def __init__(self):
+                self.upload_payloads = []
+
+            def fs_list(self, _payload):
+                return {"code": 0, "data": {"fileList": []}}
+
+            def fs_mkdir(self, payload):
+                self.mkdir_payload = payload
+                return {"code": 0, "data": {"dirID": 99}}
+
+            def upload_sha1_reuse(self, payload):
+                self.upload_payloads.append(payload)
+                return {"code": 0, "data": {"fileID": 123, "reuse": True}}
+
+        fake = FakeP123()
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE users SET storage_destination = 'p123', "
+                "p123_target_id = 44, p123_target_name = '影视' WHERE id = 1"
+            )
+        job_id = "job-test"
+        with app.db() as connection:
+            timestamp = app.now_iso()
+            connection.execute(
+                "INSERT INTO p123_transfer_jobs("
+                "id, user_id, share_url, source, resource_key, title, target_id, "
+                "target_name, status, created_at, updated_at) "
+                "VALUES(?, 1, ?, 'manual', 'resource', '测试影片', 44, '影视', "
+                "'queued', ?, ?)",
+                (job_id, "https://115.com/s/example", timestamp, timestamp),
+            )
+        source_items = [{
+            "_share_is_dir": False,
+            "_share_name": "正片.mkv",
+            "_share_path": ("电影", "正片.mkv"),
+            "sha1": sha1,
+            "size": 2048,
+        }]
+        with patch.object(app, "p115_client", return_value=object()):
+            with patch.object(app, "p115_share_tree", return_value=source_items):
+                with patch.object(app, "p123_client", return_value=fake):
+                    with patch.object(
+                        app,
+                        "p123_call",
+                        side_effect=lambda _label, method, *args, **kwargs: method(
+                            *args, **kwargs
+                        ),
+                    ):
+                        with patch.object(app, "record_transfer"):
+                            with patch.object(app, "send_telegram"):
+                                app.run_p123_transfer_job(job_id)
+        with app.db() as connection:
+            job = dict(connection.execute(
+                "SELECT * FROM p123_transfer_jobs WHERE id = ?", (job_id,)
+            ).fetchone())
+        self.assertEqual(job["status"], "success")
+        self.assertEqual(job["success_files"], 1)
+        self.assertEqual(fake.upload_payloads[0]["parentFileID"], 99)
+        self.assertEqual(fake.upload_payloads[0]["sha1"], sha1)
+
+    def test_p123_secret_is_never_returned_to_browser(self):
+        with app.db() as connection:
+            app.set_setting(connection, "p123_client_id", "client-id")
+            app.set_setting(connection, "p123_client_secret", "super-secret")
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["p123_configured"])
+        self.assertEqual(settings["p123_client_id"], "client-id")
+        self.assertNotIn("p123_client_secret", settings)
+
+    def test_new_accounts_keep_p115_default_and_can_be_assigned_p123(self):
+        asyncio.run(
+            app.create_user(
+                FakeRequest({
+                    "username": "cloud-user",
+                    "display_name": "123专用账号",
+                    "password": "password123",
+                    "storage_destination": "p123",
+                    "p123_target_id": 7788,
+                    "p123_target_name": "家庭影视/专用目录",
+                }),
+                self.token,
+            )
+        )
+        asyncio.run(
+            app.create_user(
+                FakeRequest({
+                    "username": "legacy-user",
+                    "display_name": "115账号",
+                    "password": "password123",
+                }),
+                self.token,
+            )
+        )
+        users = {
+            user["username"]: user
+            for user in app.list_users(self.token)["users"]
+        }
+        self.assertEqual(users["cloud-user"]["storage_destination"], "p123")
+        self.assertEqual(users["cloud-user"]["p123_target_id"], 7788)
+        self.assertEqual(users["legacy-user"]["storage_destination"], "p115")
+
+    def test_resource_transfer_destination_is_fixed_by_logged_in_account(self):
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE users SET storage_destination = 'p123', "
+                "p123_target_id = 7788 WHERE id = 1"
+            )
+        payload = {
+            "slug": "resource-slug",
+            "tmdb_id": 101,
+            "media_type": "movie",
+            "title": "测试电影",
+            "resource_title": "测试电影 4K",
+            "destination": "p115",
+        }
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"full_url": "https://115.com/s/example"}},
+        ):
+            with patch.object(
+                app,
+                "queue_p123_transfer",
+                return_value={"ok": True, "mode": "p123", "job_id": "job"},
+            ) as queued:
+                result = asyncio.run(
+                    app.hdhive_transfer(FakeRequest(payload), self.token)
+                )
+        self.assertEqual(result["mode"], "p123")
+        queued.assert_called_once()
+
+    def test_p123_queue_is_persisted_before_worker_starts(self):
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE users SET storage_destination = 'p123', "
+                "p123_target_id = 7788, p123_target_name = '专用目录' WHERE id = 1"
+            )
+            app.set_setting(connection, "p123_client_id", "client")
+            app.set_setting(connection, "p123_client_secret", "secret")
+        user = app.require_user(self.token)
+        with patch.object(app, "p115_client", return_value=object()):
+            with patch.object(app, "Thread") as thread:
+                result = app.queue_p123_transfer(
+                    user=user,
+                    share_url="https://115.com/s/example",
+                    source="hdhive",
+                    resource_key="resource",
+                    title="测试任务",
+                )
+        with app.db() as connection:
+            job = connection.execute(
+                "SELECT status, target_id, target_name FROM p123_transfer_jobs "
+                "WHERE id = ?",
+                (result["job_id"],),
+            ).fetchone()
+        self.assertEqual(job["status"], "queued")
+        self.assertEqual(job["target_id"], 7788)
+        self.assertEqual(job["target_name"], "专用目录")
+        thread.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
