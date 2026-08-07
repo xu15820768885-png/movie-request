@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import json
+import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ class MovieRequestTests(unittest.TestCase):
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
             app.EMBY_EPISODE_CACHE.clear()
+        app.clear_p123_client_cache()
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -1812,6 +1815,92 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(settings["p123_configured"])
         self.assertEqual(settings["p123_client_id"], "client-id")
         self.assertNotIn("p123_client_secret", settings)
+
+    def test_p123_phone_password_is_encrypted_and_never_returned(self):
+        asyncio.run(
+            app.update_settings(
+                FakeRequest({
+                    "p123_passport": "13800138000",
+                    "p123_password": "cloud-password",
+                }),
+                self.token,
+            )
+        )
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["p123_configured"])
+        self.assertEqual(settings["p123_auth_mode"], "password")
+        self.assertEqual(settings["p123_passport"], "13800138000")
+        self.assertTrue(settings["p123_password_configured"])
+        self.assertNotIn("p123_password", settings)
+        with app.db() as connection:
+            cipher = app.setting(connection, "p123_password_cipher")
+        self.assertNotEqual(cipher, "cloud-password")
+        self.assertEqual(app.decrypt_secret(cipher), "cloud-password")
+
+    def test_p123_phone_login_prefers_account_and_uses_open_api_aliases(self):
+        calls = []
+
+        class FakeAccountClient:
+            def __init__(self, passport, password):
+                calls.append(("account", passport, password))
+
+            def fs_list(self, _payload):
+                raise AssertionError("personal list endpoint must not replace OpenAPI")
+
+            def fs_list_open(self, payload):
+                calls.append(("list-open", payload))
+                return {"code": 0, "data": {"fileList": []}}
+
+            def fs_mkdir_open(self, payload):
+                return {"code": 0, "data": {"dirID": 1}}
+
+            def upload_sha1_reuse_open(self, payload):
+                return {"code": 0, "data": {"reuse": True, **payload}}
+
+        class FakeOpenClient:
+            def __init__(self, *_args):
+                raise AssertionError("phone/password must take priority")
+
+        module = types.SimpleNamespace(
+            P123Client=FakeAccountClient,
+            P123OpenClient=FakeOpenClient,
+        )
+        with app.db() as connection:
+            app.set_setting(connection, "p123_passport", "13800138000")
+            app.set_setting(
+                connection,
+                "p123_password_cipher",
+                app.encrypt_secret("cloud-password"),
+            )
+            app.set_setting(connection, "p123_client_id", "legacy-id")
+            app.set_setting(connection, "p123_client_secret", "legacy-secret")
+        app.clear_p123_client_cache()
+        with patch.dict(sys.modules, {"p123client": module}):
+            client = app.p123_client()
+            result = client.fs_list({"parentFileId": 0})
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(calls[0], ("account", "13800138000", "cloud-password"))
+        self.assertEqual(calls[1][0], "list-open")
+
+    def test_p123_blank_password_keeps_existing_encrypted_password(self):
+        with app.db() as connection:
+            original = app.encrypt_secret("cloud-password")
+            app.set_setting(connection, "p123_passport", "13800138000")
+            app.set_setting(connection, "p123_password_cipher", original)
+        asyncio.run(
+            app.update_settings(
+                FakeRequest({
+                    "p123_passport": "13900139000",
+                    "p123_password": "",
+                }),
+                self.token,
+            )
+        )
+        with app.db() as connection:
+            self.assertEqual(
+                app.setting(connection, "p123_password_cipher"),
+                original,
+            )
 
     def test_new_accounts_keep_p115_default_and_can_be_assigned_p123(self):
         asyncio.run(

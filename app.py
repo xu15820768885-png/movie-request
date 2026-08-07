@@ -78,7 +78,9 @@ QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 P123_API_LOCK = Lock()
 P123_WORKER_LOCK = Lock()
+P123_CLIENT_LOCK = Lock()
 P123_LAST_CALL_AT = 0.0
+P123_CLIENT_CACHE: dict[str, Any] = {"key": "", "client": None}
 P115_APPS = {
     "alipaymini": "115生活_支付宝小程序端",
     "wechatmini": "115生活_微信小程序端",
@@ -483,7 +485,7 @@ def decrypt_secret(value: str) -> str:
     try:
         return hdhive_fernet().decrypt(clean.encode()).decode()
     except (InvalidToken, ValueError) as error:
-        raise HTTPException(500, "影巢密钥无法解密，请管理员重新保存配置") from error
+        raise HTTPException(500, "敏感凭据无法解密，请管理员重新保存配置") from error
 
 
 def hdhive_oauth_row(connection: sqlite3.Connection) -> sqlite3.Row:
@@ -1064,20 +1066,95 @@ def p115_share_item_sha1(item: dict[str, Any]) -> str:
     return ""
 
 
-def p123_client():
-    try:
-        from p123client import P123OpenClient
-    except ImportError as error:
-        raise HTTPException(503, "当前镜像缺少 p123client") from error
+class P123CloudClient:
+    """Expose the OpenAPI methods used by the transfer worker for either login mode."""
+
+    def __init__(self, client: Any, account_login: bool) -> None:
+        self.client = client
+        self.account_login = account_login
+
+    def _method(self, name: str) -> Any:
+        if self.account_login:
+            open_method = getattr(self.client, f"{name}_open", None)
+            if callable(open_method):
+                return open_method
+        return getattr(self.client, name)
+
+    def fs_list(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._method("fs_list")(payload)
+
+    def fs_mkdir(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._method("fs_mkdir")(payload)
+
+    def upload_sha1_reuse(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._method("upload_sha1_reuse")(payload)
+
+
+def clear_p123_client_cache() -> None:
+    with P123_CLIENT_LOCK:
+        P123_CLIENT_CACHE.update({"key": "", "client": None})
+
+
+def p123_login_settings() -> tuple[str, str, str, str]:
     with db() as connection:
+        passport = setting(connection, "p123_passport")
+        password_cipher = setting(connection, "p123_password_cipher")
         client_id = setting(connection, "p123_client_id")
         client_secret = setting(connection, "p123_client_secret")
-    if not client_id or not client_secret:
-        raise HTTPException(503, "123 开放平台尚未配置 Client ID 和 Client Secret")
+    password = decrypt_secret(password_cipher) if password_cipher else ""
+    return passport, password, client_id, client_secret
+
+
+def p123_is_configured(connection: sqlite3.Connection) -> bool:
+    return bool(
+        (
+            setting(connection, "p123_passport")
+            and setting(connection, "p123_password_cipher")
+        )
+        or (
+            setting(connection, "p123_client_id")
+            and setting(connection, "p123_client_secret")
+        )
+    )
+
+
+def p123_client():
     try:
-        return P123OpenClient(client_id, client_secret)
-    except Exception as error:
-        raise HTTPException(502, f"123 开放平台登录失败：{error}") from error
+        from p123client import P123Client, P123OpenClient
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少 p123client") from error
+    passport, password, client_id, client_secret = p123_login_settings()
+    if passport and password:
+        mode = "account"
+        cache_key = hashlib.sha256(
+            f"{DB_PATH}|{mode}|{passport}|{password}".encode()
+        ).hexdigest()
+        factory = lambda: P123CloudClient(P123Client(passport, password), True)
+        error_label = "123账号登录失败"
+    elif client_id and client_secret:
+        mode = "open"
+        cache_key = hashlib.sha256(
+            f"{DB_PATH}|{mode}|{client_id}|{client_secret}".encode()
+        ).hexdigest()
+        factory = lambda: P123CloudClient(
+            P123OpenClient(client_id, client_secret),
+            False,
+        )
+        error_label = "123开放平台登录失败"
+    else:
+        raise HTTPException(503, "请先配置123登录手机号和密码")
+    with P123_CLIENT_LOCK:
+        if (
+            P123_CLIENT_CACHE["key"] == cache_key
+            and P123_CLIENT_CACHE["client"] is not None
+        ):
+            return P123_CLIENT_CACHE["client"]
+        try:
+            client = factory()
+        except Exception as error:
+            raise HTTPException(502, f"{error_label}：{error}") from error
+        P123_CLIENT_CACHE.update({"key": cache_key, "client": client})
+        return client
 
 
 def p123_response_data(payload: dict[str, Any], label: str) -> dict[str, Any]:
@@ -1366,8 +1443,8 @@ def queue_p123_transfer(
         raise HTTPException(400, "123秒传仅支持115分享链接")
     p115_client()
     with db() as connection:
-        if not setting(connection, "p123_client_id") or not setting(connection, "p123_client_secret"):
-            raise HTTPException(503, "管理员尚未配置123开放平台")
+        if not p123_is_configured(connection):
+            raise HTTPException(503, "管理员尚未配置123云盘账号")
         target = connection.execute(
             "SELECT storage_destination, p123_target_id, p123_target_name "
             "FROM users WHERE id = ?",
@@ -6387,6 +6464,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
+        p123_passport = setting(connection, "p123_passport")
+        p123_password_cipher = setting(connection, "p123_password_cipher")
         p123_client_id = setting(connection, "p123_client_id")
         p123_client_secret = setting(connection, "p123_client_secret")
         wecom_corp_id = setting(connection, "wecom_corp_id")
@@ -6423,7 +6502,20 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p115_configured": p115_cookie_path().exists(),
         "p115_target_cid": p115_target_cid,
         "p115_target_name": p115_target_name,
-        "p123_configured": bool(p123_client_id and p123_client_secret),
+        "p123_configured": bool(
+            (p123_passport and p123_password_cipher)
+            or (p123_client_id and p123_client_secret)
+        ),
+        "p123_auth_mode": (
+            "password"
+            if p123_passport and p123_password_cipher
+            else "open"
+            if p123_client_id and p123_client_secret
+            else ""
+        ),
+        "p123_passport": p123_passport,
+        "p123_password_configured": bool(p123_password_cipher),
+        "p123_legacy_open_configured": bool(p123_client_id and p123_client_secret),
         "p123_client_id": p123_client_id,
         "wecom_configured": bool(wecom_corp_id and wecom_agent_id and wecom_secret),
         "wecom_callback_configured": bool(callback_token and encoding_key),
@@ -6450,6 +6542,13 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             raise HTTPException(400, "签到时间格式无效") from error
     if payload.get("p115_app") and payload["p115_app"] not in P115_APPS:
         raise HTTPException(400, "不支持这个115设备身份")
+    if payload.get("p123_passport"):
+        passport = str(payload["p123_passport"]).strip()
+        if not (
+            re.fullmatch(r"\+?\d{6,20}", passport)
+            or re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", passport)
+        ):
+            raise HTTPException(400, "请输入正确的123登录手机号或邮箱")
     if "p123_target_id" in payload:
         try:
             if int(str(payload["p123_target_id"]).strip() or "0") < 0:
@@ -6472,7 +6571,8 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
-            "p115_target_cid", "p115_target_name", "p123_client_id",
+            "p115_target_cid", "p115_target_name", "p123_passport",
+            "p123_client_id",
             "p123_client_secret", "wecom_corp_id", "wecom_agent_id",
             "wecom_secret", "wecom_to_user", "wecom_api_base",
             "wecom_admin_userid", "wecom_callback_token",
@@ -6480,8 +6580,16 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
         ):
             if key in payload and str(payload[key]).strip():
                 set_setting(connection, key, payload[key])
+        if payload.get("p123_password"):
+            set_setting(
+                connection,
+                "p123_password_cipher",
+                encrypt_secret(str(payload["p123_password"])),
+            )
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
+    if "p123_passport" in payload or payload.get("p123_password"):
+        clear_p123_client_cache()
     configure_telegram_menu()
     configure_wecom_menu()
     return {"ok": True}
@@ -6609,7 +6717,7 @@ def p123_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, 
     return {
         "ok": True,
         "latency_ms": round((time.perf_counter() - started) * 1000),
-        "message": "123开放平台连接正常",
+        "message": "123云盘账号登录正常",
     }
 
 
