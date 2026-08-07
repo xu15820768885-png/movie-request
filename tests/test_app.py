@@ -1,13 +1,11 @@
 import asyncio
 import hashlib
 import json
-import sys
 import tempfile
-import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import app
 
@@ -30,7 +28,6 @@ class MovieRequestTests(unittest.TestCase):
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
             app.EMBY_EPISODE_CACHE.clear()
-        app.clear_p123_client_cache()
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -1743,175 +1740,52 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(app.p115_share_item_sha1(items[1]), sha1.lower())
         self.assertEqual(app.p115_share_item_size(items[1]), 1024)
 
-    def test_p123_worker_preserves_folder_and_reports_reuse(self):
-        sha1 = "abcdef0123456789abcdef0123456789abcdef01"
-
-        class FakeP123:
-            def __init__(self):
-                self.upload_payloads = []
-
-            def fs_list(self, _payload):
-                return {"code": 0, "data": {"fileList": []}}
-
-            def fs_mkdir(self, payload):
-                self.mkdir_payload = payload
-                return {"code": 0, "data": {"dirID": 99}}
-
-            def upload_sha1_reuse(self, payload):
-                self.upload_payloads.append(payload)
-                return {"code": 0, "data": {"fileID": 123, "reuse": True}}
-
-        fake = FakeP123()
-        with app.db() as connection:
-            connection.execute(
-                "UPDATE users SET storage_destination = 'p123', "
-                "p123_target_id = 44, p123_target_name = '影视' WHERE id = 1"
-            )
-        job_id = "job-test"
-        with app.db() as connection:
-            timestamp = app.now_iso()
-            connection.execute(
-                "INSERT INTO p123_transfer_jobs("
-                "id, user_id, share_url, source, resource_key, title, target_id, "
-                "target_name, status, created_at, updated_at) "
-                "VALUES(?, 1, ?, 'manual', 'resource', '测试影片', 44, '影视', "
-                "'queued', ?, ?)",
-                (job_id, "https://115.com/s/example", timestamp, timestamp),
-            )
-        source_items = [{
-            "_share_is_dir": False,
-            "_share_name": "正片.mkv",
-            "_share_path": ("电影", "正片.mkv"),
-            "sha1": sha1,
-            "size": 2048,
-        }]
-        with patch.object(app, "p115_client", return_value=object()):
-            with patch.object(app, "p115_share_tree", return_value=source_items):
-                with patch.object(app, "p123_client", return_value=fake):
-                    with patch.object(
-                        app,
-                        "p123_call",
-                        side_effect=lambda _label, method, *args, **kwargs: method(
-                            *args, **kwargs
-                        ),
-                    ):
-                        with patch.object(app, "record_transfer"):
-                            with patch.object(app, "send_telegram"):
-                                app.run_p123_transfer_job(job_id)
-        with app.db() as connection:
-            job = dict(connection.execute(
-                "SELECT * FROM p123_transfer_jobs WHERE id = ?", (job_id,)
-            ).fetchone())
-        self.assertEqual(job["status"], "success")
-        self.assertEqual(job["success_files"], 1)
-        self.assertEqual(fake.upload_payloads[0]["parentFileID"], 99)
-        self.assertEqual(fake.upload_payloads[0]["sha1"], sha1)
-
-    def test_p123_secret_is_never_returned_to_browser(self):
-        with app.db() as connection:
-            app.set_setting(connection, "p123_client_id", "client-id")
-            app.set_setting(connection, "p123_client_secret", "super-secret")
-        settings = app.get_settings(self.token)
-        self.assertTrue(settings["p123_configured"])
-        self.assertEqual(settings["p123_client_id"], "client-id")
-        self.assertNotIn("p123_client_secret", settings)
-
-    def test_p123_phone_password_is_encrypted_and_never_returned(self):
-        asyncio.run(
-            app.update_settings(
-                FakeRequest({
-                    "p123_passport": "13800138000",
-                    "p123_password": "cloud-password",
-                }),
-                self.token,
-            )
+    def test_pansave_proxy_supports_http_and_socks(self):
+        self.assertEqual(
+            app.pansave_proxy("http://user:pass@127.0.0.1:7890"),
+            {
+                "proxy_type": "http",
+                "addr": "127.0.0.1",
+                "port": 7890,
+                "rdns": True,
+                "username": "user",
+                "password": "pass",
+            },
         )
-        settings = app.get_settings(self.token)
-        self.assertTrue(settings["p123_configured"])
-        self.assertEqual(settings["p123_auth_mode"], "password")
-        self.assertEqual(settings["p123_passport"], "13800138000")
-        self.assertTrue(settings["p123_password_configured"])
-        self.assertNotIn("p123_password", settings)
-        with app.db() as connection:
-            cipher = app.setting(connection, "p123_password_cipher")
-        self.assertNotEqual(cipher, "cloud-password")
-        self.assertEqual(app.decrypt_secret(cipher), "cloud-password")
-
-    def test_p123_phone_login_prefers_account_and_uses_open_api_aliases(self):
-        calls = []
-
-        class FakeAccountClient:
-            def __init__(self, passport, password):
-                calls.append(("account", passport, password))
-
-            def fs_list(self, _payload):
-                raise AssertionError("personal list endpoint must not replace OpenAPI")
-
-            def fs_list_open(self, payload):
-                calls.append(("list-open", payload))
-                return {"code": 0, "data": {"fileList": []}}
-
-            def fs_mkdir_open(self, payload):
-                return {"code": 0, "data": {"dirID": 1}}
-
-            def upload_sha1_reuse_open(self, payload):
-                return {"code": 0, "data": {"reuse": True, **payload}}
-
-        class FakeOpenClient:
-            def __init__(self, *_args):
-                raise AssertionError("phone/password must take priority")
-
-        module = types.SimpleNamespace(
-            P123Client=FakeAccountClient,
-            P123OpenClient=FakeOpenClient,
+        self.assertEqual(
+            app.pansave_proxy("socks5://127.0.0.1:1080")["proxy_type"],
+            "socks5",
         )
+
+    def test_pansave_secrets_are_encrypted_and_not_returned(self):
         with app.db() as connection:
-            app.set_setting(connection, "p123_passport", "13800138000")
+            app.set_setting(connection, "pansave_telegram_api_id", "123456")
             app.set_setting(
                 connection,
-                "p123_password_cipher",
-                app.encrypt_secret("cloud-password"),
+                "pansave_telegram_api_hash_cipher",
+                app.encrypt_secret("a" * 32),
             )
-            app.set_setting(connection, "p123_client_id", "legacy-id")
-            app.set_setting(connection, "p123_client_secret", "legacy-secret")
-        app.clear_p123_client_cache()
-        with patch.dict(sys.modules, {"p123client": module}):
-            client = app.p123_client()
-            result = client.fs_list({"parentFileId": 0})
-        self.assertEqual(result["code"], 0)
-        self.assertEqual(calls[0], ("account", "13800138000", "cloud-password"))
-        self.assertEqual(calls[1][0], "list-open")
-
-    def test_p123_blank_password_keeps_existing_encrypted_password(self):
-        with app.db() as connection:
-            original = app.encrypt_secret("cloud-password")
-            app.set_setting(connection, "p123_passport", "13800138000")
-            app.set_setting(connection, "p123_password_cipher", original)
-        asyncio.run(
-            app.update_settings(
-                FakeRequest({
-                    "p123_passport": "13900139000",
-                    "p123_password": "",
-                }),
-                self.token,
+            app.set_setting(connection, "pansave_telegram_phone", "+8613800138000")
+            app.set_setting(
+                connection,
+                "pansave_telegram_session_cipher",
+                app.encrypt_secret("telegram-session"),
             )
-        )
-        with app.db() as connection:
-            self.assertEqual(
-                app.setting(connection, "p123_password_cipher"),
-                original,
-            )
+            app.set_setting(connection, "pansave_telegram_authorized", "1")
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["pansave_configured"])
+        self.assertTrue(settings["pansave_connected"])
+        self.assertNotIn("pansave_telegram_session", settings)
+        self.assertNotIn("pansave_telegram_api_hash", settings)
 
     def test_new_accounts_keep_p115_default_and_can_be_assigned_p123(self):
         asyncio.run(
             app.create_user(
                 FakeRequest({
                     "username": "cloud-user",
-                    "display_name": "123专用账号",
+                    "display_name": "PanSave账号",
                     "password": "password123",
                     "storage_destination": "p123",
-                    "p123_target_id": 7788,
-                    "p123_target_name": "家庭影视/专用目录",
                 }),
                 self.token,
             )
@@ -1931,14 +1805,13 @@ class MovieRequestTests(unittest.TestCase):
             for user in app.list_users(self.token)["users"]
         }
         self.assertEqual(users["cloud-user"]["storage_destination"], "p123")
-        self.assertEqual(users["cloud-user"]["p123_target_id"], 7788)
+        self.assertNotIn("p123_target_id", users["cloud-user"])
         self.assertEqual(users["legacy-user"]["storage_destination"], "p115")
 
-    def test_resource_transfer_destination_is_fixed_by_logged_in_account(self):
+    def test_hdhive_pansave_destination_is_fixed_by_logged_in_account(self):
         with app.db() as connection:
             connection.execute(
-                "UPDATE users SET storage_destination = 'p123', "
-                "p123_target_id = 7788 WHERE id = 1"
+                "UPDATE users SET storage_destination = 'p123' WHERE id = 1"
             )
         payload = {
             "slug": "resource-slug",
@@ -1955,60 +1828,85 @@ class MovieRequestTests(unittest.TestCase):
         ):
             with patch.object(
                 app,
-                "queue_p123_transfer",
-                return_value={"ok": True, "mode": "p123", "job_id": "job"},
-            ) as queued:
+                "deliver_to_pansave",
+                new=AsyncMock(
+                    return_value={"ok": True, "mode": "pansave", "message": "已发送"}
+                ),
+            ) as delivered:
                 result = asyncio.run(
                     app.hdhive_transfer(FakeRequest(payload), self.token)
                 )
-        self.assertEqual(result["mode"], "p123")
-        queued.assert_called_once()
-
-    def test_p123_queue_uses_global_folder_and_is_persisted_before_worker(self):
-        with app.db() as connection:
-            connection.execute(
-                "UPDATE users SET storage_destination = 'p123', "
-                "p123_target_id = 9999, p123_target_name = '旧成员目录' WHERE id = 1"
-            )
-            app.set_setting(connection, "p123_client_id", "client")
-            app.set_setting(connection, "p123_client_secret", "secret")
-            app.set_setting(connection, "p123_target_id", "7788")
-            app.set_setting(connection, "p123_target_name", "统一目录")
-        user = app.require_user(self.token)
-        with patch.object(app, "p115_client", return_value=object()):
-            with patch.object(app, "Thread") as thread:
-                result = app.queue_p123_transfer(
-                    user=user,
-                    share_url="https://115.com/s/example",
-                    source="hdhive",
-                    resource_key="resource",
-                    title="测试任务",
-                )
-        with app.db() as connection:
-            job = connection.execute(
-                "SELECT status, target_id, target_name FROM p123_transfer_jobs "
-                "WHERE id = ?",
-                (result["job_id"],),
-            ).fetchone()
-        self.assertEqual(job["status"], "queued")
-        self.assertEqual(job["target_id"], 7788)
-        self.assertEqual(job["target_name"], "统一目录")
-        thread.assert_called_once()
-
-    def test_p123_global_target_folder_is_returned_in_settings(self):
-        asyncio.run(
-            app.update_settings(
-                FakeRequest({
-                    "p123_target_id": "7788",
-                    "p123_target_name": "影视/统一转存",
-                }),
-                self.token,
-            )
+        self.assertEqual(result["mode"], "pansave")
+        delivered.assert_awaited_once()
+        self.assertEqual(
+            delivered.await_args.kwargs["share_url"],
+            "https://115.com/s/example",
         )
 
-        settings = app.get_settings(self.token)
-        self.assertEqual(settings["p123_target_id"], "7788")
-        self.assertEqual(settings["p123_target_name"], "影视/统一转存")
+    def test_pansave_send_link_uses_saved_user_session(self):
+        with app.db() as connection:
+            app.set_setting(connection, "pansave_telegram_api_id", "123456")
+            app.set_setting(
+                connection,
+                "pansave_telegram_api_hash_cipher",
+                app.encrypt_secret("a" * 32),
+            )
+            app.set_setting(connection, "pansave_telegram_phone", "+8613800138000")
+            app.set_setting(
+                connection,
+                "pansave_telegram_session_cipher",
+                app.encrypt_secret("saved-session"),
+            )
+            app.set_setting(connection, "pansave_bot_username", "pansavenb_bot")
+
+        class FakeMessage:
+            id = 77
+
+        class FakeClient:
+            def __init__(self):
+                self.sent = []
+                self.disconnected = False
+
+            async def connect(self):
+                return None
+
+            async def is_user_authorized(self):
+                return True
+
+            async def send_message(self, username, text):
+                self.sent.append((username, text))
+                return FakeMessage()
+
+            async def disconnect(self):
+                self.disconnected = True
+
+        fake = FakeClient()
+        with patch.object(app, "pansave_client", return_value=fake) as factory:
+            result = asyncio.run(
+                app.pansave_send_link("https://115.com/s/example?password=abcd")
+            )
+        factory.assert_called_once_with(123456, "a" * 32, "saved-session", "")
+        self.assertEqual(
+            fake.sent,
+            [("pansavenb_bot", "https://115.com/s/example?password=abcd")],
+        )
+        self.assertTrue(fake.disconnected)
+        self.assertEqual(result["message_id"], 77)
+
+    def test_init_db_removes_legacy_direct_123_data(self):
+        with app.db() as connection:
+            app.set_setting(connection, "p123_client_secret", "legacy-secret")
+            connection.execute(
+                "CREATE TABLE p123_transfer_jobs(id TEXT PRIMARY KEY)"
+            )
+        app.init_db()
+        with app.db() as connection:
+            self.assertEqual(app.setting(connection, "p123_client_secret"), "")
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='p123_transfer_jobs'"
+            ).fetchone()
+        self.assertIsNone(table)
 
     def test_dual_emby_credentials_are_selected_by_account_destination(self):
         with app.db() as connection:

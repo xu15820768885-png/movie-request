@@ -76,11 +76,6 @@ WECOM_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
 WECOM_TOKEN_LOCK = Lock()
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
-P123_API_LOCK = Lock()
-P123_WORKER_LOCK = Lock()
-P123_CLIENT_LOCK = Lock()
-P123_LAST_CALL_AT = 0.0
-P123_CLIENT_CACHE: dict[str, Any] = {"key": "", "client": None}
 P115_APPS = {
     "alipaymini": "115生活_支付宝小程序端",
     "wechatmini": "115生活_微信小程序端",
@@ -106,7 +101,7 @@ async def movie_http_exception_handler(
         if user:
             send_notifications(
                 f"❌ 资源转存失败 · "
-                f"{'123' if user['storage_destination'] == 'p123' else '115'}\n\n"
+                f"{'PanSave' if user['storage_destination'] == 'p123' else '115'}\n\n"
                 f"账号：{user['display_name']}\n原因：{error.detail}"
             )
     return JSONResponse(
@@ -151,8 +146,6 @@ def init_db() -> None:
                 role TEXT NOT NULL DEFAULT 'member',
                 active INTEGER NOT NULL DEFAULT 1,
                 storage_destination TEXT NOT NULL DEFAULT 'p115',
-                p123_target_id INTEGER NOT NULL DEFAULT 0,
-                p123_target_name TEXT NOT NULL DEFAULT '根目录',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -303,29 +296,6 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(media_type, tmdb_id)
             );
-            CREATE TABLE IF NOT EXISTS p123_transfer_jobs (
-                id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                share_url TEXT NOT NULL,
-                source TEXT NOT NULL,
-                resource_key TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT '',
-                tmdb_id INTEGER NOT NULL DEFAULT 0,
-                season_number INTEGER NOT NULL DEFAULT 0,
-                episode_numbers_json TEXT NOT NULL DEFAULT '[]',
-                target_id INTEGER NOT NULL DEFAULT 0,
-                target_name TEXT NOT NULL DEFAULT '根目录',
-                status TEXT NOT NULL DEFAULT 'queued',
-                total_files INTEGER NOT NULL DEFAULT 0,
-                success_files INTEGER NOT NULL DEFAULT 0,
-                failed_files INTEGER NOT NULL DEFAULT 0,
-                skipped_files INTEGER NOT NULL DEFAULT 0,
-                message TEXT NOT NULL DEFAULT '任务已排队',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS p123_job_status_idx
-                ON p123_transfer_jobs(status, created_at);
             """
         )
         user_columns = {
@@ -337,21 +307,11 @@ def init_db() -> None:
                 "ALTER TABLE users ADD COLUMN storage_destination "
                 "TEXT NOT NULL DEFAULT 'p115'"
             )
-        if "p123_target_id" not in user_columns:
-            connection.execute(
-                "ALTER TABLE users ADD COLUMN p123_target_id "
-                "INTEGER NOT NULL DEFAULT 0"
-            )
-        if "p123_target_name" not in user_columns:
-            connection.execute(
-                "ALTER TABLE users ADD COLUMN p123_target_name "
-                "TEXT NOT NULL DEFAULT '根目录'"
-            )
+        connection.execute("DROP TABLE IF EXISTS p123_transfer_jobs")
         connection.execute(
-            "UPDATE p123_transfer_jobs SET status = 'queued', "
-            "message = '服务重启，任务已重新排队', updated_at = ? "
-            "WHERE status = 'running'",
-            (now_iso(),),
+            "DELETE FROM settings WHERE key IN ("
+            "'p123_passport', 'p123_password_cipher', 'p123_client_id', "
+            "'p123_client_secret', 'p123_target_id', 'p123_target_name')"
         )
         follow_columns = {
             str(row["name"])
@@ -1066,371 +1026,114 @@ def p115_share_item_sha1(item: dict[str, Any]) -> str:
     return ""
 
 
-class P123CloudClient:
-    """Expose the OpenAPI methods used by the transfer worker for either login mode."""
-
-    def __init__(self, client: Any, account_login: bool) -> None:
-        self.client = client
-        self.account_login = account_login
-
-    def _method(self, name: str) -> Any:
-        if self.account_login:
-            open_method = getattr(self.client, f"{name}_open", None)
-            if callable(open_method):
-                return open_method
-        return getattr(self.client, name)
-
-    def fs_list(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._method("fs_list")(payload)
-
-    def fs_mkdir(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._method("fs_mkdir")(payload)
-
-    def upload_sha1_reuse(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._method("upload_sha1_reuse")(payload)
-
-
-def clear_p123_client_cache() -> None:
-    with P123_CLIENT_LOCK:
-        P123_CLIENT_CACHE.update({"key": "", "client": None})
+def pansave_proxy(proxy_url: str) -> Optional[dict[str, Any]]:
+    value = str(proxy_url or "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value if "://" in value else f"http://{value}")
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https", "socks4", "socks5"):
+        raise HTTPException(400, "Telegram 代理仅支持 HTTP、SOCKS4 或 SOCKS5")
+    if not parsed.hostname or not parsed.port:
+        raise HTTPException(400, "Telegram 代理格式无效，请填写协议、地址和端口")
+    proxy: dict[str, Any] = {
+        "proxy_type": "http" if scheme == "https" else scheme,
+        "addr": parsed.hostname,
+        "port": parsed.port,
+        "rdns": True,
+    }
+    if parsed.username:
+        proxy["username"] = parsed.username
+    if parsed.password:
+        proxy["password"] = parsed.password
+    return proxy
 
 
-def p123_login_settings() -> tuple[str, str, str, str]:
-    with db() as connection:
-        passport = setting(connection, "p123_passport")
-        password_cipher = setting(connection, "p123_password_cipher")
-        client_id = setting(connection, "p123_client_id")
-        client_secret = setting(connection, "p123_client_secret")
-    password = decrypt_secret(password_cipher) if password_cipher else ""
-    return passport, password, client_id, client_secret
-
-
-def p123_is_configured(connection: sqlite3.Connection) -> bool:
-    return bool(
-        (
-            setting(connection, "p123_passport")
-            and setting(connection, "p123_password_cipher")
-        )
-        or (
-            setting(connection, "p123_client_id")
-            and setting(connection, "p123_client_secret")
-        )
+def pansave_client(
+    api_id: int,
+    api_hash: str,
+    session_string: str = "",
+    proxy_url: str = "",
+) -> Any:
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+    except ImportError as error:
+        raise HTTPException(503, "当前镜像缺少 Telegram 用户会话依赖") from error
+    return TelegramClient(
+        StringSession(session_string),
+        api_id,
+        api_hash,
+        proxy=pansave_proxy(proxy_url),
+        receive_updates=False,
+        auto_reconnect=False,
+        connection_retries=2,
+        request_retries=2,
+        timeout=15,
     )
 
 
-def p123_client():
+def pansave_login_settings() -> dict[str, Any]:
+    with db() as connection:
+        api_id_text = setting(connection, "pansave_telegram_api_id")
+        api_hash_cipher = setting(connection, "pansave_telegram_api_hash_cipher")
+        session_cipher = setting(connection, "pansave_telegram_session_cipher")
+        return {
+            "api_id": int(api_id_text or 0),
+            "api_hash": decrypt_secret(api_hash_cipher) if api_hash_cipher else "",
+            "phone": setting(connection, "pansave_telegram_phone"),
+            "session": decrypt_secret(session_cipher) if session_cipher else "",
+            "bot_username": setting(connection, "pansave_bot_username") or "pansavenb_bot",
+            "proxy_url": setting(connection, "pansave_telegram_proxy"),
+        }
+
+
+def clean_pansave_bot_username(value: Any) -> str:
+    username = str(value or "pansavenb_bot").strip().lstrip("@")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
+        raise HTTPException(400, "PanSave 机器人用户名格式无效")
+    return username
+
+
+async def pansave_send_link(share_url: str) -> dict[str, Any]:
+    url = str(share_url or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        raise HTTPException(400, "资源链接格式无效")
+    settings = pansave_login_settings()
+    if not (
+        settings["api_id"]
+        and settings["api_hash"]
+        and settings["phone"]
+        and settings["session"]
+    ):
+        raise HTTPException(503, "管理员尚未完成 PanSave Telegram 用户账号登录")
+    client = pansave_client(
+        settings["api_id"],
+        settings["api_hash"],
+        settings["session"],
+        settings["proxy_url"],
+    )
     try:
-        from p123client import P123Client, P123OpenClient
-    except ImportError as error:
-        raise HTTPException(503, "当前镜像缺少 p123client") from error
-    passport, password, client_id, client_secret = p123_login_settings()
-    if passport and password:
-        mode = "account"
-        cache_key = hashlib.sha256(
-            f"{DB_PATH}|{mode}|{passport}|{password}".encode()
-        ).hexdigest()
-        factory = lambda: P123CloudClient(P123Client(passport, password), True)
-        error_label = "123账号登录失败"
-    elif client_id and client_secret:
-        mode = "open"
-        cache_key = hashlib.sha256(
-            f"{DB_PATH}|{mode}|{client_id}|{client_secret}".encode()
-        ).hexdigest()
-        factory = lambda: P123CloudClient(
-            P123OpenClient(client_id, client_secret),
-            False,
-        )
-        error_label = "123开放平台登录失败"
-    else:
-        raise HTTPException(503, "请先配置123登录手机号和密码")
-    with P123_CLIENT_LOCK:
-        if (
-            P123_CLIENT_CACHE["key"] == cache_key
-            and P123_CLIENT_CACHE["client"] is not None
-        ):
-            return P123_CLIENT_CACHE["client"]
-        try:
-            client = factory()
-        except Exception as error:
-            raise HTTPException(502, f"{error_label}：{error}") from error
-        P123_CLIENT_CACHE.update({"key": cache_key, "client": client})
-        return client
-
-
-def p123_response_data(payload: dict[str, Any], label: str) -> dict[str, Any]:
-    code = payload.get("code", payload.get("Code", 0))
-    if code not in (0, "0", None):
-        message = (
-            payload.get("message")
-            or payload.get("msg")
-            or payload.get("Message")
-            or f"错误码 {code}"
-        )
-        raise HTTPException(502, f"{label}：{message}")
-    data = payload.get("data", payload.get("Data", {}))
-    return data if isinstance(data, dict) else {}
-
-
-def p123_call(label: str, method: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
-    global P123_LAST_CALL_AT
-    try:
-        with P123_API_LOCK:
-            delay = 1.05 - (time.monotonic() - P123_LAST_CALL_AT)
-            if delay > 0:
-                time.sleep(delay)
-            result = method(*args, **kwargs)
-            P123_LAST_CALL_AT = time.monotonic()
-        if not isinstance(result, dict):
-            raise RuntimeError("123返回了无效响应")
-        return result
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise HTTPException(401, "PanSave Telegram 用户会话已失效，请重新登录")
+        bot_username = clean_pansave_bot_username(settings["bot_username"])
+        message = await client.send_message(bot_username, url)
+        return {
+            "bot_username": bot_username,
+            "message_id": int(getattr(message, "id", 0) or 0),
+        }
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(502, f"{label}：{error}") from error
-
-
-def p123_file_id(data: dict[str, Any]) -> int:
-    for key in ("fileID", "fileId", "FileId", "dirID", "dirId"):
-        try:
-            value = int(data.get(key) or 0)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return 0
-
-
-def p123_list_items(data: dict[str, Any]) -> list[dict[str, Any]]:
-    for key in ("fileList", "FileList", "list", "items"):
-        value = data.get(key)
-        if isinstance(value, list):
-            return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def p123_item_name(item: dict[str, Any]) -> str:
-    return str(item.get("filename") or item.get("fileName") or item.get("name") or "")
-
-
-def p123_item_id(item: dict[str, Any]) -> int:
-    return p123_file_id(item)
-
-
-def p123_safe_name(value: Any, fallback: str = "未命名") -> str:
-    name = re.sub(r'["\\/:*?|><]+', "_", str(value or "").strip())
-    return (name or fallback)[:240]
-
-
-def p123_ensure_folder(
-    client: Any,
-    parent_id: int,
-    name: str,
-) -> int:
-    safe_name = p123_safe_name(name, "文件夹")
-    listed = p123_call(
-        "读取123目录失败",
-        client.fs_list,
-        {
-            "parentFileId": parent_id,
-            "searchData": safe_name,
-            "searchMode": 1,
-            "limit": 100,
-        },
-    )
-    for item in p123_list_items(p123_response_data(listed, "读取123目录失败")):
-        if p123_item_name(item) == safe_name and p123_item_id(item):
-            return p123_item_id(item)
-    created = p123_call(
-        "创建123目录失败",
-        client.fs_mkdir,
-        {"name": safe_name, "parentID": parent_id},
-    )
-    folder_id = p123_file_id(p123_response_data(created, "创建123目录失败"))
-    if not folder_id:
-        raise HTTPException(502, "123创建目录后没有返回目录ID")
-    return folder_id
-
-
-def update_p123_job(job_id: str, **values: Any) -> None:
-    allowed = {
-        "status", "total_files", "success_files", "failed_files",
-        "skipped_files", "message",
-    }
-    fields = [key for key in values if key in allowed]
-    if not fields:
-        return
-    assignments = ", ".join(f"{key} = ?" for key in fields)
-    params = [values[key] for key in fields]
-    params.extend((now_iso(), job_id))
-    with db() as connection:
-        connection.execute(
-            f"UPDATE p123_transfer_jobs SET {assignments}, updated_at = ? WHERE id = ?",
-            params,
-        )
-
-
-def p123_job_row(job_id: str) -> Optional[sqlite3.Row]:
-    with db() as connection:
-        return connection.execute(
-            "SELECT * FROM p123_transfer_jobs WHERE id = ?",
-            (job_id,),
-        ).fetchone()
-
-
-def serialize_p123_job(row: sqlite3.Row) -> dict[str, Any]:
-    item = dict(row)
-    item.pop("share_url", None)
-    item["episode_numbers"] = json.loads(item.pop("episode_numbers_json") or "[]")
-    return item
-
-
-def run_p123_transfer_job(job_id: str) -> None:
-    row = p123_job_row(job_id)
-    if not row:
-        return
-    job = dict(row)
-    job["episode_numbers"] = json.loads(job.get("episode_numbers_json") or "[]")
-    update_p123_job(job_id, status="running", message="正在读取115分享目录")
-    succeeded = 0
-    failed = 0
-    skipped = 0
-    try:
-        source_client = p115_client()
-        items = p115_share_tree(
-            source_client,
-            job["share_url"],
-            max_depth=16,
-        )
-        files = [item for item in items if not item.get("_share_is_dir")]
-        if not files:
-            raise HTTPException(502, "115分享中没有找到文件")
-        if len(files) > 2000:
-            raise HTTPException(400, "单次最多处理2000个文件，请拆分分享后重试")
-        update_p123_job(
-            job_id,
-            total_files=len(files),
-            message=f"已读取 {len(files)} 个文件，开始向123请求秒传",
-        )
-        target_client = p123_client()
-        target_id = int(job.get("target_id") or 0)
-        folder_ids: dict[tuple[str, ...], int] = {(): target_id}
-        for index, item in enumerate(files, start=1):
-            path = tuple(
-                p123_safe_name(part, "文件夹")
-                for part in item.get("_share_path", ())
-                if str(part or "").strip()
-            )
-            parent_path = path[:-1]
-            current_path: tuple[str, ...] = ()
-            for part in parent_path:
-                next_path = (*current_path, part)
-                if next_path not in folder_ids:
-                    folder_ids[next_path] = p123_ensure_folder(
-                        target_client,
-                        folder_ids[current_path],
-                        part,
-                    )
-                current_path = next_path
-            sha1 = p115_share_item_sha1(item)
-            size = p115_share_item_size(item)
-            filename = p123_safe_name(path[-1] if path else item.get("_share_name"), "未命名文件")
-            if not sha1 or size <= 0:
-                skipped += 1
-            else:
-                try:
-                    result = p123_call(
-                        f"秒传 {filename} 失败",
-                        target_client.upload_sha1_reuse,
-                        {
-                            "sha1": sha1,
-                            "size": size,
-                            "filename": filename,
-                            "parentFileID": folder_ids.get(parent_path, target_id),
-                            "duplicate": 1,
-                        },
-                    )
-                    data = p123_response_data(result, f"秒传 {filename} 失败")
-                    if bool(data.get("reuse", data.get("Reuse", False))):
-                        succeeded += 1
-                    else:
-                        failed += 1
-                except HTTPException:
-                    failed += 1
-            update_p123_job(
-                job_id,
-                success_files=succeeded,
-                failed_files=failed,
-                skipped_files=skipped,
-                message=f"正在处理 {index}/{len(files)}",
-            )
-        status = "success" if succeeded and not failed and not skipped else "partial"
-        if not succeeded:
-            status = "failed"
-        message = (
-            f"123秒传完成：成功 {succeeded}，未命中 {failed}，缺少SHA1/大小 {skipped}"
-        )
-        update_p123_job(job_id, status=status, message=message)
-        if succeeded:
-            record_transfer(
-                user_id=int(job["user_id"]),
-                source=f"{job['source']}:p123",
-                resource_key=str(job["resource_key"]),
-                tmdb_id=int(job.get("tmdb_id") or 0),
-                transfer_scope="manual",
-                status="success",
-                detail=message,
-                season_number=int(job.get("season_number") or 0),
-                episode_numbers=list(job.get("episode_numbers") or []),
-            )
-        send_notifications(
-            f"{'⚡' if succeeded else '❌'} 115 → 123 秒传"
-            f"{'完成' if succeeded else '失败'}\n\n"
-            f"{job.get('title') or '资源'}\n{message}"
-        )
-    except Exception as error:
-        message = str(error.detail) if isinstance(error, HTTPException) else str(error)
-        update_p123_job(job_id, status="failed", message=message or "123秒传失败")
-        send_notifications(
-            f"❌ 115 → 123 秒传失败\n\n"
-            f"{job.get('title') or '资源'}\n原因：{message or '未知错误'}"
-        )
-
-
-def process_p123_jobs_once() -> None:
-    if not P123_WORKER_LOCK.acquire(blocking=False):
-        return
-    try:
-        while True:
-            with db() as connection:
-                row = connection.execute(
-                    "SELECT id FROM p123_transfer_jobs "
-                    "WHERE status = 'queued' ORDER BY created_at LIMIT 1"
-                ).fetchone()
-                if not row:
-                    return
-                connection.execute(
-                    "UPDATE p123_transfer_jobs SET status = 'running', "
-                    "message = '正在启动任务', updated_at = ? "
-                    "WHERE id = ? AND status = 'queued'",
-                    (now_iso(), row["id"]),
-                )
-            run_p123_transfer_job(str(row["id"]))
+        raise HTTPException(502, f"发送给 PanSave 失败：{error}") from error
     finally:
-        P123_WORKER_LOCK.release()
+        await client.disconnect()
 
 
-def p123_worker_loop() -> None:
-    while True:
-        try:
-            process_p123_jobs_once()
-        except Exception:
-            pass
-        time.sleep(5)
-
-
-def queue_p123_transfer(
+async def deliver_to_pansave(
     *,
-    user: sqlite3.Row,
+    user: dict[str, Any],
     share_url: str,
     source: str,
     resource_key: str,
@@ -1439,47 +1142,28 @@ def queue_p123_transfer(
     season_number: int = 0,
     episode_numbers: Optional[list[int]] = None,
 ) -> dict[str, Any]:
-    if not is_115_share_url(share_url):
-        raise HTTPException(400, "123秒传仅支持115分享链接")
-    p115_client()
-    with db() as connection:
-        if not p123_is_configured(connection):
-            raise HTTPException(503, "管理员尚未配置123云盘账号")
-        target = connection.execute(
-            "SELECT storage_destination "
-            "FROM users WHERE id = ?",
-            (int(user["id"]),),
-        ).fetchone()
-        if not target or target["storage_destination"] != "p123":
-            raise HTTPException(403, "当前账号没有分配123转存目标")
-        target_id = int(setting(connection, "p123_target_id") or 0)
-        target_name = setting(connection, "p123_target_name") or "根目录"
-    job_id = secrets.token_urlsafe(18)
-    timestamp = now_iso()
-    with db() as connection:
-        connection.execute(
-            "INSERT INTO p123_transfer_jobs("
-            "id, user_id, share_url, source, resource_key, title, tmdb_id, "
-            "season_number, episode_numbers_json, target_id, target_name, "
-            "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                job_id, int(user["id"]), share_url, source, resource_key,
-                title, tmdb_id, season_number,
-                json.dumps(episode_numbers or [], ensure_ascii=False),
-                target_id, target_name, timestamp, timestamp,
-            ),
-        )
-    Thread(
-        target=process_p123_jobs_once,
-        name="p123-transfer-worker",
-        daemon=True,
-    ).start()
+    result = await pansave_send_link(share_url)
+    message = "资源链接已发送给 PanSave 机器人"
+    record_transfer(
+        user_id=int(user["id"]),
+        source=source,
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        transfer_scope="manual",
+        status="success",
+        detail=message,
+        season_number=season_number,
+        episode_numbers=episode_numbers or [],
+    )
+    send_notifications(
+        f"📨 资源已提交 PanSave\n\n"
+        f"{title or '资源'} · {user['display_name']}\n"
+        f"已发送给 @{result['bot_username']}"
+    )
     return {
         "ok": True,
-        "mode": "p123",
-        "job_id": job_id,
-        "status": "queued",
-        "message": "已提交115 → 123秒传任务",
+        "mode": "pansave",
+        "message": message,
     }
 
 
@@ -2916,7 +2600,7 @@ def session_user(token: Optional[str]) -> Optional[dict[str, Any]]:
     with db() as connection:
         row = connection.execute(
             "SELECT u.id, u.username, u.display_name, u.role, u.active, "
-            "u.storage_destination, u.p123_target_id, u.p123_target_name "
+            "u.storage_destination "
             "FROM sessions s JOIN users u ON u.id = s.user_id "
             "WHERE s.token_hash = ? AND s.expires_at > ?",
             (token_hash, now_iso()),
@@ -3236,7 +2920,7 @@ def sync_emby_requests(
                 )
         for row in rows:
             send_notifications(
-                f"✅ 入库完成 · {'123' if current == 'p123' else '115'} Emby\n\n"
+                f"✅ 入库完成 · {'PanSave 对应' if current == 'p123' else '115'} Emby\n\n"
                 f"{row['title']} ({row['year']})\n申请人：{row['display_name']}"
             )
         updated += len(rows)
@@ -4271,6 +3955,11 @@ def auto_replenish_hdhive_follow(
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not follow:
         return {"transferred": [], "message": "追更已停止"}
+    if follow["storage_destination"] == "p123":
+        return {
+            "transferred": [],
+            "message": "PanSave 模式只在手动选中资源时发送链接，不自动补集",
+        }
 
     tmdb_id = int(follow["tmdb_id"])
     progress = destination_episode_progress(
@@ -4653,7 +4342,6 @@ def startup() -> None:
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
-    Thread(target=p123_worker_loop, name="p123-transfer-scheduler", daemon=True).start()
 
 
 @APP.get("/")
@@ -5971,7 +5659,7 @@ async def hdhive_transfer(
     wanted_episodes = set(title_spec["episode_numbers"])
     selected_episode_numbers = sorted(wanted_episodes)
     if user.get("storage_destination") == "p123":
-        return queue_p123_transfer(
+        return await deliver_to_pansave(
             user=user,
             share_url=share_url,
             source="hdhive",
@@ -6087,7 +5775,7 @@ async def dian_transfer(
         )
     share_url = links[0]
     if user.get("storage_destination") == "p123":
-        return queue_p123_transfer(
+        return await deliver_to_pansave(
             user=user,
             share_url=share_url,
             source="dian",
@@ -6327,8 +6015,8 @@ def list_users(movie_session: Optional[str] = Cookie(default=None)) -> dict[str,
     require_admin(movie_session)
     with db() as connection:
         rows = connection.execute(
-            "SELECT id, username, display_name, role, active, storage_destination, "
-            "p123_target_id, p123_target_name, created_at "
+            "SELECT id, username, display_name, role, active, "
+            "storage_destination, created_at "
             "FROM users ORDER BY role, created_at"
         ).fetchall()
     return {"users": [dict(row) for row in rows]}
@@ -6345,19 +6033,14 @@ async def create_user(request: Request, movie_session: Optional[str] = Cookie(de
     if storage_destination not in ("p115", "p123"):
         raise HTTPException(400, "转存目标无效")
     try:
-        p123_target_id = max(0, int(payload.get("p123_target_id") or 0))
-    except (TypeError, ValueError) as error:
-        raise HTTPException(400, "123目标目录ID无效") from error
-    p123_target_name = str(payload.get("p123_target_name") or "根目录").strip()[:200]
-    try:
         with db() as connection:
             connection.execute(
                 "INSERT INTO users(username, display_name, password_hash, role, "
-                "storage_destination, p123_target_id, p123_target_name, created_at) "
-                "VALUES(?, ?, ?, 'member', ?, ?, ?, ?)",
+                "storage_destination, created_at) "
+                "VALUES(?, ?, ?, 'member', ?, ?)",
                 (
                     username, display_name, hash_password(password),
-                    storage_destination, p123_target_id, p123_target_name, now_iso(),
+                    storage_destination, now_iso(),
                 ),
             )
     except sqlite3.IntegrityError as error:
@@ -6390,17 +6073,6 @@ async def update_user(user_id: int, request: Request, movie_session: Optional[st
             raise HTTPException(400, "转存目标无效")
         fields.append("storage_destination = ?")
         values.append(destination)
-    if "p123_target_id" in payload:
-        try:
-            target_id = max(0, int(payload["p123_target_id"] or 0))
-        except (TypeError, ValueError) as error:
-            raise HTTPException(400, "123目标目录ID无效") from error
-        fields.append("p123_target_id = ?")
-        values.append(target_id)
-    if "p123_target_name" in payload:
-        target_name = str(payload["p123_target_name"] or "根目录").strip()[:200]
-        fields.append("p123_target_name = ?")
-        values.append(target_name or "根目录")
     password_changed = False
     if payload.get("password"):
         fields.append("password_hash = ?")
@@ -6464,12 +6136,21 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
-        p123_passport = setting(connection, "p123_passport")
-        p123_password_cipher = setting(connection, "p123_password_cipher")
-        p123_client_id = setting(connection, "p123_client_id")
-        p123_client_secret = setting(connection, "p123_client_secret")
-        p123_target_id = setting(connection, "p123_target_id") or "0"
-        p123_target_name = setting(connection, "p123_target_name") or "根目录"
+        pansave_api_id = setting(connection, "pansave_telegram_api_id")
+        pansave_api_hash_cipher = setting(
+            connection, "pansave_telegram_api_hash_cipher"
+        )
+        pansave_phone = setting(connection, "pansave_telegram_phone")
+        pansave_session_cipher = setting(
+            connection, "pansave_telegram_session_cipher"
+        )
+        pansave_authorized = (
+            setting(connection, "pansave_telegram_authorized") == "1"
+        )
+        pansave_bot_username = (
+            setting(connection, "pansave_bot_username") or "pansavenb_bot"
+        )
+        pansave_proxy_url = setting(connection, "pansave_telegram_proxy")
         wecom_corp_id = setting(connection, "wecom_corp_id")
         wecom_agent_id = setting(connection, "wecom_agent_id")
         wecom_secret = setting(connection, "wecom_secret")
@@ -6504,23 +6185,15 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p115_configured": p115_cookie_path().exists(),
         "p115_target_cid": p115_target_cid,
         "p115_target_name": p115_target_name,
-        "p123_configured": bool(
-            (p123_passport and p123_password_cipher)
-            or (p123_client_id and p123_client_secret)
+        "pansave_configured": bool(
+            pansave_api_id and pansave_api_hash_cipher and pansave_phone
         ),
-        "p123_auth_mode": (
-            "password"
-            if p123_passport and p123_password_cipher
-            else "open"
-            if p123_client_id and p123_client_secret
-            else ""
-        ),
-        "p123_passport": p123_passport,
-        "p123_password_configured": bool(p123_password_cipher),
-        "p123_legacy_open_configured": bool(p123_client_id and p123_client_secret),
-        "p123_client_id": p123_client_id,
-        "p123_target_id": p123_target_id,
-        "p123_target_name": p123_target_name,
+        "pansave_connected": bool(pansave_session_cipher and pansave_authorized),
+        "pansave_telegram_api_id": pansave_api_id,
+        "pansave_telegram_api_hash_configured": bool(pansave_api_hash_cipher),
+        "pansave_telegram_phone": pansave_phone,
+        "pansave_bot_username": pansave_bot_username,
+        "pansave_telegram_proxy": pansave_proxy_url,
         "wecom_configured": bool(wecom_corp_id and wecom_agent_id and wecom_secret),
         "wecom_callback_configured": bool(callback_token and encoding_key),
         "wecom_corp_id": wecom_corp_id,
@@ -6546,19 +6219,6 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             raise HTTPException(400, "签到时间格式无效") from error
     if payload.get("p115_app") and payload["p115_app"] not in P115_APPS:
         raise HTTPException(400, "不支持这个115设备身份")
-    if payload.get("p123_passport"):
-        passport = str(payload["p123_passport"]).strip()
-        if not (
-            re.fullmatch(r"\+?\d{6,20}", passport)
-            or re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", passport)
-        ):
-            raise HTTPException(400, "请输入正确的123登录手机号或邮箱")
-    if "p123_target_id" in payload:
-        try:
-            if int(str(payload["p123_target_id"]).strip() or "0") < 0:
-                raise ValueError
-        except ValueError as error:
-            raise HTTPException(400, "123目标目录ID无效") from error
     if payload.get("wecom_agent_id"):
         try:
             if int(str(payload["wecom_agent_id"])) <= 0:
@@ -6575,26 +6235,16 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
-            "p115_target_cid", "p115_target_name", "p123_passport",
-            "p123_target_id", "p123_target_name",
-            "p123_client_id",
-            "p123_client_secret", "wecom_corp_id", "wecom_agent_id",
+            "p115_target_cid", "p115_target_name",
+            "wecom_corp_id", "wecom_agent_id",
             "wecom_secret", "wecom_to_user", "wecom_api_base",
             "wecom_admin_userid", "wecom_callback_token",
             "wecom_encoding_aes_key", "site_public_url",
         ):
             if key in payload and str(payload[key]).strip():
                 set_setting(connection, key, payload[key])
-        if payload.get("p123_password"):
-            set_setting(
-                connection,
-                "p123_password_cipher",
-                encrypt_secret(str(payload["p123_password"])),
-            )
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
-    if "p123_passport" in payload or payload.get("p123_password"):
-        clear_p123_client_cache()
     configure_telegram_menu()
     configure_wecom_menu()
     return {"ok": True}
@@ -6712,83 +6362,155 @@ def integration_status(movie_session: Optional[str] = Cookie(default=None)) -> d
     }
 
 
-@APP.post("/api/admin/p123/test")
-def p123_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    started = time.perf_counter()
-    client = p123_client()
-    result = p123_call("测试123连接失败", client.fs_list, {"parentFileId": 0, "limit": 1})
-    p123_response_data(result, "测试123连接失败")
-    return {
-        "ok": True,
-        "latency_ms": round((time.perf_counter() - started) * 1000),
-        "message": "123云盘账号登录正常",
-    }
-
-
-@APP.get("/api/admin/p123/folders")
-def p123_folders(
-    parent_id: int = 0,
-    movie_session: Optional[str] = Cookie(default=None),
-) -> dict[str, Any]:
-    require_admin(movie_session)
-    client = p123_client()
-    result = p123_call(
-        "读取123目录失败",
-        client.fs_list,
-        {"parentFileId": max(0, parent_id), "limit": 100},
-    )
-    items = p123_list_items(p123_response_data(result, "读取123目录失败"))
-    folders = []
-    for item in items:
-        item_id = p123_item_id(item)
-        kind = item.get("type", item.get("Type", item.get("isDir")))
-        if item_id and (kind in (1, "1", True) or str(kind).lower() in ("folder", "dir")):
-            folders.append({"id": item_id, "name": p123_item_name(item)})
-    return {"folders": folders}
-
-
-@APP.post("/api/admin/p123/transfer")
-async def p123_manual_transfer(
+@APP.post("/api/admin/pansave/login/start")
+async def pansave_login_start(
     request: Request,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
-    user = require_admin(movie_session)
+    require_admin(movie_session)
     payload = await request.json()
-    share_url = str(payload.get("share_url") or "").strip()
-    return queue_p123_transfer(
-        user=user,
-        share_url=share_url,
-        source="manual",
-        resource_key=hashlib.sha256(share_url.encode()).hexdigest()[:24],
-        title=str(payload.get("title") or "管理员手动秒传"),
-    )
+    try:
+        api_id = int(str(payload.get("api_id") or "").strip())
+    except ValueError as error:
+        raise HTTPException(400, "Telegram API ID 必须是数字") from error
+    api_hash = str(payload.get("api_hash") or "").strip()
+    phone = re.sub(r"[\s()-]+", "", str(payload.get("phone") or ""))
+    bot_username = clean_pansave_bot_username(payload.get("bot_username"))
+    proxy_url = str(payload.get("proxy_url") or "").strip()
+    if api_id <= 0:
+        raise HTTPException(400, "Telegram API ID 无效")
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash):
+        raise HTTPException(400, "Telegram API Hash 应为32位字符")
+    if not re.fullmatch(r"\+\d{6,20}", phone):
+        raise HTTPException(400, "Telegram 手机号需包含国家区号，例如 +8613800138000")
+    pansave_proxy(proxy_url)
+    client = pansave_client(api_id, api_hash, "", proxy_url)
+    try:
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        session_string = client.session.save()
+    except Exception as error:
+        raise HTTPException(502, f"Telegram 验证码发送失败：{error}") from error
+    finally:
+        await client.disconnect()
+    with db() as connection:
+        set_setting(connection, "pansave_telegram_api_id", str(api_id))
+        set_setting(
+            connection,
+            "pansave_telegram_api_hash_cipher",
+            encrypt_secret(api_hash),
+        )
+        set_setting(connection, "pansave_telegram_phone", phone)
+        set_setting(
+            connection,
+            "pansave_telegram_session_cipher",
+            encrypt_secret(session_string),
+        )
+        set_setting(
+            connection,
+            "pansave_telegram_phone_code_hash_cipher",
+            encrypt_secret(str(sent.phone_code_hash)),
+        )
+        set_setting(connection, "pansave_bot_username", bot_username)
+        set_setting(connection, "pansave_telegram_proxy", proxy_url)
+        set_setting(connection, "pansave_telegram_authorized", "0")
+    return {"ok": True, "message": "验证码已发送到 Telegram"}
 
 
-@APP.get("/api/p123/jobs/{job_id}")
-def p123_job_status(
-    job_id: str,
+@APP.post("/api/admin/pansave/login/verify")
+async def pansave_login_verify(
+    request: Request,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
-    user = require_user(movie_session)
-    job = p123_job_row(job_id)
-    if not job:
-        raise HTTPException(404, "没有找到这个秒传任务")
-    if user["role"] != "admin" and int(job["user_id"]) != int(user["id"]):
-        raise HTTPException(403, "无权查看这个秒传任务")
-    return serialize_p123_job(job)
-
-
-@APP.get("/api/admin/p123/jobs")
-def p123_jobs(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
+    payload = await request.json()
+    code = re.sub(r"\D", "", str(payload.get("code") or ""))
+    password = str(payload.get("password") or "")
+    if not re.fullmatch(r"\d{4,8}", code):
+        raise HTTPException(400, "请输入 Telegram 验证码")
     with db() as connection:
-        rows = connection.execute(
-            "SELECT j.*, u.display_name, u.username "
-            "FROM p123_transfer_jobs j JOIN users u ON u.id = j.user_id "
-            "ORDER BY j.created_at DESC LIMIT 50"
-        ).fetchall()
-    return {"jobs": [serialize_p123_job(row) for row in rows]}
+        code_hash_cipher = setting(
+            connection, "pansave_telegram_phone_code_hash_cipher"
+        )
+    settings = pansave_login_settings()
+    if not code_hash_cipher or not settings["session"]:
+        raise HTTPException(409, "请先发送 Telegram 验证码")
+    client = pansave_client(
+        settings["api_id"],
+        settings["api_hash"],
+        settings["session"],
+        settings["proxy_url"],
+    )
+    try:
+        from telethon.errors import SessionPasswordNeededError
+        await client.connect()
+        try:
+            await client.sign_in(
+                phone=settings["phone"],
+                code=code,
+                phone_code_hash=decrypt_secret(code_hash_cipher),
+            )
+        except SessionPasswordNeededError:
+            if not password:
+                raise HTTPException(409, "该账号已开启两步验证，请填写 Telegram 密码")
+            await client.sign_in(password=password)
+        if not await client.is_user_authorized():
+            raise HTTPException(401, "Telegram 登录未完成")
+        me = await client.get_me()
+        session_string = client.session.save()
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"Telegram 登录验证失败：{error}") from error
+    finally:
+        await client.disconnect()
+    with db() as connection:
+        set_setting(
+            connection,
+            "pansave_telegram_session_cipher",
+            encrypt_secret(session_string),
+        )
+        set_setting(connection, "pansave_telegram_authorized", "1")
+        connection.execute(
+            "DELETE FROM settings WHERE key = "
+            "'pansave_telegram_phone_code_hash_cipher'"
+        )
+    display = (
+        f"@{me.username}" if getattr(me, "username", None)
+        else str(getattr(me, "first_name", "") or settings["phone"])
+    )
+    return {"ok": True, "message": f"Telegram 用户账号已登录：{display}"}
+
+
+@APP.post("/api/admin/pansave/test")
+async def pansave_test(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    settings = pansave_login_settings()
+    if not settings["session"]:
+        raise HTTPException(503, "尚未登录 Telegram 用户账号")
+    client = pansave_client(
+        settings["api_id"],
+        settings["api_hash"],
+        settings["session"],
+        settings["proxy_url"],
+    )
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise HTTPException(401, "Telegram 用户会话已失效，请重新登录")
+        bot = await client.get_entity(
+            clean_pansave_bot_username(settings["bot_username"])
+        )
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(502, f"无法找到 PanSave 机器人：{error}") from error
+    finally:
+        await client.disconnect()
+    username = str(getattr(bot, "username", "") or settings["bot_username"])
+    return {"ok": True, "message": f"Telegram 会话正常，已找到 @{username}"}
 
 
 @APP.post("/api/admin/p115/qrcode")
@@ -6954,7 +6676,7 @@ def wecom_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str,
     require_admin(movie_session)
     if not send_wecom(
         "✅ 映单：企业微信通知测试成功\n\n"
-        "115/123 转存结果与对应 Emby 入库结果都会同步通知。"
+        "115转存、PanSave链接投递与对应 Emby 入库结果都会同步通知。"
     ):
         raise HTTPException(502, "企业微信发送失败，请检查 CorpID、AgentID、Secret 和转发地址")
     return {"ok": True}

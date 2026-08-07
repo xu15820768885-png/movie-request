@@ -453,7 +453,7 @@
         <div class="hero-stamp">精准匹配影片资料<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
-      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。第 1 步：手动选择满意版本并转存。115账号的家人可以直接转存到已选定的 115 文件夹，123账号会进入后台秒传队列。</div>
+      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。手动选择满意版本后，115账号直接转存，PanSave账号只把解锁链接发送给机器人。</div>
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
@@ -473,12 +473,12 @@
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
-        <div class="section-head"><div><h2>影巢、癫影、115 与 123</h2><span>资源可转存到115，也可用SHA1直接秒传到123</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
+        <div class="section-head"><div><h2>影巢、癫影、115 与 PanSave</h2><span>115账号直接转存；PanSave账号把解锁链接发送给机器人处理</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
         <div class="integration-status">
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>癫影 OpenAPI</div><div id="dianStatus" class="status-value">待配置</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>115 账号</div><div id="p115Status" class="status-value">待扫码</div></div>
-          <div class="status-card"><div class="status-label"><span class="status-dot"></span>123 云盘账号</div><div id="p123Status" class="status-value">待配置</div></div>
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>PanSave 投递</div><div id="pansaveStatus" class="status-value">待配置</div></div>
         </div>
         <section class="panel" style="margin-bottom:18px">
           <div class="section-head" style="margin:0"><div><h3>接口速度检测</h3><span>分别检测三条外部线路；某一项失败不会影响另外两项重试</span></div><button id="testAllIntegrations" class="btn" type="button">全部测速</button></div>
@@ -524,32 +524,19 @@
             <div id="folderPicker" class="folder-picker hidden"></div>
           </section>
         </div>
-        <form id="p123Form" class="panel stack" style="margin-top:18px">
-          <div class="section-head" style="margin:0"><div><h3>123 云盘</h3><span>登录一次并选择统一目录，所有123成员都转存到这里</span></div></div>
-          <div class="integration-grid">
-            <div class="resource-source-column stack">
-              <div class="section-head" style="margin:0"><div><h3>123账号登录</h3><span>使用123账号的手机号和密码</span></div><button id="p123Test" class="btn btn-small" type="button">测试登录</button></div>
-              <label>登录手机号<input id="p123Passport" inputmode="tel" autocomplete="username" placeholder="123云盘登录手机号"></label>
-              <label>登录密码<input id="p123Password" type="password" autocomplete="current-password" placeholder="已保存时留空不修改"></label>
-              <div class="integration-actions"><button class="btn btn-primary" type="submit">保存123登录</button></div>
-            </div>
-            <section class="resource-source-column">
-              <h3>123 转存设置</h3>
-              <div class="integration-label">所有123成员的资源统一转存到</div>
-              <div id="selectedP123FolderPath" class="folder-path">123云盘 / 根目录</div>
-              <div class="integration-actions"><button id="p123FolderSelect" class="btn" type="button">选择转存文件夹</button></div>
-              <div id="p123FolderPicker" class="folder-picker hidden"></div>
-            </section>
-          </div>
-          <div class="transfer-note">密码会加密保存在 NAS 并且不会回显。只有123云端已存在相同 SHA1 和大小的文件才会秒传成功；未命中会明确显示，不会偷偷下载到NAS再上传。</div>
+        <form id="pansaveForm" class="panel stack" style="margin-top:18px">
+          <div class="section-head" style="margin:0"><div><h3>PanSave · Telegram 用户账号</h3><span>仅用于把影巢解锁链接单向发送给 PanSave，不监听机器人消息</span></div><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
+          <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram API Hash<input id="pansaveApiHash" type="password" autocomplete="off" placeholder="登录时填写，不会回显"></label></div>
+          <div class="inline"><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label><label>PanSave 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label></div>
+          <label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890 或 socks5://地址:端口"></label>
+          <div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div>
+          <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="current-password"></label></div>
+          <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
+          <div class="transfer-note">API Hash、登录会话会加密保存在 NAS 的 /data 中。网站发送链接后立即断开 Telegram，不获取 PanSave 的转存进度或回复。</div>
         </form>
-        <section class="panel" style="margin-top:18px">
-          <div class="section-head" style="margin:0"><div><h3>123计划任务</h3><span>任务先保存到数据库，再由后台依次处理；服务重启会自动重新排队</span></div><button id="p123RefreshJobs" class="btn" type="button">刷新任务</button></div>
-          <div id="p123JobList" class="request-list"><div class="empty">还没有123转存任务</div></div>
-        </section>
-        <div class="transfer-note" style="margin-top:18px">OpenAPI Key、115 Cookie、123登录凭据和目标目录ID只保存在NAS的 /data 目录，不会进入网页或GitHub。</div>
+        <div class="transfer-note" style="margin-top:18px">影巢和癫影凭据、115 Cookie、Telegram 用户会话只保存在 NAS，不会进入网页或 GitHub。</div>
       </section>
-      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个账号只选择115或123；两种网盘都使用各自统一设置的转存目录</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">123云盘</option></select></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
+      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个账号选择115直转或发送给 PanSave</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">发送给 PanSave</option></select></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
       <section id="settingsView" class="view hidden">
         <div class="section-head"><div><h2>系统设置</h2><span>按分类查看和修改，不再需要翻完整个长页面</span></div><span>敏感信息只保存在 NAS，不会回显</span></div>
         <form id="settingsForm" class="settings-layout">
@@ -561,7 +548,7 @@
           </nav>
           <div class="settings-content">
             <section class="panel settings-panel" data-settings-content="media">
-              <div class="settings-panel-head"><h3>媒体与入库</h3><p>配置影片搜索，以及115账号和123账号各自对应的 Emby。</p></div>
+              <div class="settings-panel-head"><h3>媒体与入库</h3><p>配置影片搜索，以及115直转账号和 PanSave 账号各自对应的 Emby。</p></div>
               <div class="settings-group">
                 <h4>TMDB 搜索</h4>
                 <label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label>
@@ -575,13 +562,13 @@
                 <button id="embyTest" class="btn" type="button">测试 115 Emby</button>
               </div>
               <div class="settings-group">
-                <h4>123 对应 Emby</h4>
+                <h4>PanSave 账号对应 Emby</h4>
                 <label>Emby 地址<input id="settingsP123EmbyUrl" placeholder="例如：http://192.168.31.129:8097"></label>
                 <label>API 密钥<input id="settingsP123EmbyKey" type="password" placeholder="已保存时留空不修改"></label>
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
-                <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
+                <button id="p123EmbyTest" class="btn" type="button">测试 PanSave 对应 Emby</button>
               </div>
-              <div class="transfer-note">115账号只查询115对应 Emby 并转存115；123账号只查询123对应 Emby，并后台秒传到分配的123目录。</div>
+              <div class="transfer-note">115账号查询115对应 Emby 并直接转存；PanSave账号查询自己的 Emby，但网站只负责把资源链接发给机器人。</div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存媒体设置</button></div>
             </section>
             <section class="panel settings-panel hidden" data-settings-content="telegram">
@@ -879,7 +866,7 @@
       const followReady=Boolean(item.in_library||item.has_manual_transfer);
       const followLabel=item.hdhive_subscribed?'✓ 已追更':!followReady?'先转存，再追更':item.is_following?'重试追更':'下一步：开启追更';
       const followShortcut=followAvailable?`<button id="detailFollow" class="btn request-shortcut ${followReady&&!item.hdhive_subscribed?'btn-primary':''}" ${item.hdhive_subscribed||!followReady||item.hdhive_loading||!subscriptionResource?'disabled':''}>${item.hdhive_loading?'追更资源读取中':!subscriptionResource?'暂无追更资源':followLabel}</button>`:'';
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">选择满意版本后，系统会按当前账号配置自动转存到115或123。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'123云盘':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${followShortcut}${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">123账号的任务会进入后台队列；只有123已存在相同SHA1和大小的文件才会秒传成功。</div></section>`:'';
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">选择满意版本后，系统会按当前账号配置直转115或把链接发送给 PanSave。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'PanSave':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${followShortcut}${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">PanSave目标只发送解锁后的链接；后续处理由机器人完成，本站不监听结果。</div></section>`:'';
       $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${detailsNotice}${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
@@ -898,20 +885,6 @@
       const request=$('detailRequest'); if(request&&currentDetail)request.onclick=()=>submitRequest(currentDetail,request);
       const follow=$('detailFollow'); if(follow&&currentDetail){const resource=(currentDetail.hdhive_resources||[]).find(item=>item.slug);follow.onclick=()=>createFollow(currentDetail,follow,null,'',resource);}
     }
-    async function waitForP123Job(jobId,status,button) {
-      while(true){
-        await new Promise(resolve=>setTimeout(resolve,1500));
-        const job=await api(`/api/p123/jobs/${encodeURIComponent(jobId)}`);
-        const progress=job.total_files?`（${job.success_files+job.failed_files+job.skipped_files}/${job.total_files}）`:'';
-        status.textContent=`${job.message||'123秒传处理中'}${progress}`;
-        if(['success','partial','failed'].includes(job.status)){
-          if(job.status==='failed')throw new Error(job.message||'123秒传失败');
-          status.className=`resource-transfer-status ${job.status==='success'?'success':'error'}`;
-          button.textContent=job.status==='success'?'123秒传完成':'部分秒传完成';
-          return job;
-        }
-      }
-    }
     async function previewTransfer(resource,button,provider='dian') {
       const destination=currentUser?.storage_destination==='p123'?'p123':'p115';
       if(preview){button.disabled=true;button.textContent='已加入转存';markInitialTransferComplete();return toast(`《${currentDetail.title}》已转存；未完结剧集现在可以开启追更`);}
@@ -920,16 +893,15 @@
       const status=$('detailCard').querySelector(`[data-transfer-status="${provider}-${index}"]`);
       const originalLabel=button.textContent;
       button.disabled=true; button.textContent='转存中…';
-      if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'123':'115'}…`;}
+      if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'PanSave':'115'}…`;}
       try {
         const result=provider==='hdhive'
           ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
           : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})});
-        if(result.mode==='p123'&&result.job_id&&status)await waitForP123Job(result.job_id,status,button);
-        else button.textContent=result.mode==='offline'?'离线下载中':'已完成转存';
-        if(status&&!result.job_id){status.className='resource-transfer-status success';status.textContent=result.message||'115已确认创建任务';}
+        button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送 PanSave':'已完成转存';
+        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'115已确认创建任务';}
         markInitialTransferComplete();
-        toast(destination==='p123'?'123秒传任务已完成':currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
+        toast(destination==='p123'?(result.message||'资源链接已发送给 PanSave'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
       } catch(error) {
         button.disabled=false;button.textContent=originalLabel;
         if(status){status.className='resource-transfer-status error';status.textContent=error.message;}
@@ -1068,9 +1040,9 @@
     }
     async function loadUsers() {
       const users=preview
-        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115'},{id:3,username:'cloud123',display_name:'123专用',role:'member',active:1,storage_destination:'p123'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115'}]
+        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115'},{id:3,username:'pansave',display_name:'PanSave专用',role:'member',active:1,storage_destination:'p123'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115'}]
         : (await api('/api/admin/users')).users;
-      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)} · 转存到${user.storage_destination==='p123'?'123统一目录':'115统一目录'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><select data-user-destination="${user.id}" aria-label="固定转存目标"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>转存115</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>转存123</option></select><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button>`}</div></div>`).join('');
+      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)} · ${user.storage_destination==='p123'?'发送给 PanSave':'115直转'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><select data-user-destination="${user.id}" aria-label="固定转存目标"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>115直转</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>发送给 PanSave</option></select><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button>`}</div></div>`).join('');
       $('userList').querySelectorAll('[data-user-save]').forEach(button=>button.onclick=()=>saveUser(Number(button.dataset.userSave),button));
       $('userList').querySelectorAll('[data-user-delete]').forEach(button=>button.onclick=()=>deleteUser(Number(button.dataset.userDelete),button.dataset.userLabel,button));
     }
@@ -1089,24 +1061,6 @@
         await loadUsers();
       } catch(error){toast(error.message,true);button.disabled=false;}
     }
-    async function loadP123Folders(parentId=0,path='123云盘') {
-      const root=$('p123FolderPicker');root.classList.remove('hidden');root.innerHTML='<div class="muted" style="padding:12px">正在读取123目录…</div>';
-      try {
-        const folders=preview?[{id:1001,name:'家庭影视'},{id:1002,name:'电影'},{id:1003,name:'剧集'}]:(await api(`/api/admin/p123/folders?parent_id=${encodeURIComponent(parentId)}`)).folders||[];
-        root.innerHTML=`<button class="folder-row selected" type="button" data-p123-choose="${parentId}" data-p123-name="${escapeHtml(path.replace(/^123云盘\s*\/\s*/,'')||'根目录')}"><span>✓ 使用当前目录：${escapeHtml(path)}</span></button>`+folders.map(folder=>`<button class="folder-row" type="button" data-p123-open="${folder.id}" data-p123-folder-name="${escapeHtml(folder.name)}"><span>📁 ${escapeHtml(folder.name)}</span><span>进入 ›</span></button>`).join('');
-        root.querySelectorAll('[data-p123-open]').forEach(button=>button.onclick=()=>loadP123Folders(Number(button.dataset.p123Open),`${path} / ${button.dataset.p123FolderName}`));
-        root.querySelectorAll('[data-p123-choose]').forEach(button=>button.onclick=()=>saveP123TargetFolder(Number(button.dataset.p123Choose),button.dataset.p123Name,path));
-      } catch(error){root.innerHTML=`<div class="muted" style="padding:12px">${escapeHtml(error.message)}</div>`;toast(error.message,true);}
-    }
-    async function saveP123TargetFolder(id,name,path) {
-      try {
-        if(!preview)await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p123_target_id:String(id),p123_target_name:name})});
-        $('selectedP123FolderPath').textContent=path;
-        $('p123FolderPicker').classList.add('hidden');
-        $('p123FolderSelect').textContent='选择转存文件夹';
-        toast(`123统一目录已选择：${path}`);
-      } catch(error){toast(error.message,true);}
-    }
     async function deleteUser(id,label,button) {
       if(!confirm(`确定永久删除“${label}”的账号吗？该成员的求片记录也会一起删除，无法恢复。`))return;
       if(preview){toast('预览模式：成员账号已删除');return;}
@@ -1119,7 +1073,7 @@
     }
     async function loadSettings() {
       if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
-      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby'; $('settingsP123EmbyUrl').value=settings.p123_emby_url||''; $('p123EmbyState').textContent=settings.p123_emby_configured?'123 Emby 已配置':'尚未配置 123 Emby'; $('settingsWecomCorpId').value=settings.wecom_corp_id||''; $('settingsWecomAgentId').value=settings.wecom_agent_id||''; $('settingsWecomToUser').value=settings.wecom_to_user||'@all'; $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin'; $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||''; $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin'; $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||''; $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
+      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby'; $('settingsP123EmbyUrl').value=settings.p123_emby_url||''; $('p123EmbyState').textContent=settings.p123_emby_configured?'PanSave 对应 Emby 已配置':'尚未配置 PanSave 对应 Emby'; $('settingsWecomCorpId').value=settings.wecom_corp_id||''; $('settingsWecomAgentId').value=settings.wecom_agent_id||''; $('settingsWecomToUser').value=settings.wecom_to_user||'@all'; $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin'; $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||''; $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin'; $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||''; $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
     }
     async function loadIntegrations() {
       const hdhive=preview?{status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''}:await api('/api/admin/hdhive/status');
@@ -1127,7 +1081,7 @@
         dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
         p115_target_cid:'123456',p115_target_name:'影视自动转存',
-        p123_configured:true,p123_auth_mode:'password',p123_passport:'13800138000',p123_password_configured:true,p123_target_id:'654321',p123_target_name:'影视秒传',
+        pansave_configured:true,pansave_connected:true,pansave_telegram_api_id:'1234567',pansave_telegram_phone:'+8613800138000',pansave_bot_username:'pansavenb_bot',pansave_telegram_proxy:'http://192.168.31.129:7890',
         p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
       }:await api('/api/admin/integrations');
       $('hdhiveStatus').textContent=hdhive.status_label||'等待审核';
@@ -1157,18 +1111,11 @@
       $('p115Status').textContent=settings.p115_logged_in?'已登录':settings.p115_configured?'登录已失效':'待扫码';
       $('p115LoginValue').textContent=settings.p115_logged_in?`${settings.p115_app_name||'115账号'} · 可用`:'尚未扫码或登录已失效';
       $('selectedFolderPath').textContent=settings.p115_target_name?`115网盘 / ${settings.p115_target_name}`:'尚未选择转存文件夹';
-      $('p123Status').textContent=settings.p123_configured?(settings.p123_auth_mode==='password'?'已登录':'旧配置可用'):'待配置';
-      $('p123Passport').value=settings.p123_passport||'';
-      $('selectedP123FolderPath').textContent=settings.p123_target_name?`123云盘 / ${settings.p123_target_name}`:'123云盘 / 根目录';
-      loadP123Jobs();
-    }
-    async function loadP123Jobs() {
-      const jobs=preview?[
-        {id:'preview1',display_name:'123专用',username:'cloud123',title:'吞噬星空',target_name:'家庭影视/123转存',status:'success',total_files:2,success_files:2,failed_files:0,skipped_files:0,message:'123秒传完成：成功 2，未命中 0，缺少SHA1/大小 0'},
-        {id:'preview2',display_name:'123专用',username:'cloud123',title:'测试电影',target_name:'家庭影视/123转存',status:'queued',total_files:0,success_files:0,failed_files:0,skipped_files:0,message:'任务已排队'}
-      ]:(await api('/api/admin/p123/jobs')).jobs||[];
-      const labels={queued:'排队中',running:'处理中',success:'已完成',partial:'部分完成',failed:'失败'};
-      $('p123JobList').innerHTML=jobs.length?jobs.map(job=>`<div class="integration-line"><div><div class="resource-title">${escapeHtml(job.title||'未命名资源')}</div><div class="request-meta">${escapeHtml(job.display_name||job.username||'账号')} → 123 / ${escapeHtml(job.target_name||'根目录')} · ${escapeHtml(job.message||'')}</div></div><span class="badge badge-${job.status==='success'?'available':job.status==='failed'?'rejected':'searching'}">${escapeHtml(labels[job.status]||job.status)}</span></div>`).join(''):'<div class="empty">还没有123转存任务</div>';
+      $('pansaveStatus').textContent=settings.pansave_connected?'已登录':settings.pansave_configured?'待验证码验证':'待配置';
+      $('pansaveApiId').value=settings.pansave_telegram_api_id||'';
+      $('pansavePhone').value=settings.pansave_telegram_phone||'';
+      $('pansaveBotUsername').value=settings.pansave_bot_username||'pansavenb_bot';
+      $('pansaveProxy').value=settings.pansave_telegram_proxy||'';
     }
     async function testIntegration(service,button=null) {
       const ids={tmdb:'diagnosticTmdb',hdhive:'diagnosticHdhive',dian:'diagnosticDian'};
@@ -1294,16 +1241,15 @@
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('wecomTest').onclick=async()=>{if(preview)return toast('预览模式：企业微信测试成功');try{await api('/api/admin/wecom-test',{method:'POST'});toast('企业微信测试通知已发送');}catch(error){toast(error.message,true);}};
     $('wecomMenu').onclick=async()=>{if(preview)return toast('预览模式：企业微信菜单已刷新');try{await api('/api/admin/wecom-menu',{method:'POST'});toast('企业微信菜单已创建/刷新');}catch(error){toast(error.message,true);}};
-    $('p123EmbyTest').onclick=async()=>{if(preview)return toast('预览模式：123 Emby 连接正常');try{const data=await api('/api/admin/emby-test?destination=p123',{method:'POST'});toast(`${data.server_name}：${data.library_tmdb_count} 个 TMDB 条目`);}catch(error){toast(error.message,true);}};
+    $('p123EmbyTest').onclick=async()=>{if(preview)return toast('预览模式：PanSave 对应 Emby 连接正常');try{const data=await api('/api/admin/emby-test?destination=p123',{method:'POST'});toast(`${data.server_name}：${data.library_tmdb_count} 个 TMDB 条目`);}catch(error){toast(error.message,true);}};
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
     $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，1 条需求已更新为“已入库”');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，${result.updated} 条需求更新为“已入库”`);loadRequests();}catch(error){toast(error.message,true);}};
     $('testAllIntegrations').onclick=testAllIntegrations;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
-    $('p123Form').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：123手机号登录已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p123_passport:$('p123Passport').value,p123_password:$('p123Password').value})});$('p123Password').value='';toast('123账号登录已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
-    $('p123Test').onclick=async()=>{if(preview)return toast('123云盘账号登录正常');try{const result=await api('/api/admin/p123/test',{method:'POST'});toast(`${result.message} · ${result.latency_ms} ms`);}catch(error){toast(error.message,true);}};
-    $('p123FolderSelect').onclick=()=>{$('p123FolderPicker').classList.contains('hidden')?loadP123Folders():($('p123FolderPicker').classList.add('hidden'),$('p123FolderSelect').textContent='选择转存文件夹');};
-    $('p123RefreshJobs').onclick=()=>loadP123Jobs().catch(error=>toast(error.message,true));
+    $('pansaveForm').onsubmit=async event=>{event.preventDefault();if(preview){$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');return toast('预览模式：Telegram 验证码已发送');}try{const result=await api('/api/admin/pansave/login/start',{method:'POST',body:JSON.stringify({api_id:$('pansaveApiId').value,api_hash:$('pansaveApiHash').value,phone:$('pansavePhone').value,bot_username:$('pansaveBotUsername').value,proxy_url:$('pansaveProxy').value})});$('pansaveApiHash').value='';$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');toast(result.message);}catch(error){toast(error.message,true);}};
+    $('pansaveVerify').onclick=async()=>{if(preview){$('pansaveStatus').textContent='已登录';return toast('预览模式：Telegram 用户账号已登录');}try{const result=await api('/api/admin/pansave/login/verify',{method:'POST',body:JSON.stringify({code:$('pansaveCode').value,password:$('pansavePassword').value})});$('pansaveCode').value='';$('pansavePassword').value='';$('pansaveVerifyPanel').classList.add('hidden');$('pansaveVerifyActions').classList.add('hidden');toast(result.message);loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('pansaveTest').onclick=async()=>{if(preview)return toast('Telegram 会话正常，已找到 @pansavenb_bot');try{const result=await api('/api/admin/pansave/test',{method:'POST'});toast(result.message);}catch(error){toast(error.message,true);}};
     $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};
     $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？已有配置不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
@@ -1333,11 +1279,6 @@
     setInterval(() => {
       if (currentUser && !preview) loadSiteNotice();
     }, 15000);
-    setInterval(() => {
-      if (currentUser?.role === 'admin' && !preview && !$('storageView').classList.contains('hidden')) {
-        loadP123Jobs().catch(() => {});
-      }
-    }, 5000);
   </script>
 </body>
 </html>
