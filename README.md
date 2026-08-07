@@ -1,6 +1,6 @@
 # 映单
 
-一个私人影视请求系统：成员通过 TMDB 搜索并提交准确的电影或剧集，管理员手动处理资源、更新状态并留下回复。新请求会通过 Telegram 通知管理员。
+一个私人影视请求系统：成员通过 TMDB 搜索并提交准确的电影或剧集，管理员处理资源、更新状态并留下回复。新请求、转存结果和入库结果可同时通过 Telegram 与企业微信通知管理员。
 
 ## 主要功能
 
@@ -9,9 +9,9 @@
 - 服务端二次查询 TMDB，无法凭空提交未收录影片
 - 待处理、已收到、寻找中、已完成和暂时无法完成
 - 管理员文字回复
-- Telegram 新需求和状态更新通知
-- Telegram 菜单查看“求片需求”和“完成情况”
-- Emby API 对照媒体库，已存在资源自动显示“已入库”
+- Telegram 与企业微信双通知
+- 两套通知菜单均可查看求片、完成情况、影巢/癫影账号和管理公告
+- 115、123 各自对应独立 Emby，按登录账号检测“已入库”
 - 影片详情按 TMDB ID 查询癫影资源，可比较清晰度、编码、音轨和字幕
 - 影巢与癫影同时查询，影巢资源优先显示且互不阻塞
 - 独立“我的追更”栏目，以 Emby 已有集数作为起点
@@ -54,7 +54,7 @@ http://NAS-IP:1802
 /volume1/docker/movie-request/data
 ```
 
-首次打开时创建管理员账号并填写 TMDB API Read Access Token。之后在“成员账号”中创建登录账号，在“系统设置”中配置 Telegram 和 Emby。
+首次打开时创建管理员账号并填写 TMDB API Read Access Token。之后在“成员账号”中创建登录账号，在“系统设置”中分别配置115 Emby、123 Emby、Telegram 和企业微信。
 
 在管理员的“资源与 115”页面中：
 
@@ -78,7 +78,15 @@ http://NAS-IP:1802
 
 敏感信息不会写入镜像或 GitHub。OpenAPI Key、115 Cookie、123应用凭证、目标目录 ID、账号、任务和求片记录全部保存在 NAS 映射的 `/volume1/docker/movie-request/data` 中。115 登录是否长期有效由 115 服务端决定；Cookie 失效后在管理员页面重新扫码即可。
 
-Emby 地址可以填写 `http://NAS-IP:8096`。建议在 Emby 后台专门创建一个供本系统使用的 API 密钥，方便以后单独撤销。
+115与123的 Emby 地址分别填写各自服务器地址，例如 `http://NAS-IP:8096` 和 `http://NAS-IP:8097`。115账号只查询115 Emby，123账号只查询123 Emby。建议在两套 Emby 后台分别创建供本系统使用的 API 密钥，方便以后单独撤销。
+
+企业微信在“系统设置”中填写 CorpID、AgentID、应用 Secret、接收成员和管理员 UserID。API 转发地址默认使用 `https://wx.weige1999.xin`，网站公网地址填写 `https://qp.weige1999.xin`，企业微信后台的接收消息 URL 设置为：
+
+```text
+https://qp.weige1999.xin/api/wecom/callback
+```
+
+回调 Token 和 43 位 EncodingAESKey 必须与企业微信后台完全一致。保存后先发送测试通知，再点击“创建/刷新企业微信菜单”。Secret、回调 Token、EncodingAESKey 和两套 Emby API 密钥均不会在页面回显。
 
 如果 Telegram 无法直连，在系统设置中填写 Mihomo HTTP 代理，例如 `http://192.168.31.129:7890`。新需求通知、机器人菜单和消息轮询都会使用该代理。
 

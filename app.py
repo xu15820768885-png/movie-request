@@ -7,8 +7,10 @@ import os
 import re
 import secrets
 import sqlite3
+import struct
 import time
 import base64
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,8 +21,10 @@ from urllib.parse import quote, urlparse
 import requests
 import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from requests.adapters import HTTPAdapter
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
 from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
@@ -63,7 +67,13 @@ EMBY_LIBRARY_CACHE: dict[str, Any] = {
     "ids": set(),
     "refreshing": False,
 }
+EMBY_LIBRARY_CACHES: dict[str, dict[str, Any]] = {
+    "p115": EMBY_LIBRARY_CACHE,
+    "p123": {"key": "", "expires": 0.0, "ids": set(), "refreshing": False},
+}
 EMBY_EPISODE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+WECOM_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
+WECOM_TOKEN_LOCK = Lock()
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 P123_API_LOCK = Lock()
@@ -82,6 +92,26 @@ P115_APPS = {
     "harmony": "115_鸿蒙端",
     "tv": "115生活_电视端",
 }
+
+
+@APP.exception_handler(HTTPException)
+async def movie_http_exception_handler(
+    request: Request,
+    error: HTTPException,
+) -> JSONResponse:
+    if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
+        user = session_user(request.cookies.get("movie_session"))
+        if user:
+            send_notifications(
+                f"❌ 资源转存失败 · "
+                f"{'123' if user['storage_destination'] == 'p123' else '115'}\n\n"
+                f"账号：{user['display_name']}\n原因：{error.detail}"
+            )
+    return JSONResponse(
+        status_code=error.status_code,
+        content={"detail": error.detail},
+        headers=error.headers,
+    )
 
 
 def now_iso() -> str:
@@ -247,6 +277,10 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS wecom_message_log (
+                message_key TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS tv_follow_resources (
                 follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
                 source TEXT NOT NULL,
@@ -326,11 +360,14 @@ def init_db() -> None:
                 "ALTER TABLE tv_follows "
                 "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'tv'"
             )
-        hot_setting_keys = ("tmdb_token", "emby_url", "emby_api_key")
+        hot_setting_keys = (
+            "tmdb_token", "emby_url", "emby_api_key",
+            "p123_emby_url", "p123_emby_api_key",
+        )
         hot_settings = {
             str(row["key"]): str(row["value"])
             for row in connection.execute(
-                "SELECT key, value FROM settings WHERE key IN (?, ?, ?)",
+                "SELECT key, value FROM settings WHERE key IN (?, ?, ?, ?, ?)",
                 hot_setting_keys,
             ).fetchall()
         }
@@ -687,7 +724,7 @@ def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
             set_setting(connection, "dian_last_signin_mode", mode)
             set_setting(connection, "dian_last_signin_status", "failed")
             set_setting(connection, "dian_last_signin_message", message)
-        send_telegram(
+        send_notifications(
             f"❌ 癫影签到失败\n\n{source_label} · {mode_label}\n原因：{message}"
         )
         raise
@@ -699,7 +736,7 @@ def perform_dian_signin(mode: str, source: str = "manual") -> dict[str, Any]:
         set_setting(connection, "dian_last_signin_status", "success")
         set_setting(connection, "dian_last_signin_message", message)
         set_setting(connection, "dian_last_signin_result", json.dumps(result, ensure_ascii=False))
-    send_telegram(signin_notification(result, source_label, mode_label))
+    send_notifications(signin_notification(result, source_label, mode_label))
     return result
 
 
@@ -723,7 +760,7 @@ def perform_hdhive_signin(mode: str, source: str = "manual") -> dict[str, Any]:
             set_setting(connection, "hdhive_last_signin_mode", mode)
             set_setting(connection, "hdhive_last_signin_status", "failed")
             set_setting(connection, "hdhive_last_signin_message", message)
-        send_telegram(
+        send_notifications(
             f"❌ 影巢签到失败\n\n{source_label} · {mode_label}\n原因：{message}"
         )
         raise
@@ -755,7 +792,7 @@ def perform_hdhive_signin(mode: str, source: str = "manual") -> dict[str, Any]:
             "hdhive_last_signin_result",
             json.dumps(result, ensure_ascii=False),
         )
-    send_telegram(
+    send_notifications(
         signin_notification(
             result,
             source_label,
@@ -1268,12 +1305,18 @@ def run_p123_transfer_job(job_id: str) -> None:
                 season_number=int(job.get("season_number") or 0),
                 episode_numbers=list(job.get("episode_numbers") or []),
             )
-            send_telegram(
-                f"⚡ 115 → 123 秒传完成\n\n{job.get('title') or '资源'}\n{message}"
-            )
+        send_notifications(
+            f"{'⚡' if succeeded else '❌'} 115 → 123 秒传"
+            f"{'完成' if succeeded else '失败'}\n\n"
+            f"{job.get('title') or '资源'}\n{message}"
+        )
     except Exception as error:
         message = str(error.detail) if isinstance(error, HTTPException) else str(error)
         update_p123_job(job_id, status="failed", message=message or "123秒传失败")
+        send_notifications(
+            f"❌ 115 → 123 秒传失败\n\n"
+            f"{job.get('title') or '资源'}\n原因：{message or '未知错误'}"
+        )
 
 
 def process_p123_jobs_once() -> None:
@@ -1423,18 +1466,20 @@ def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> b
         )
 
 
-def has_manual_transfer(tmdb_id: int) -> bool:
+def has_manual_transfer(tmdb_id: int, user_id: Optional[int] = None) -> bool:
     if tmdb_id <= 0:
         return False
     with db() as connection:
-        return bool(
-            connection.execute(
-                "SELECT 1 FROM resource_transfer_log "
-                "WHERE tmdb_id = ? AND transfer_scope = 'manual' "
-                "AND status = 'success' LIMIT 1",
-                (tmdb_id,),
-            ).fetchone()
+        query = (
+            "SELECT 1 FROM resource_transfer_log "
+            "WHERE tmdb_id = ? AND transfer_scope = 'manual' "
+            "AND status = 'success'"
         )
+        values: list[Any] = [tmdb_id]
+        if user_id is not None:
+            query += " AND user_id = ?"
+            values.append(user_id)
+        return bool(connection.execute(query + " LIMIT 1", values).fetchone())
 
 
 def completed_episode_numbers(
@@ -2830,6 +2875,61 @@ def emby_api_url(base_url: str, path: str) -> str:
     return f"{base}/emby/{path.lstrip('/')}"
 
 
+def storage_destination(value: Any) -> str:
+    return "p123" if str(value or "") == "p123" else "p115"
+
+
+def emby_credentials(destination: str = "p115") -> tuple[str, str]:
+    destination = storage_destination(destination)
+    keys = (
+        ("p123_emby_url", "p123_emby_api_key")
+        if destination == "p123"
+        else ("emby_url", "emby_api_key")
+    )
+    values = cached_settings(*keys)
+    return values[keys[0]], values[keys[1]]
+
+
+def destination_emby_ids(
+    destination: str,
+    *,
+    force: bool = False,
+    prefer_cached: bool = False,
+) -> set[int]:
+    if storage_destination(destination) == "p123":
+        return emby_library_tmdb_ids(
+            force=force,
+            prefer_cached=prefer_cached,
+            destination="p123",
+        )
+    if force:
+        return emby_library_tmdb_ids(force=True)
+    if prefer_cached:
+        return emby_library_tmdb_ids(prefer_cached=True)
+    return emby_library_tmdb_ids()
+
+
+def destination_episode_progress(
+    destination: str,
+    tmdb_id: int,
+    *,
+    known_in_library: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    if storage_destination(destination) == "p123":
+        return emby_series_episode_progress(
+            tmdb_id,
+            known_in_library=known_in_library,
+            force=force,
+            destination="p123",
+        )
+    return emby_series_episode_progress(
+        tmdb_id,
+        known_in_library=known_in_library,
+        force=force,
+    )
+
+
 def episode_progress_label(
     season_number: int,
     episode_number: int,
@@ -2846,10 +2946,9 @@ def emby_series_episode_progress(
     tmdb_id: int,
     known_in_library: bool = False,
     force: bool = False,
+    destination: str = "p115",
 ) -> dict[str, Any]:
-    with db() as connection:
-        base_url = setting(connection, "emby_url")
-        api_key = setting(connection, "emby_api_key")
+    base_url, api_key = emby_credentials(destination)
     if not base_url or not api_key or tmdb_id <= 0:
         return {}
 
@@ -2959,33 +3058,35 @@ def emby_series_episode_progress(
 def emby_library_tmdb_ids(
     force: bool = False,
     prefer_cached: bool = False,
+    destination: str = "p115",
 ) -> set[int]:
-    emby_settings = cached_settings("emby_url", "emby_api_key")
-    base_url = emby_settings["emby_url"]
-    api_key = emby_settings["emby_api_key"]
+    destination = storage_destination(destination)
+    base_url, api_key = emby_credentials(destination)
     if not base_url or not api_key:
         return set()
+    library_cache = EMBY_LIBRARY_CACHES[destination]
     cache_key = hashlib.sha256(f"{base_url}|{api_key}".encode()).hexdigest()
     now = time.monotonic()
     with CACHE_LOCK:
         if (
             not force
-            and EMBY_LIBRARY_CACHE["key"] == cache_key
-            and EMBY_LIBRARY_CACHE["expires"] > now
+            and library_cache["key"] == cache_key
+            and library_cache["expires"] > now
         ):
-            return set(EMBY_LIBRARY_CACHE["ids"])
+            return set(library_cache["ids"])
         if not force and prefer_cached:
             stale_ids = (
-                set(EMBY_LIBRARY_CACHE["ids"])
-                if EMBY_LIBRARY_CACHE["key"] == cache_key
+                set(library_cache["ids"])
+                if library_cache["key"] == cache_key
                 else set()
             )
-            should_refresh = not EMBY_LIBRARY_CACHE["refreshing"]
+            should_refresh = not library_cache["refreshing"]
             if should_refresh:
-                EMBY_LIBRARY_CACHE["refreshing"] = True
+                library_cache["refreshing"] = True
             if should_refresh:
                 Thread(
                     target=refresh_emby_library_cache,
+                    args=(destination,),
                     name="emby-cache-refresh",
                     daemon=True,
                 ).start()
@@ -3010,38 +3111,59 @@ def emby_library_tmdb_ids(
             if str(raw_id or "").isdigit():
                 values.add(int(raw_id))
         with CACHE_LOCK:
-            EMBY_LIBRARY_CACHE.update(
+            library_cache.update(
                 {"key": cache_key, "expires": now + 300, "ids": set(values)}
             )
         return values
     except (requests.RequestException, ValueError, TypeError):
         with CACHE_LOCK:
-            if EMBY_LIBRARY_CACHE["key"] == cache_key:
-                return set(EMBY_LIBRARY_CACHE["ids"])
+            if library_cache["key"] == cache_key:
+                return set(library_cache["ids"])
         return set()
 
 
-def refresh_emby_library_cache() -> None:
+def refresh_emby_library_cache(destination: str = "p115") -> None:
     try:
-        emby_library_tmdb_ids(force=True)
+        emby_library_tmdb_ids(force=True, destination=destination)
     finally:
         with CACHE_LOCK:
-            EMBY_LIBRARY_CACHE["refreshing"] = False
+            EMBY_LIBRARY_CACHES[storage_destination(destination)]["refreshing"] = False
 
 
-def sync_emby_requests(force: bool = False) -> int:
-    tmdb_ids = emby_library_tmdb_ids(force=force)
-    if not tmdb_ids:
-        return 0
-    placeholders = ",".join("?" for _ in tmdb_ids)
-    with db() as connection:
-        cursor = connection.execute(
-            f"UPDATE movie_requests SET status = 'available', updated_at = ? "
-            f"WHERE tmdb_id IN ({placeholders}) AND media_type = 'movie' "
-            f"AND status != 'available'",
-            (now_iso(), *tmdb_ids),
-        )
-        return cursor.rowcount
+def sync_emby_requests(
+    force: bool = False,
+    destination: Optional[str] = None,
+) -> int:
+    destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
+    updated = 0
+    for current in destinations:
+        tmdb_ids = emby_library_tmdb_ids(force=force, destination=current)
+        if not tmdb_ids:
+            continue
+        placeholders = ",".join("?" for _ in tmdb_ids)
+        with db() as connection:
+            rows = connection.execute(
+                f"SELECT r.id, r.title, r.year, u.display_name "
+                f"FROM movie_requests r JOIN users u ON u.id = r.user_id "
+                f"WHERE r.tmdb_id IN ({placeholders}) AND r.media_type = 'movie' "
+                f"AND r.status != 'available' AND u.storage_destination = ?",
+                (*tmdb_ids, current),
+            ).fetchall()
+            if rows:
+                ids = [int(row["id"]) for row in rows]
+                marks = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"UPDATE movie_requests SET status = 'available', updated_at = ? "
+                    f"WHERE id IN ({marks})",
+                    (now_iso(), *ids),
+                )
+        for row in rows:
+            send_notifications(
+                f"✅ 入库完成 · {'123' if current == 'p123' else '115'} Emby\n\n"
+                f"{row['title']} ({row['year']})\n申请人：{row['display_name']}"
+            )
+        updated += len(rows)
+    return updated
 
 
 def normalize_search_text(value: Any) -> str:
@@ -3512,6 +3634,7 @@ def configure_telegram_menu() -> None:
                 {"command": "requests", "description": "求片需求"},
                 {"command": "completed", "description": "完成情况"},
                 {"command": "hdhive", "description": "影巢账号"},
+                {"command": "dian", "description": "癫影账号"},
                 {"command": "notice", "description": "发布片库公告"},
                 {"command": "clear_notice", "description": "清除片库公告"},
                 {"command": "menu", "description": "显示菜单"},
@@ -3533,6 +3656,144 @@ def send_telegram(text: str) -> None:
         "reply_markup": {"remove_keyboard": True},
     }
     telegram_request("sendMessage", payload)
+
+
+def wecom_api_url(base_url: str, path: str) -> str:
+    return f"{base_url.strip().rstrip('/')}/{path.lstrip('/')}"
+
+
+def wecom_access_token(force: bool = False) -> str:
+    with db() as connection:
+        corp_id = setting(connection, "wecom_corp_id")
+        secret = setting(connection, "wecom_secret")
+        api_base = setting(connection, "wecom_api_base") or "https://wx.weige1999.xin"
+    if not corp_id or not secret:
+        return ""
+    cache_key = hashlib.sha256(f"{api_base}|{corp_id}|{secret}".encode()).hexdigest()
+    now = time.monotonic()
+    with WECOM_TOKEN_LOCK:
+        if (
+            not force
+            and WECOM_TOKEN_CACHE["key"] == cache_key
+            and WECOM_TOKEN_CACHE["expires"] > now
+        ):
+            return str(WECOM_TOKEN_CACHE["token"])
+    try:
+        response = requests.get(
+            wecom_api_url(api_base, "/cgi-bin/gettoken"),
+            params={"corpid": corp_id, "corpsecret": secret},
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    token = str(data.get("access_token") or "")
+    if not token:
+        return ""
+    expires_in = max(60, int(data.get("expires_in") or 7200))
+    with WECOM_TOKEN_LOCK:
+        WECOM_TOKEN_CACHE.update(
+            {"key": cache_key, "token": token, "expires": now + expires_in - 120}
+        )
+    return token
+
+
+def wecom_request(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    retry: bool = True,
+    params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    token = wecom_access_token()
+    if not token:
+        return {}
+    with db() as connection:
+        api_base = setting(connection, "wecom_api_base") or "https://wx.weige1999.xin"
+    try:
+        response = requests.post(
+            wecom_api_url(api_base, path),
+            params={"access_token": token, **(params or {})},
+            json=payload,
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError):
+        return {}
+    if retry and int(data.get("errcode") or 0) in (40014, 42001):
+        wecom_access_token(force=True)
+        return wecom_request(path, payload, retry=False, params=params)
+    return data
+
+
+def send_wecom(text: str, to_user: str = "") -> bool:
+    with db() as connection:
+        agent_id = setting(connection, "wecom_agent_id")
+        recipient = to_user or setting(connection, "wecom_to_user") or "@all"
+    if not agent_id:
+        return False
+    result = wecom_request(
+        "/cgi-bin/message/send",
+        {
+            "touser": recipient,
+            "msgtype": "text",
+            "agentid": int(agent_id),
+            "text": {"content": str(text)[:2048]},
+            "safe": 0,
+        },
+    )
+    return int(result.get("errcode", -1)) == 0
+
+
+def send_notifications(text: str) -> None:
+    send_telegram(text)
+    send_wecom(text)
+
+
+def wecom_menu_payload() -> dict[str, Any]:
+    with db() as connection:
+        site_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
+    return {
+        "button": [
+            {
+                "name": "求片",
+                "sub_button": [
+                    {"type": "click", "name": "求片需求", "key": "requests"},
+                    {"type": "click", "name": "完成情况", "key": "completed"},
+                ],
+            },
+            {
+                "name": "管理",
+                "sub_button": [
+                    {"type": "click", "name": "发布公告", "key": "notice"},
+                    {"type": "click", "name": "清除公告", "key": "clear_notice"},
+                ],
+            },
+            {
+                "name": "账号",
+                "sub_button": [
+                    {"type": "click", "name": "影巢账号", "key": "hdhive"},
+                    {"type": "click", "name": "癫影账号", "key": "dian"},
+                    {"type": "view", "name": "打开映单", "url": site_url},
+                ],
+            },
+        ]
+    }
+
+
+def configure_wecom_menu() -> bool:
+    with db() as connection:
+        agent_id = setting(connection, "wecom_agent_id")
+    if not agent_id:
+        return False
+    result = wecom_request(
+        "/cgi-bin/menu/create",
+        wecom_menu_payload(),
+        params={"agentid": int(agent_id)},
+    )
+    return int(result.get("errcode", -1)) == 0
 
 
 def telegram_request_summary(completed: bool) -> str:
@@ -3647,6 +3908,30 @@ def hdhive_account_summary() -> str:
     )
 
 
+def dian_account_summary() -> str:
+    with db() as connection:
+        configured = bool(
+            setting(connection, "dian_base_url")
+            and setting(connection, "dian_api_key")
+        )
+        enabled = setting(connection, "dian_signin_enabled") == "1"
+        signin_time = setting(connection, "dian_signin_time") or "08:30"
+        last_at = setting(connection, "dian_last_signin_at") or "暂无"
+        last_status = setting(connection, "dian_last_signin_status") or "暂无"
+        last_message = setting(connection, "dian_last_signin_message") or "暂无"
+    return "\n".join(
+        [
+            "🟣 癫影账号",
+            "",
+            f"OpenAPI：{'已配置' if configured else '未配置'}",
+            f"自动签到：{'已开启' if enabled else '已关闭'} · {signin_time}",
+            f"最近签到：{last_at}",
+            f"最近状态：{last_status}",
+            f"结果：{last_message}",
+        ]
+    )
+
+
 def handle_telegram_message(text: str) -> bool:
     text = str(text or "").strip()
     if not text:
@@ -3665,6 +3950,8 @@ def handle_telegram_message(text: str) -> bool:
             send_telegram(hdhive_account_summary())
         except HTTPException as error:
             send_telegram(f"❌ 影巢账号读取失败\n\n原因：{error.detail}")
+    elif text == "癫影账号" or command == "/dian":
+        send_telegram(dian_account_summary())
     elif command == "/notice":
         if argument:
             notice = argument[:240]
@@ -3683,7 +3970,7 @@ def handle_telegram_message(text: str) -> bool:
         send_telegram("✅ 片库公告已清除")
     elif command in ("/start", "/menu"):
         send_telegram(
-            "请点击左下角“菜单”，可以查看求片需求、完成情况、影巢账号，"
+            "请点击左下角“菜单”，可以查看求片需求、完成情况、影巢/癫影账号，"
             "或发布片库公告。"
         )
     elif not text.startswith("/"):
@@ -3698,6 +3985,71 @@ def handle_telegram_message(text: str) -> bool:
         send_telegram(f"📢 片库公告已发布\n\n{notice}")
     else:
         return False
+    return True
+
+
+def wecom_signature(token: str, timestamp: str, nonce: str, encrypted: str) -> str:
+    values = sorted([token, timestamp, nonce, encrypted])
+    return hashlib.sha1("".join(values).encode()).hexdigest()
+
+
+def wecom_decrypt(encrypted: str, aes_key: str, corp_id: str) -> str:
+    try:
+        key = base64.b64decode(aes_key + "=")
+        ciphertext = base64.b64decode(encrypted)
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(key[:16])).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+        unpadder = padding.PKCS7(256).unpadder()
+        plain = unpadder.update(padded) + unpadder.finalize()
+        size = struct.unpack("!I", plain[16:20])[0]
+        message = plain[20:20 + size]
+        receiver = plain[20 + size:].decode()
+        if receiver != corp_id:
+            raise ValueError("企业ID不匹配")
+        return message.decode()
+    except Exception as error:
+        raise HTTPException(400, "企业微信回调解密失败") from error
+
+
+def handle_wecom_command(command: str, sender: str) -> bool:
+    text = str(command or "").strip().lower().lstrip("/")
+    with db() as connection:
+        admin_user = setting(connection, "wecom_admin_userid")
+    if admin_user and sender != admin_user:
+        send_wecom("❌ 当前企业微信账号没有映单管理权限", sender)
+        return True
+    if text in ("requests", "求片需求"):
+        send_wecom(telegram_request_summary(False), sender)
+    elif text in ("completed", "完成情况"):
+        sync_emby_requests()
+        send_wecom(telegram_request_summary(True), sender)
+    elif text in ("hdhive", "影巢账号"):
+        try:
+            send_wecom(hdhive_account_summary(), sender)
+        except HTTPException as error:
+            send_wecom(f"❌ 影巢账号读取失败\n\n原因：{error.detail}", sender)
+    elif text in ("dian", "癫影账号"):
+        send_wecom(dian_account_summary(), sender)
+    elif text in ("notice", "发布公告"):
+        with db() as connection:
+            set_setting(connection, f"wecom_notice_pending:{sender}", "1")
+        send_wecom("请发送公告内容，你的下一条文字消息会显示在网页上。", sender)
+    elif text in ("clear_notice", "清除公告"):
+        with db() as connection:
+            set_setting(connection, "site_notice", "")
+            set_setting(connection, f"wecom_notice_pending:{sender}", "")
+        send_wecom("✅ 片库公告已清除", sender)
+    else:
+        with db() as connection:
+            pending = setting(connection, f"wecom_notice_pending:{sender}") == "1"
+            if pending:
+                notice = str(command)[:240]
+                set_setting(connection, "site_notice", notice)
+                set_setting(connection, f"wecom_notice_pending:{sender}", "")
+        if not pending:
+            send_wecom("请使用企业微信应用底部菜单操作映单。", sender)
+            return False
+        send_wecom(f"📢 片库公告已发布\n\n{notice}", sender)
     return True
 
 
@@ -3835,7 +4187,8 @@ def auto_replenish_hdhive_follow(
 
     with db() as connection:
         follow = connection.execute(
-            "SELECT * FROM tv_follows WHERE id = ? AND active = 1",
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.id = ? AND f.active = 1",
             (follow_id,),
         ).fetchone()
         target_cid = setting(connection, "p115_target_cid") or "0"
@@ -3843,7 +4196,11 @@ def auto_replenish_hdhive_follow(
         return {"transferred": [], "message": "追更已停止"}
 
     tmdb_id = int(follow["tmdb_id"])
-    progress = emby_series_episode_progress(tmdb_id, known_in_library=True)
+    progress = destination_episode_progress(
+        follow["storage_destination"],
+        tmdb_id,
+        known_in_library=True,
+    )
     season_number = int(
         progress.get("emby_latest_season_number")
         or follow["last_seen_season"]
@@ -3998,7 +4355,7 @@ def auto_replenish_hdhive_follow(
         resource_summary = "\n".join(
             f"• {resource}" for resource in used_resources
         )
-        send_telegram(
+        send_notifications(
             f"✅ 影巢追更自动转存成功\n\n"
             f"剧集：{follow['title']}\n"
             f"补齐：第{compact_episode_numbers(transferred)}集\n"
@@ -4016,7 +4373,7 @@ def auto_replenish_hdhive_follow(
                 (checked_at, message, checked_at, follow_id),
             )
         if notify_noop:
-            send_telegram(
+            send_notifications(
                 f"ℹ️ 影巢追更本次未转存\n\n"
                 f"剧集：{follow['title']}\n"
                 f"结果：{message}\n"
@@ -4101,7 +4458,7 @@ def refresh_hdhive_subscribed_follows() -> int:
                         follow["id"],
                     ),
                 )
-            send_telegram(
+            send_notifications(
                 f"🆕 影巢追更提醒\n\n{follow['title']}\n"
                 f"发现第{latest[1]}集资源，请打开影巢机器人链接手动转存。"
             )
@@ -4214,6 +4571,7 @@ def hdhive_follow_loop() -> None:
 def startup() -> None:
     init_db()
     Thread(target=configure_telegram_menu, name="telegram-menu", daemon=True).start()
+    Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
@@ -4229,6 +4587,85 @@ def index() -> FileResponse:
 @APP.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@APP.get("/api/wecom/callback", response_class=PlainTextResponse)
+def verify_wecom_callback(
+    msg_signature: str,
+    timestamp: str,
+    nonce: str,
+    echostr: str,
+) -> str:
+    with db() as connection:
+        token = setting(connection, "wecom_callback_token")
+        aes_key = setting(connection, "wecom_encoding_aes_key")
+        corp_id = setting(connection, "wecom_corp_id")
+    if not token or not aes_key or not corp_id:
+        raise HTTPException(503, "企业微信回调尚未配置")
+    if not hmac.compare_digest(
+        wecom_signature(token, timestamp, nonce, echostr),
+        msg_signature,
+    ):
+        raise HTTPException(403, "企业微信回调签名无效")
+    return wecom_decrypt(echostr, aes_key, corp_id)
+
+
+@APP.post("/api/wecom/callback", response_class=PlainTextResponse)
+async def receive_wecom_callback(
+    request: Request,
+    msg_signature: str,
+    timestamp: str,
+    nonce: str,
+) -> str:
+    with db() as connection:
+        token = setting(connection, "wecom_callback_token")
+        aes_key = setting(connection, "wecom_encoding_aes_key")
+        corp_id = setting(connection, "wecom_corp_id")
+    if not token or not aes_key or not corp_id:
+        raise HTTPException(503, "企业微信回调尚未配置")
+    try:
+        outer = ET.fromstring(await request.body())
+        encrypted = str(outer.findtext("Encrypt") or "")
+    except ET.ParseError as error:
+        raise HTTPException(400, "企业微信回调格式无效") from error
+    if not encrypted or not hmac.compare_digest(
+        wecom_signature(token, timestamp, nonce, encrypted),
+        msg_signature,
+    ):
+        raise HTTPException(403, "企业微信回调签名无效")
+    try:
+        message = ET.fromstring(wecom_decrypt(encrypted, aes_key, corp_id))
+    except ET.ParseError as error:
+        raise HTTPException(400, "企业微信消息格式无效") from error
+    sender = str(message.findtext("FromUserName") or "")
+    message_type = str(message.findtext("MsgType") or "").lower()
+    if message_type == "event":
+        command = str(message.findtext("EventKey") or "")
+    elif message_type == "text":
+        command = str(message.findtext("Content") or "")
+    else:
+        return "success"
+    if sender and command:
+        message_key = str(message.findtext("MsgId") or "") or hashlib.sha256(
+            "|".join(
+                [
+                    sender,
+                    str(message.findtext("CreateTime") or ""),
+                    message_type,
+                    command,
+                ]
+            ).encode()
+        ).hexdigest()
+        with db() as connection:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO wecom_message_log(message_key, created_at) "
+                "VALUES(?, ?)",
+                (message_key, now_iso()),
+            )
+        if not cursor.rowcount:
+            return "success"
+        handle_wecom_command(command, sender)
+    return "success"
 
 
 @APP.get("/api/tmdb/image/{size}/{image_path:path}")
@@ -4405,7 +4842,9 @@ def search(
     # enough to paint results immediately; an expired cache refreshes behind
     # the scenes.
     emby_started = time.perf_counter()
-    library_ids = emby_library_tmdb_ids(prefer_cached=True)
+    library_ids = destination_emby_ids(
+        user["storage_destination"], prefer_cached=True
+    )
     emby_ms = round((time.perf_counter() - emby_started) * 1000)
     source_items = [
         item for item in data.get("results", [])
@@ -4438,7 +4877,7 @@ def search(
 
 @APP.get("/api/charts/{chart_name}")
 def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_user(movie_session)
+    user = require_user(movie_session)
     douban_config = {
         "douban_movies": ("/subject_collection/movie_hot_gaia/items", "movie", "豆瓣热门电影"),
         "douban_tv": ("/subject_collection/tv_hot/items", "tv", "豆瓣热门剧集"),
@@ -4464,7 +4903,9 @@ def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None))
         raise HTTPException(404, "没有找到这个榜单")
     path, fixed_type, title = chart_config[chart_name]
     data = tmdb_get(path, {"language": "zh-CN", "page": 1})
-    library_ids = emby_library_tmdb_ids(prefer_cached=True)
+    library_ids = destination_emby_ids(
+        user["storage_destination"], prefer_cached=True
+    )
     results = []
     for item in data.get("results", []):
         media_type = fixed_type or item.get("media_type")
@@ -4571,7 +5012,9 @@ def media_details(
     )
     if int(data.get("id") or 0) != tmdb_id:
         raise HTTPException(404, "TMDB 没有找到这部影片")
-    library_ids = emby_library_tmdb_ids(prefer_cached=True)
+    library_ids = destination_emby_ids(
+        user["storage_destination"], prefer_cached=True
+    )
     basic = tmdb_media_item(data, media_type, library_ids)
     credits = data.get("credits") or {}
     cast = [
@@ -4630,9 +5073,9 @@ def media_details(
         ).fetchone()
         manual_transfer = connection.execute(
             "SELECT 1 FROM resource_transfer_log "
-            "WHERE tmdb_id = ? AND transfer_scope = 'manual' "
+            "WHERE user_id = ? AND tmdb_id = ? AND transfer_scope = 'manual' "
             "AND status = 'success' LIMIT 1",
-            (tmdb_id,),
+            (user["id"], tmdb_id),
         ).fetchone()
     basic["is_following"] = follow is not None
     basic["hdhive_subscribed"] = bool(
@@ -4647,11 +5090,13 @@ def emby_episode_progress(
     tmdb_id: int,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
-    require_user(movie_session)
+    user = require_user(movie_session)
     if tmdb_id <= 0:
         raise HTTPException(400, "剧集编号无效")
-    library_ids = emby_library_tmdb_ids(force=True)
-    progress = emby_series_episode_progress(
+    destination = user["storage_destination"]
+    library_ids = destination_emby_ids(destination, force=True)
+    progress = destination_episode_progress(
+        destination,
         tmdb_id,
         known_in_library=tmdb_id in library_ids,
         force=True,
@@ -4981,19 +5426,20 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
 def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
     with db() as connection:
         row = connection.execute(
-            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.id = ?", (follow_id,)
         ).fetchone()
-        configured = bool(
-            setting(connection, "emby_url")
-            and setting(connection, "emby_api_key")
-        )
+    destination = storage_destination(row["storage_destination"]) if row else "p115"
+    base_url, api_key = emby_credentials(destination)
+    configured = bool(base_url and api_key)
     if not row or str(row["media_type"] or "tv") != "tv" or not configured:
         return row
 
     tmdb_id = int(row["tmdb_id"])
-    library_ids = emby_library_tmdb_ids(force=True)
+    library_ids = destination_emby_ids(destination, force=True)
     progress = (
-        emby_series_episode_progress(
+        destination_episode_progress(
+            destination,
             tmdb_id,
             known_in_library=True,
             force=True,
@@ -5057,18 +5503,25 @@ async def create_follow(
     if int(detail.get("id") or 0) != tmdb_id:
         raise HTTPException(400, "TMDB 没有返回对应影片")
     known_in_library = (
-        tmdb_id in emby_library_tmdb_ids(prefer_cached=True)
+        tmdb_id in destination_emby_ids(
+            user["storage_destination"], prefer_cached=True
+        )
         if media_type == "tv"
         else False
     )
     if (
         media_type == "tv"
         and not known_in_library
-        and not has_manual_transfer(tmdb_id)
+        and not (
+            has_manual_transfer(tmdb_id, int(user["id"]))
+            if user["storage_destination"] == "p123"
+            else has_manual_transfer(tmdb_id)
+        )
     ):
         raise HTTPException(409, "请先手动转存初始版本，再开启影巢追更")
     progress = (
-        emby_series_episode_progress(
+        destination_episode_progress(
+            user["storage_destination"],
             tmdb_id,
             known_in_library=known_in_library,
         )
@@ -5514,7 +5967,7 @@ async def hdhive_transfer(
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
-    send_telegram(
+    send_notifications(
         f"☁️ 影巢资源已转存\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
     return {"ok": True, "mode": mode, "message": message}
@@ -5600,7 +6053,7 @@ async def dian_transfer(
                 502,
                 "115接口没有创建云下载任务；返回：" + response_summary(queued),
             )
-        send_telegram(
+        send_notifications(
             f"☁️ 115离线任务已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
         )
         record_transfer(
@@ -5653,7 +6106,7 @@ async def dian_transfer(
             502,
             "115接口没有把文件写入目标目录；返回：" + response_summary(received),
         )
-    send_telegram(
+    send_notifications(
         f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
     )
     record_transfer(
@@ -5711,7 +6164,10 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
     date = canonical.get("release_date") or canonical.get("first_air_date") or ""
     poster_path = canonical.get("poster_path") or ""
     overview = canonical.get("overview") or ""
-    if media_type == "movie" and tmdb_id in emby_library_tmdb_ids():
+    if (
+        media_type == "movie"
+        and tmdb_id in destination_emby_ids(user["storage_destination"])
+    ):
         raise HTTPException(409, "这部影片已经在 Emby 媒体库里了")
     with db() as connection:
         duplicate = connection.execute(
@@ -5736,7 +6192,7 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
         )
         request_id = cursor.lastrowid
     kind = "电影" if media_type == "movie" else "剧集"
-    send_telegram(
+    send_notifications(
         f"🎬 新的求片需求\n\n{user['display_name']} 想看："
         f"{title} ({str(date)[:4]})\n"
         f"类型：{kind}\nTMDB：{tmdb_id}"
@@ -5766,7 +6222,7 @@ async def update_request(request_id: int, request: Request, movie_session: Optio
     message = f"📌 求片状态更新\n\n{row['title']} → {STATUS_NAMES[status]}\n申请人：{row['display_name']}"
     if note:
         message += f"\n回复：{note}"
-    send_telegram(message)
+    send_notifications(message)
     return {"ok": True}
 
 
@@ -5785,7 +6241,7 @@ def delete_request(request_id: int, movie_session: Optional[str] = Cookie(defaul
             raise HTTPException(403, "只能删除自己提交的需求")
         connection.execute("DELETE FROM movie_requests WHERE id = ?", (request_id,))
     actor = "管理员删除了" if user["role"] == "admin" else f"{row['requester_name']} 取消了"
-    send_telegram(f"🗑️ 求片需求已删除\n\n{actor}：{row['title']} ({row['year']})")
+    send_notifications(f"🗑️ 求片需求已删除\n\n{actor}：{row['title']} ({row['year']})")
     return {"ok": True}
 
 
@@ -5916,6 +6372,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         chat_id = setting(connection, "telegram_chat_id")
         emby_url = setting(connection, "emby_url")
         emby_key = setting(connection, "emby_api_key")
+        p123_emby_url = setting(connection, "p123_emby_url")
+        p123_emby_key = setting(connection, "p123_emby_api_key")
         telegram_proxy = setting(connection, "telegram_proxy")
         dian_base_url = setting(connection, "dian_base_url")
         dian_key = setting(connection, "dian_api_key")
@@ -5931,12 +6389,23 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
         p123_client_id = setting(connection, "p123_client_id")
         p123_client_secret = setting(connection, "p123_client_secret")
+        wecom_corp_id = setting(connection, "wecom_corp_id")
+        wecom_agent_id = setting(connection, "wecom_agent_id")
+        wecom_secret = setting(connection, "wecom_secret")
+        wecom_to_user = setting(connection, "wecom_to_user") or "@all"
+        wecom_api_base = setting(connection, "wecom_api_base") or "https://wx.weige1999.xin"
+        wecom_admin_userid = setting(connection, "wecom_admin_userid")
+        callback_token = setting(connection, "wecom_callback_token")
+        encoding_key = setting(connection, "wecom_encoding_aes_key")
+        site_public_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
     return {
         "tmdb_configured": bool(tmdb),
         "telegram_configured": bool(telegram and chat_id),
         "telegram_chat_id": chat_id,
         "emby_configured": bool(emby_url and emby_key),
         "emby_url": emby_url,
+        "p123_emby_configured": bool(p123_emby_url and p123_emby_key),
+        "p123_emby_url": p123_emby_url,
         "telegram_proxy": telegram_proxy,
         "dian_configured": bool(dian_base_url and dian_key),
         "dian_base_url": dian_base_url,
@@ -5956,6 +6425,15 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p115_target_name": p115_target_name,
         "p123_configured": bool(p123_client_id and p123_client_secret),
         "p123_client_id": p123_client_id,
+        "wecom_configured": bool(wecom_corp_id and wecom_agent_id and wecom_secret),
+        "wecom_callback_configured": bool(callback_token and encoding_key),
+        "wecom_corp_id": wecom_corp_id,
+        "wecom_agent_id": wecom_agent_id,
+        "wecom_to_user": wecom_to_user,
+        "wecom_api_base": wecom_api_base,
+        "wecom_admin_userid": wecom_admin_userid,
+        "site_public_url": site_public_url,
+        "wecom_callback_url": site_public_url.rstrip("/") + "/api/wecom/callback",
     }
 
 
@@ -5978,19 +6456,34 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                 raise ValueError
         except ValueError as error:
             raise HTTPException(400, "123目标目录ID无效") from error
+    if payload.get("wecom_agent_id"):
+        try:
+            if int(str(payload["wecom_agent_id"])) <= 0:
+                raise ValueError
+        except ValueError as error:
+            raise HTTPException(400, "企业微信 AgentID 无效") from error
+    if payload.get("wecom_encoding_aes_key") and len(
+        str(payload["wecom_encoding_aes_key"]).strip()
+    ) != 43:
+        raise HTTPException(400, "企业微信 EncodingAESKey 必须为43位")
     with db() as connection:
         for key in (
             "tmdb_token", "telegram_token", "telegram_chat_id", "telegram_proxy",
             "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
+            "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "p115_target_cid", "p115_target_name", "p123_client_id",
-            "p123_client_secret"
+            "p123_client_secret", "wecom_corp_id", "wecom_agent_id",
+            "wecom_secret", "wecom_to_user", "wecom_api_base",
+            "wecom_admin_userid", "wecom_callback_token",
+            "wecom_encoding_aes_key", "site_public_url",
         ):
             if key in payload and str(payload[key]).strip():
                 set_setting(connection, key, payload[key])
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
     configure_telegram_menu()
+    configure_wecom_menu()
     return {"ok": True}
 
 
@@ -6302,11 +6795,13 @@ def telegram_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[s
 
 
 @APP.post("/api/admin/emby-test")
-def emby_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+def emby_test(
+    destination: str = "p115",
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
     require_admin(movie_session)
-    with db() as connection:
-        base_url = setting(connection, "emby_url")
-        api_key = setting(connection, "emby_api_key")
+    destination = storage_destination(destination)
+    base_url, api_key = emby_credentials(destination)
     if not base_url or not api_key:
         raise HTTPException(400, "请先保存 Emby 地址和 API 密钥")
     try:
@@ -6317,7 +6812,7 @@ def emby_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, 
         )
         response.raise_for_status()
         info = response.json()
-        count = len(emby_library_tmdb_ids())
+        count = len(emby_library_tmdb_ids(force=True, destination=destination))
         return {
             "ok": True,
             "server_name": info.get("ServerName") or "Emby",
@@ -6328,9 +6823,36 @@ def emby_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, 
 
 
 @APP.post("/api/admin/emby-sync")
-def emby_sync(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+def emby_sync(
+    destination: Optional[str] = None,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
     require_admin(movie_session)
-    return {"ok": True, "updated": sync_emby_requests(force=True)}
+    if destination not in (None, "p115", "p123"):
+        raise HTTPException(400, "Emby 类型无效")
+    return {
+        "ok": True,
+        "updated": sync_emby_requests(force=True, destination=destination),
+    }
+
+
+@APP.post("/api/admin/wecom-test")
+def wecom_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, bool]:
+    require_admin(movie_session)
+    if not send_wecom(
+        "✅ 映单：企业微信通知测试成功\n\n"
+        "115/123 转存结果与对应 Emby 入库结果都会同步通知。"
+    ):
+        raise HTTPException(502, "企业微信发送失败，请检查 CorpID、AgentID、Secret 和转发地址")
+    return {"ok": True}
+
+
+@APP.post("/api/admin/wecom-menu")
+def wecom_menu(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, bool]:
+    require_admin(movie_session)
+    if not configure_wecom_menu():
+        raise HTTPException(502, "企业微信菜单创建失败，请检查应用权限和配置")
+    return {"ok": True}
 
 
 if __name__ == "__main__":

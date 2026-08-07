@@ -1904,6 +1904,91 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(job["target_name"], "专用目录")
         thread.assert_called_once()
 
+    def test_dual_emby_credentials_are_selected_by_account_destination(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://emby-115")
+            app.set_setting(connection, "emby_api_key", "key-115")
+            app.set_setting(connection, "p123_emby_url", "http://emby-123")
+            app.set_setting(connection, "p123_emby_api_key", "key-123")
+        self.assertEqual(
+            app.emby_credentials("p115"), ("http://emby-115", "key-115")
+        )
+        self.assertEqual(
+            app.emby_credentials("p123"), ("http://emby-123", "key-123")
+        )
+
+    def test_emby_sync_updates_only_users_on_matching_storage(self):
+        with app.db() as connection:
+            p123_user = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, "
+                "storage_destination, created_at) VALUES(?, ?, ?, 'member', 'p123', ?)",
+                ("cloud", "123账号", app.hash_password("password123"), app.now_iso()),
+            ).lastrowid
+            timestamp = app.now_iso()
+            connection.execute(
+                "INSERT INTO movie_requests(user_id, tmdb_id, media_type, title, "
+                "created_at, updated_at) VALUES(1, 101, 'movie', '115电影', ?, ?)",
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                "INSERT INTO movie_requests(user_id, tmdb_id, media_type, title, "
+                "created_at, updated_at) VALUES(?, 202, 'movie', '123电影', ?, ?)",
+                (p123_user, timestamp, timestamp),
+            )
+        with patch.object(
+            app,
+            "emby_library_tmdb_ids",
+            side_effect=lambda **kwargs: (
+                {202} if kwargs.get("destination") == "p123" else {101}
+            ),
+        ):
+            with patch.object(app, "send_notifications") as notify:
+                updated = app.sync_emby_requests(force=True)
+        self.assertEqual(updated, 2)
+        self.assertEqual(notify.call_count, 2)
+        with app.db() as connection:
+            statuses = {
+                row["tmdb_id"]: row["status"]
+                for row in connection.execute(
+                    "SELECT tmdb_id, status FROM movie_requests"
+                )
+            }
+        self.assertEqual(statuses, {101: "available", 202: "available"})
+
+    def test_notification_fanout_sends_telegram_and_wecom(self):
+        with patch.object(app, "send_telegram") as telegram:
+            with patch.object(app, "send_wecom") as wecom:
+                app.send_notifications("测试通知")
+        telegram.assert_called_once_with("测试通知")
+        wecom.assert_called_once_with("测试通知")
+
+    def test_wecom_send_accepts_success_errcode_zero(self):
+        with app.db() as connection:
+            app.set_setting(connection, "wecom_agent_id", "1000005")
+            app.set_setting(connection, "wecom_to_user", "@all")
+        with patch.object(app, "wecom_request", return_value={"errcode": 0}) as request:
+            self.assertTrue(app.send_wecom("企业微信测试"))
+        payload = request.call_args.args[1]
+        self.assertEqual(payload["touser"], "@all")
+        self.assertEqual(payload["agentid"], 1000005)
+
+    def test_wecom_signature_is_stable_and_secrets_are_not_returned(self):
+        self.assertEqual(
+            app.wecom_signature("token", "1700000000", "nonce", "cipher"),
+            app.wecom_signature("token", "1700000000", "nonce", "cipher"),
+        )
+        with app.db() as connection:
+            app.set_setting(connection, "wecom_corp_id", "corp")
+            app.set_setting(connection, "wecom_agent_id", "1000005")
+            app.set_setting(connection, "wecom_secret", "top-secret")
+            app.set_setting(connection, "wecom_callback_token", "callback-secret")
+            app.set_setting(connection, "wecom_encoding_aes_key", "A" * 43)
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["wecom_configured"])
+        self.assertNotIn("wecom_secret", settings)
+        self.assertNotIn("wecom_callback_token", settings)
+        self.assertNotIn("wecom_encoding_aes_key", settings)
+
 
 if __name__ == "__main__":
     unittest.main()
