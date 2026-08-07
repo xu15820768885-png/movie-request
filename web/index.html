@@ -525,9 +525,22 @@
           </section>
         </div>
         <form id="p123Form" class="panel stack" style="margin-top:18px">
-          <div class="section-head" style="margin:0"><div><h3>123 云盘账号登录</h3><span>像 TgtToDrive 一样，直接使用123账号的手机号和密码登录</span></div><button id="p123Test" class="btn" type="button">测试登录</button></div>
-          <div class="inline"><label>登录手机号<input id="p123Passport" inputmode="tel" autocomplete="username" placeholder="123云盘登录手机号"></label><label>登录密码<input id="p123Password" type="password" autocomplete="current-password" placeholder="已保存时留空不修改"></label></div>
-          <div class="integration-actions"><button class="btn btn-primary" type="submit">保存123登录</button></div>
+          <div class="section-head" style="margin:0"><div><h3>123 云盘</h3><span>登录一次并选择统一目录，所有123成员都转存到这里</span></div></div>
+          <div class="integration-grid">
+            <div class="resource-source-column stack">
+              <div class="section-head" style="margin:0"><div><h3>123账号登录</h3><span>使用123账号的手机号和密码</span></div><button id="p123Test" class="btn btn-small" type="button">测试登录</button></div>
+              <label>登录手机号<input id="p123Passport" inputmode="tel" autocomplete="username" placeholder="123云盘登录手机号"></label>
+              <label>登录密码<input id="p123Password" type="password" autocomplete="current-password" placeholder="已保存时留空不修改"></label>
+              <div class="integration-actions"><button class="btn btn-primary" type="submit">保存123登录</button></div>
+            </div>
+            <section class="resource-source-column">
+              <h3>123 转存设置</h3>
+              <div class="integration-label">所有123成员的资源统一转存到</div>
+              <div id="selectedP123FolderPath" class="folder-path">123云盘 / 根目录</div>
+              <div class="integration-actions"><button id="p123FolderSelect" class="btn" type="button">选择转存文件夹</button></div>
+              <div id="p123FolderPicker" class="folder-picker hidden"></div>
+            </section>
+          </div>
           <div class="transfer-note">密码会加密保存在 NAS 并且不会回显。只有123云端已存在相同 SHA1 和大小的文件才会秒传成功；未命中会明确显示，不会偷偷下载到NAS再上传。</div>
         </form>
         <section class="panel" style="margin-top:18px">
@@ -536,7 +549,7 @@
         </section>
         <div class="transfer-note" style="margin-top:18px">OpenAPI Key、115 Cookie、123登录凭据和目标目录ID只保存在NAS的 /data 目录，不会进入网页或GitHub。</div>
       </section>
-      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个账号固定对应115或123，资源页始终只有一个转存按钮</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">123云盘</option></select></label><input id="newP123TargetId" type="hidden" value="0"><input id="newP123TargetName" type="hidden" value="根目录"><button id="newP123Folder" class="btn hidden" type="button">选择123文件夹：根目录</button><button class="btn btn-primary" type="submit">创建账号</button></form></div><div id="accountP123FolderPicker" class="panel folder-picker hidden" style="margin-top:18px"></div></section>
+      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个账号只选择115或123；两种网盘都使用各自统一设置的转存目录</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">123云盘</option></select></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
       <section id="settingsView" class="view hidden">
         <div class="section-head"><div><h2>系统设置</h2><span>按分类查看和修改，不再需要翻完整个长页面</span></div><span>敏感信息只保存在 NAS，不会回显</span></div>
         <form id="settingsForm" class="settings-layout">
@@ -1055,54 +1068,44 @@
     }
     async function loadUsers() {
       const users=preview
-        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115',p123_target_id:0,p123_target_name:'根目录'},{id:3,username:'cloud123',display_name:'123专用',role:'member',active:1,storage_destination:'p123',p123_target_id:8899,p123_target_name:'家庭影视/123转存'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115',p123_target_id:0,p123_target_name:'根目录'}]
+        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115'},{id:3,username:'cloud123',display_name:'123专用',role:'member',active:1,storage_destination:'p123'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115'}]
         : (await api('/api/admin/users')).users;
-      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)} · ${user.storage_destination==='p123'?`123 / ${escapeHtml(user.p123_target_name||'根目录')}`:'115'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><select data-user-destination="${user.id}" aria-label="固定转存目标"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>转存115</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>转存123</option></select><input data-user-target-id="${user.id}" type="hidden" value="${escapeHtml(user.p123_target_id||0)}"><input data-user-target-name="${user.id}" type="hidden" value="${escapeHtml(user.p123_target_name||'根目录')}"><button class="btn btn-small ${user.storage_destination==='p123'?'':'hidden'}" type="button" data-user-folder="${user.id}">123目录：${escapeHtml(user.p123_target_name||'根目录')}</button><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button>`}</div></div>`).join('');
+      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)} · 转存到${user.storage_destination==='p123'?'123统一目录':'115统一目录'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><select data-user-destination="${user.id}" aria-label="固定转存目标"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>转存115</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>转存123</option></select><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button>`}</div></div>`).join('');
       $('userList').querySelectorAll('[data-user-save]').forEach(button=>button.onclick=()=>saveUser(Number(button.dataset.userSave),button));
       $('userList').querySelectorAll('[data-user-delete]').forEach(button=>button.onclick=()=>deleteUser(Number(button.dataset.userDelete),button.dataset.userLabel,button));
-      $('userList').querySelectorAll('[data-user-folder]').forEach(button=>button.onclick=()=>openAccountP123FolderPicker(Number(button.dataset.userFolder)));
-      $('userList').querySelectorAll('[data-user-destination]').forEach(select=>select.onchange=()=>{const button=document.querySelector(`[data-user-folder="${select.dataset.userDestination}"]`);button.classList.toggle('hidden',select.value!=='p123');});
     }
     async function saveUser(id,button) {
       const display_name=document.querySelector(`[data-user-name="${id}"]`).value.trim();
       const username=document.querySelector(`[data-user-login="${id}"]`).value.trim();
       const password=document.querySelector(`[data-user-password="${id}"]`).value;
       const storage_destination=document.querySelector(`[data-user-destination="${id}"]`).value;
-      const p123_target_id=Number(document.querySelector(`[data-user-target-id="${id}"]`).value||0);
-      const p123_target_name=document.querySelector(`[data-user-target-name="${id}"]`).value||'根目录';
       if(!display_name||!username)return toast('显示名称和登录账号不能为空',true);
       if(password&&password.length<8)return toast('新密码至少需要 8 位',true);
       if(preview){toast('预览模式：成员账号已更新');return;}
       button.disabled=true;
       try {
-        await api(`/api/admin/users/${id}`,{method:'PATCH',body:JSON.stringify({display_name,username,password,storage_destination,p123_target_id,p123_target_name})});
+        await api(`/api/admin/users/${id}`,{method:'PATCH',body:JSON.stringify({display_name,username,password,storage_destination})});
         toast(password?'账号和密码已更新，成员需要重新登录':'成员账号已更新');
         await loadUsers();
       } catch(error){toast(error.message,true);button.disabled=false;}
     }
-    let accountFolderTarget='new';
-    function openAccountP123FolderPicker(target) {
-      accountFolderTarget=target;
-      loadAccountP123Folders(0,'123云盘');
-    }
-    async function loadAccountP123Folders(parentId=0,path='123云盘') {
-      const root=$('accountP123FolderPicker');root.classList.remove('hidden');root.innerHTML='<div class="muted" style="padding:12px">正在读取123目录…</div>';
+    async function loadP123Folders(parentId=0,path='123云盘') {
+      const root=$('p123FolderPicker');root.classList.remove('hidden');root.innerHTML='<div class="muted" style="padding:12px">正在读取123目录…</div>';
       try {
         const folders=preview?[{id:1001,name:'家庭影视'},{id:1002,name:'电影'},{id:1003,name:'剧集'}]:(await api(`/api/admin/p123/folders?parent_id=${encodeURIComponent(parentId)}`)).folders||[];
         root.innerHTML=`<button class="folder-row selected" type="button" data-p123-choose="${parentId}" data-p123-name="${escapeHtml(path.replace(/^123云盘\s*\/\s*/,'')||'根目录')}"><span>✓ 使用当前目录：${escapeHtml(path)}</span></button>`+folders.map(folder=>`<button class="folder-row" type="button" data-p123-open="${folder.id}" data-p123-folder-name="${escapeHtml(folder.name)}"><span>📁 ${escapeHtml(folder.name)}</span><span>进入 ›</span></button>`).join('');
-        root.querySelectorAll('[data-p123-open]').forEach(button=>button.onclick=()=>loadAccountP123Folders(Number(button.dataset.p123Open),`${path} / ${button.dataset.p123FolderName}`));
-        root.querySelectorAll('[data-p123-choose]').forEach(button=>button.onclick=()=>chooseAccountP123Folder(Number(button.dataset.p123Choose),button.dataset.p123Name,path));
+        root.querySelectorAll('[data-p123-open]').forEach(button=>button.onclick=()=>loadP123Folders(Number(button.dataset.p123Open),`${path} / ${button.dataset.p123FolderName}`));
+        root.querySelectorAll('[data-p123-choose]').forEach(button=>button.onclick=()=>saveP123TargetFolder(Number(button.dataset.p123Choose),button.dataset.p123Name,path));
       } catch(error){root.innerHTML=`<div class="muted" style="padding:12px">${escapeHtml(error.message)}</div>`;toast(error.message,true);}
     }
-    function chooseAccountP123Folder(id,name,path) {
-      if(accountFolderTarget==='new'){
-        $('newP123TargetId').value=String(id);$('newP123TargetName').value=name;$('newP123Folder').textContent=`选择123文件夹：${name}`;
-      }else{
-        document.querySelector(`[data-user-target-id="${accountFolderTarget}"]`).value=String(id);
-        document.querySelector(`[data-user-target-name="${accountFolderTarget}"]`).value=name;
-        document.querySelector(`[data-user-folder="${accountFolderTarget}"]`).textContent=`123目录：${name}`;
-      }
-      $('accountP123FolderPicker').classList.add('hidden');toast(`已选择：${path}`);
+    async function saveP123TargetFolder(id,name,path) {
+      try {
+        if(!preview)await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p123_target_id:String(id),p123_target_name:name})});
+        $('selectedP123FolderPath').textContent=path;
+        $('p123FolderPicker').classList.add('hidden');
+        $('p123FolderSelect').textContent='选择转存文件夹';
+        toast(`123统一目录已选择：${path}`);
+      } catch(error){toast(error.message,true);}
     }
     async function deleteUser(id,label,button) {
       if(!confirm(`确定永久删除“${label}”的账号吗？该成员的求片记录也会一起删除，无法恢复。`))return;
@@ -1156,6 +1159,7 @@
       $('selectedFolderPath').textContent=settings.p115_target_name?`115网盘 / ${settings.p115_target_name}`:'尚未选择转存文件夹';
       $('p123Status').textContent=settings.p123_configured?(settings.p123_auth_mode==='password'?'已登录':'旧配置可用'):'待配置';
       $('p123Passport').value=settings.p123_passport||'';
+      $('selectedP123FolderPath').textContent=settings.p123_target_name?`123云盘 / ${settings.p123_target_name}`:'123云盘 / 根目录';
       loadP123Jobs();
     }
     async function loadP123Jobs() {
@@ -1285,9 +1289,7 @@
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
     $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
-    $('newStorageDestination').onchange=()=>$('newP123Folder').classList.toggle('hidden',$('newStorageDestination').value!=='p123');
-    $('newP123Folder').onclick=()=>openAccountP123FolderPicker('new');
-    $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：成员账号创建成功');try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value,p123_target_id:Number($('newP123TargetId').value||0),p123_target_name:$('newP123TargetName').value||'根目录'})});event.target.reset();$('newP123TargetId').value='0';$('newP123TargetName').value='根目录';$('newP123Folder').textContent='选择123文件夹：根目录';$('newP123Folder').classList.add('hidden');toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
+    $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：成员账号创建成功');try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
     $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');event.target.querySelectorAll('input[type="password"]').forEach(input=>input.value='');loadSettings();}catch(error){toast(error.message,true);}};
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('wecomTest').onclick=async()=>{if(preview)return toast('预览模式：企业微信测试成功');try{await api('/api/admin/wecom-test',{method:'POST'});toast('企业微信测试通知已发送');}catch(error){toast(error.message,true);}};
@@ -1300,6 +1302,7 @@
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('p123Form').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：123手机号登录已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p123_passport:$('p123Passport').value,p123_password:$('p123Password').value})});$('p123Password').value='';toast('123账号登录已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('p123Test').onclick=async()=>{if(preview)return toast('123云盘账号登录正常');try{const result=await api('/api/admin/p123/test',{method:'POST'});toast(`${result.message} · ${result.latency_ms} ms`);}catch(error){toast(error.message,true);}};
+    $('p123FolderSelect').onclick=()=>{$('p123FolderPicker').classList.contains('hidden')?loadP123Folders():($('p123FolderPicker').classList.add('hidden'),$('p123FolderSelect').textContent='选择转存文件夹');};
     $('p123RefreshJobs').onclick=()=>loadP123Jobs().catch(error=>toast(error.message,true));
     $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};

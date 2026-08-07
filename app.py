@@ -1446,14 +1446,14 @@ def queue_p123_transfer(
         if not p123_is_configured(connection):
             raise HTTPException(503, "管理员尚未配置123云盘账号")
         target = connection.execute(
-            "SELECT storage_destination, p123_target_id, p123_target_name "
+            "SELECT storage_destination "
             "FROM users WHERE id = ?",
             (int(user["id"]),),
         ).fetchone()
         if not target or target["storage_destination"] != "p123":
             raise HTTPException(403, "当前账号没有分配123转存目标")
-        target_id = int(target["p123_target_id"] or 0)
-        target_name = str(target["p123_target_name"] or "根目录")
+        target_id = int(setting(connection, "p123_target_id") or 0)
+        target_name = setting(connection, "p123_target_name") or "根目录"
     job_id = secrets.token_urlsafe(18)
     timestamp = now_iso()
     with db() as connection:
@@ -6468,6 +6468,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p123_password_cipher = setting(connection, "p123_password_cipher")
         p123_client_id = setting(connection, "p123_client_id")
         p123_client_secret = setting(connection, "p123_client_secret")
+        p123_target_id = setting(connection, "p123_target_id") or "0"
+        p123_target_name = setting(connection, "p123_target_name") or "根目录"
         wecom_corp_id = setting(connection, "wecom_corp_id")
         wecom_agent_id = setting(connection, "wecom_agent_id")
         wecom_secret = setting(connection, "wecom_secret")
@@ -6517,6 +6519,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p123_password_configured": bool(p123_password_cipher),
         "p123_legacy_open_configured": bool(p123_client_id and p123_client_secret),
         "p123_client_id": p123_client_id,
+        "p123_target_id": p123_target_id,
+        "p123_target_name": p123_target_name,
         "wecom_configured": bool(wecom_corp_id and wecom_agent_id and wecom_secret),
         "wecom_callback_configured": bool(callback_token and encoding_key),
         "wecom_corp_id": wecom_corp_id,
@@ -6572,6 +6576,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "p115_target_cid", "p115_target_name", "p123_passport",
+            "p123_target_id", "p123_target_name",
             "p123_client_id",
             "p123_client_secret", "wecom_corp_id", "wecom_agent_id",
             "wecom_secret", "wecom_to_user", "wecom_api_base",

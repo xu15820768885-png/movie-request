@@ -1964,14 +1964,16 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["mode"], "p123")
         queued.assert_called_once()
 
-    def test_p123_queue_is_persisted_before_worker_starts(self):
+    def test_p123_queue_uses_global_folder_and_is_persisted_before_worker(self):
         with app.db() as connection:
             connection.execute(
                 "UPDATE users SET storage_destination = 'p123', "
-                "p123_target_id = 7788, p123_target_name = '专用目录' WHERE id = 1"
+                "p123_target_id = 9999, p123_target_name = '旧成员目录' WHERE id = 1"
             )
             app.set_setting(connection, "p123_client_id", "client")
             app.set_setting(connection, "p123_client_secret", "secret")
+            app.set_setting(connection, "p123_target_id", "7788")
+            app.set_setting(connection, "p123_target_name", "统一目录")
         user = app.require_user(self.token)
         with patch.object(app, "p115_client", return_value=object()):
             with patch.object(app, "Thread") as thread:
@@ -1990,8 +1992,23 @@ class MovieRequestTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(job["status"], "queued")
         self.assertEqual(job["target_id"], 7788)
-        self.assertEqual(job["target_name"], "专用目录")
+        self.assertEqual(job["target_name"], "统一目录")
         thread.assert_called_once()
+
+    def test_p123_global_target_folder_is_returned_in_settings(self):
+        asyncio.run(
+            app.update_settings(
+                FakeRequest({
+                    "p123_target_id": "7788",
+                    "p123_target_name": "影视/统一转存",
+                }),
+                self.token,
+            )
+        )
+
+        settings = app.get_settings(self.token)
+        self.assertEqual(settings["p123_target_id"], "7788")
+        self.assertEqual(settings["p123_target_name"], "影视/统一转存")
 
     def test_dual_emby_credentials_are_selected_by_account_destination(self):
         with app.db() as connection:
