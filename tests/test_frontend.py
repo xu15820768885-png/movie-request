@@ -83,6 +83,13 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("/emby-progress`)", html)
         self.assertNotIn("await refreshFollowEmbyProgress(follows)", html)
 
+    def test_admin_can_edit_notice_inline(self):
+        html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+        self.assertIn('id="editNoticeButton"', html)
+        self.assertIn('id="noticeForm"', html)
+        self.assertIn("/api/admin/notice", html)
+        self.assertIn("if(noticeEditing)return", html)
+
 
 if __name__ == "__main__":
     unittest.main()

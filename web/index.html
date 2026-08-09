@@ -89,8 +89,13 @@
       background: linear-gradient(135deg, rgba(255,123,70,.13), rgba(31,28,25,.92) 58%);
       box-shadow: inset 3px 0 0 var(--orange), 0 18px 44px rgba(0,0,0,.14);
     }
+    .notice-head { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .notice-kicker { color: var(--orange-2); font-size: 11px; font-weight: 800; letter-spacing: .12em; }
     .notice-text { margin-top: 9px; color: var(--text); font-size: 15px; font-weight: 700; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .notice-edit { min-height: 28px; padding: 4px 9px; font-size: 11px; }
+    .notice-form { width: 100%; margin-top: 10px; }
+    .notice-form textarea { width: 100%; min-height: 76px; resize: vertical; }
+    .notice-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
     .search-box {
       display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 9px;
       border: 1px solid #494139; border-radius: 18px; background: rgba(27,25,23,.92); box-shadow: var(--shadow);
@@ -471,7 +476,14 @@
     <main class="shell">
       <section id="familyHero" class="hero">
         <div class="hero-copy"><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
-        <aside id="siteNotice" class="site-notice hidden" aria-live="polite"><div class="notice-kicker">重要提醒</div><div id="siteNoticeText" class="notice-text"></div></aside>
+        <aside id="siteNotice" class="site-notice hidden" aria-live="polite">
+          <div class="notice-head"><div class="notice-kicker">重要提醒</div><button id="editNoticeButton" class="btn btn-ghost notice-edit hidden" type="button">编辑</button></div>
+          <div id="siteNoticeText" class="notice-text"></div>
+          <form id="noticeForm" class="notice-form hidden">
+            <textarea id="noticeInput" maxlength="240" placeholder="输入公告内容；留空保存可清除公告"></textarea>
+            <div class="notice-actions"><button id="cancelNoticeButton" class="btn btn-ghost btn-small" type="button">取消</button><button id="saveNoticeButton" class="btn btn-primary btn-small" type="submit">保存公告</button></div>
+          </form>
+        </aside>
         <div class="hero-stamp">精准匹配影片资料<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
@@ -683,15 +695,36 @@
       if (!response.ok) throw new Error(data.detail || `请求失败 ${response.status}`);
       return data;
     }
+    let noticeText='';
+    let noticeEditing=false;
     function renderSiteNotice(text) {
       const clean=String(text||'').trim();
-      $('siteNoticeText').textContent=clean;
-      $('siteNotice').classList.toggle('hidden',!clean);
-      $('familyHero').classList.toggle('has-notice',!!clean);
+      const admin=currentUser?.role==='admin'; noticeText=clean;
+      $('siteNoticeText').textContent=clean||(admin?'暂无公告，点击“编辑”发布。':'');
+      $('editNoticeButton').classList.toggle('hidden',!admin||noticeEditing);
+      $('siteNotice').classList.toggle('hidden',!clean&&!admin);
+      $('familyHero').classList.toggle('has-notice',!!clean||admin);
     }
     async function loadSiteNotice() {
       if(preview){renderSiteNotice('今晚会更新一批新片，提交后请留意入库状态。');return;}
+      if(noticeEditing)return;
       try {const data=await api('/api/notice');renderSiteNotice(data.text||'');} catch {}
+    }
+    function editSiteNotice() {
+      if(currentUser?.role!=='admin')return;
+      noticeEditing=true; $('noticeInput').value=noticeText;
+      $('siteNoticeText').classList.add('hidden'); $('editNoticeButton').classList.add('hidden'); $('noticeForm').classList.remove('hidden');
+      $('noticeInput').focus();
+    }
+    function closeNoticeEditor() {
+      noticeEditing=false; $('noticeForm').classList.add('hidden'); $('siteNoticeText').classList.remove('hidden'); renderSiteNotice(noticeText);
+    }
+    async function saveSiteNotice(event) {
+      event.preventDefault(); const button=$('saveNoticeButton'); button.disabled=true;
+      try {
+        const data=preview?{text:$('noticeInput').value.trim()}:await api('/api/admin/notice',{method:'PATCH',body:JSON.stringify({text:$('noticeInput').value})});
+        noticeText=String(data.text||'').trim(); closeNoticeEditor(); toast(noticeText?'公告已更新':'公告已清除');
+      } catch(error) {toast(error.message,true);} finally {button.disabled=false;}
     }
     function showAuth(setup=false) {
       needsSetup=setup; $('authOverlay').classList.remove('hidden'); $('app').classList.add('hidden');
@@ -708,6 +741,7 @@
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
       $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
+      $('editNoticeButton').onclick=editSiteNotice; $('cancelNoticeButton').onclick=closeNoticeEditor; $('noticeForm').onsubmit=saveSiteNotice;
     }
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));

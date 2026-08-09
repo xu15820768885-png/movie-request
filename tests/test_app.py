@@ -984,6 +984,43 @@ class MovieRequestTests(unittest.TestCase):
             self.assertTrue(app.handle_telegram_message("/clear_notice"))
         self.assertEqual(app.site_notice(self.token)["text"], "")
 
+    def test_admin_can_update_and_clear_site_notice_inline(self):
+        updated = asyncio.run(
+            app.update_site_notice(FakeRequest({"text": "  今晚更新 4K 资源  "}), self.token)
+        )
+        self.assertEqual(updated["text"], "今晚更新 4K 资源")
+        self.assertEqual(app.site_notice(self.token)["text"], "今晚更新 4K 资源")
+
+        cleared = asyncio.run(
+            app.update_site_notice(FakeRequest({"text": ""}), self.token)
+        )
+        self.assertEqual(cleared["text"], "")
+        self.assertEqual(app.site_notice(self.token)["text"], "")
+
+    def test_member_cannot_update_site_notice(self):
+        member_token = "member-notice-token"
+        with app.db() as connection:
+            member_id = connection.execute(
+                "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                "VALUES('member-notice', '成员', ?, 'member', ?)",
+                (app.hash_password("password123"), app.now_iso()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO sessions(token_hash, user_id, expires_at) VALUES(?, ?, ?)",
+                (
+                    hashlib.sha256(member_token.encode()).hexdigest(),
+                    member_id,
+                    (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                ),
+            )
+        with self.assertRaises(app.HTTPException) as error:
+            asyncio.run(
+                app.update_site_notice(
+                    FakeRequest({"text": "成员不能改"}), member_token
+                )
+            )
+        self.assertEqual(error.exception.status_code, 403)
+
     def test_telegram_menu_contains_notice_commands(self):
         with patch.object(app, "telegram_request") as telegram:
             app.configure_telegram_menu()

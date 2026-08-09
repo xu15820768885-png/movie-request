@@ -4502,6 +4502,21 @@ def site_notice(movie_session: Optional[str] = Cookie(default=None)) -> dict[str
         return {"text": setting(connection, "site_notice")}
 
 
+@APP.patch("/api/admin/notice")
+async def update_site_notice(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    text = str(payload.get("text") or "").strip()
+    if len(text) > 240:
+        raise HTTPException(400, "公告最多 240 个字")
+    with db() as connection:
+        set_setting(connection, "site_notice", text)
+    return {"ok": True, "text": text}
+
+
 @APP.post("/api/bootstrap")
 async def setup(request: Request, response: Response) -> dict[str, Any]:
     payload = await request.json()
