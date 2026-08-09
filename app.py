@@ -10,6 +10,8 @@ import sqlite3
 import struct
 import time
 import base64
+import asyncio
+import copy
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -24,6 +26,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import Cookie, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from requests.adapters import HTTPAdapter
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
@@ -54,6 +57,7 @@ TMDB_HTTP.mount(
 )
 
 APP = FastAPI(title="映单", docs_url=None, redoc_url=None)
+APP.add_middleware(GZipMiddleware, minimum_size=1000)
 TELEGRAM_OFFSET = 0
 CACHE_LOCK = Lock()
 TMDB_RESPONSE_CACHE: dict[str, tuple[float, float, dict[str, Any]]] = {}
@@ -72,6 +76,15 @@ EMBY_LIBRARY_CACHES: dict[str, dict[str, Any]] = {
     "p123": {"key": "", "expires": 0.0, "ids": set(), "refreshing": False},
 }
 EMBY_EPISODE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+RESOURCE_RESPONSE_CACHE: dict[tuple[str, str, str, int, int], tuple[float, dict[str, Any]]] = {}
+RESOURCE_REQUEST_LOCKS: dict[tuple[str, str, str, int, int], Lock] = {}
+RESOURCE_CACHE_SECONDS = 120
+RESOURCE_CACHE_MAX_ITEMS = 256
+IMAGE_DOWNLOAD_LOCKS: dict[str, Lock] = {}
+IMAGE_CACHE_CLEANUP_LOCK = Lock()
+IMAGE_CACHE_LAST_CLEANUP = 0.0
+IMAGE_CACHE_MAX_FILES = 3000
+IMAGE_CACHE_TARGET_FILES = 2500
 WECOM_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
 WECOM_TOKEN_LOCK = Lock()
 QR_LOGIN_LOCK = Lock()
@@ -99,7 +112,8 @@ async def movie_http_exception_handler(
     if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
         user = session_user(request.cookies.get("movie_session"))
         if user:
-            send_notifications(
+            await asyncio.to_thread(
+                send_notifications,
                 f"❌ 资源转存失败 · "
                 f"{'123' if user['storage_destination'] == 'p123' else '115'}\n\n"
                 f"账号：{user['display_name']}\n原因：{error.detail}"
@@ -121,6 +135,120 @@ def tmdb_image_proxy_url(path: Any, size: str = "w500") -> str:
         return ""
     clean_size = size if size in TMDB_IMAGE_SIZES else "w500"
     return f"/api/tmdb/image/{clean_size}/{quote(clean_path, safe='._-')}"
+
+
+def resource_cache_key(
+    provider: str,
+    media_type: str,
+    tmdb_id: int,
+    season: Optional[int] = None,
+) -> tuple[str, str, str, int, int]:
+    return (
+        str(DB_PATH),
+        provider,
+        media_type,
+        int(tmdb_id),
+        int(season) if season is not None else -1,
+    )
+
+
+def cached_resource_response(
+    provider: str,
+    media_type: str,
+    tmdb_id: int,
+    season: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    key = resource_cache_key(provider, media_type, tmdb_id, season)
+    now = time.monotonic()
+    with CACHE_LOCK:
+        cached = RESOURCE_RESPONSE_CACHE.get(key)
+        if not cached:
+            return None
+        if cached[0] <= now:
+            RESOURCE_RESPONSE_CACHE.pop(key, None)
+            return None
+        return copy.deepcopy(cached[1])
+
+
+def resource_request_lock(
+    provider: str,
+    media_type: str,
+    tmdb_id: int,
+    season: Optional[int] = None,
+) -> Lock:
+    key = resource_cache_key(provider, media_type, tmdb_id, season)
+    with CACHE_LOCK:
+        lock = RESOURCE_REQUEST_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            RESOURCE_REQUEST_LOCKS[key] = lock
+        return lock
+
+
+def cache_resource_response(
+    provider: str,
+    media_type: str,
+    tmdb_id: int,
+    response: dict[str, Any],
+    season: Optional[int] = None,
+) -> dict[str, Any]:
+    key = resource_cache_key(provider, media_type, tmdb_id, season)
+    now = time.monotonic()
+    with CACHE_LOCK:
+        if len(RESOURCE_RESPONSE_CACHE) >= RESOURCE_CACHE_MAX_ITEMS:
+            expired = [
+                cache_key
+                for cache_key, cached in RESOURCE_RESPONSE_CACHE.items()
+                if cached[0] <= now
+            ]
+            for cache_key in expired:
+                RESOURCE_RESPONSE_CACHE.pop(cache_key, None)
+            while len(RESOURCE_RESPONSE_CACHE) >= RESOURCE_CACHE_MAX_ITEMS:
+                RESOURCE_RESPONSE_CACHE.pop(next(iter(RESOURCE_RESPONSE_CACHE)))
+        RESOURCE_RESPONSE_CACHE[key] = (
+            now + RESOURCE_CACHE_SECONDS,
+            copy.deepcopy(response),
+        )
+    return response
+
+
+def image_download_lock(cache_path: Path) -> Lock:
+    key = str(cache_path)
+    with CACHE_LOCK:
+        lock = IMAGE_DOWNLOAD_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            IMAGE_DOWNLOAD_LOCKS[key] = lock
+        return lock
+
+
+def cleanup_image_cache_if_needed() -> None:
+    global IMAGE_CACHE_LAST_CLEANUP
+    now = time.monotonic()
+    if now - IMAGE_CACHE_LAST_CLEANUP < 3600:
+        return
+    if not IMAGE_CACHE_CLEANUP_LOCK.acquire(blocking=False):
+        return
+    try:
+        IMAGE_CACHE_LAST_CLEANUP = now
+        roots = [DATA_DIR / "tmdb-images", DATA_DIR / "douban-images"]
+        files = [
+            path
+            for root in roots
+            if root.exists()
+            for path in root.rglob("*")
+            if path.is_file() and not path.name.endswith(".tmp")
+        ]
+        if len(files) <= IMAGE_CACHE_MAX_FILES:
+            return
+        files.sort(key=lambda path: path.stat().st_mtime)
+        for path in files[: max(0, len(files) - IMAGE_CACHE_TARGET_FILES)]:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    finally:
+        IMAGE_CACHE_CLEANUP_LOCK.release()
 
 
 def db() -> sqlite3.Connection:
@@ -1155,7 +1283,7 @@ async def deliver_to_pansave(
         season_number=season_number,
         episode_numbers=episode_numbers or [],
     )
-    send_notifications(
+    send_notifications_async(
         f"📨 资源已提交123\n\n"
         f"{title or '资源'} · {user['display_name']}\n"
         f"已发送给 @{result['bot_username']}"
@@ -3223,7 +3351,7 @@ def tmdb_media_item(
         "year": str(date)[:4],
         "overview": item.get("overview") or "暂无简介",
         "poster_path": poster_path,
-        "poster_url": tmdb_image_proxy_url(poster_path),
+        "poster_url": tmdb_image_proxy_url(poster_path, "w342"),
         "rating": round(float(item.get("vote_average") or 0), 1),
         "vote_count": int(item.get("vote_count") or 0),
         "in_library": tmdb_id in library_ids,
@@ -4356,7 +4484,7 @@ def startup() -> None:
 
 @APP.get("/")
 def index() -> FileResponse:
-    return FileResponse(WEB_PATH)
+    return FileResponse(WEB_PATH, headers={"Cache-Control": "no-cache"})
 
 
 @APP.get("/api/health")
@@ -4468,23 +4596,27 @@ def tmdb_image(
     if cache_path.exists() and cache_path.stat().st_size > 0:
         return FileResponse(cache_path, headers=headers)
 
-    try:
-        response = requests.get(image_url, timeout=15)
-        response.raise_for_status()
-    except requests.RequestException as error:
-        raise HTTPException(502, "TMDB 图片暂时无法读取") from error
-    content_type = str(response.headers.get("Content-Type") or "")
-    if not content_type.startswith("image/") or not response.content:
-        raise HTTPException(502, "TMDB 图片返回了无效内容")
-    if len(response.content) > 20 * 1024 * 1024:
-        raise HTTPException(502, "TMDB 图片文件过大")
+    with image_download_lock(cache_path):
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return FileResponse(cache_path, headers=headers)
+        try:
+            response = requests.get(image_url, timeout=15)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise HTTPException(502, "TMDB 图片暂时无法读取") from error
+        content_type = str(response.headers.get("Content-Type") or "")
+        if not content_type.startswith("image/") or not response.content:
+            raise HTTPException(502, "TMDB 图片返回了无效内容")
+        if len(response.content) > 20 * 1024 * 1024:
+            raise HTTPException(502, "TMDB 图片文件过大")
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    temporary = cache_path.with_name(
-        f"{cache_path.name}.{secrets.token_hex(6)}.tmp"
-    )
-    temporary.write_bytes(response.content)
-    os.replace(temporary, cache_path)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_name(
+            f"{cache_path.name}.{secrets.token_hex(6)}.tmp"
+        )
+        temporary.write_bytes(response.content)
+        os.replace(temporary, cache_path)
+    cleanup_image_cache_if_needed()
     return FileResponse(cache_path, media_type=content_type, headers=headers)
 
 
@@ -4762,26 +4894,42 @@ def douban_poster(
         or not parsed.path.startswith("/view/photo/")
     ):
         raise HTTPException(400, "豆瓣海报地址无效")
-    try:
-        image = requests.get(
-            url,
-            headers={
-                "Referer": "https://m.douban.com/",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
-            },
-            timeout=15,
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+        suffix = ".jpg"
+    cache_dir = DATA_DIR / "douban-images"
+    cache_path = cache_dir / (hashlib.sha256(url.encode()).hexdigest() + suffix)
+    headers = {"Cache-Control": "private, max-age=604800"}
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return FileResponse(cache_path, headers=headers)
+    with image_download_lock(cache_path):
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return FileResponse(cache_path, headers=headers)
+        try:
+            image = requests.get(
+                url,
+                headers={
+                    "Referer": "https://m.douban.com/",
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Mobile Safari/537.36",
+                },
+                timeout=15,
+            )
+            image.raise_for_status()
+        except requests.RequestException as error:
+            raise HTTPException(502, "豆瓣海报暂时无法读取") from error
+        content_type = image.headers.get("Content-Type", "image/jpeg")
+        if not content_type.startswith("image/") or not image.content:
+            raise HTTPException(502, "豆瓣海报返回了无效内容")
+        if len(image.content) > 20 * 1024 * 1024:
+            raise HTTPException(502, "豆瓣海报文件过大")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_name(
+            f"{cache_path.name}.{secrets.token_hex(6)}.tmp"
         )
-        image.raise_for_status()
-    except requests.RequestException as error:
-        raise HTTPException(502, "豆瓣海报暂时无法读取") from error
-    content_type = image.headers.get("Content-Type", "image/jpeg")
-    if not content_type.startswith("image/"):
-        raise HTTPException(502, "豆瓣海报返回了无效内容")
-    return Response(
-        content=image.content,
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+        temporary.write_bytes(image.content)
+        os.replace(temporary, cache_path)
+    cleanup_image_cache_if_needed()
+    return FileResponse(cache_path, media_type=content_type, headers=headers)
 
 
 @APP.get("/api/details/{media_type}/{tmdb_id}")
@@ -4884,12 +5032,11 @@ def emby_episode_progress(
     if tmdb_id <= 0:
         raise HTTPException(400, "剧集编号无效")
     destination = user["storage_destination"]
-    library_ids = destination_emby_ids(destination, force=True)
+    library_ids = destination_emby_ids(destination, prefer_cached=True)
     progress = destination_episode_progress(
         destination,
         tmdb_id,
         known_in_library=tmdb_id in library_ids,
-        force=True,
     )
     return {
         "in_library": bool(progress.get("emby_latest_episode_number")),
@@ -4919,6 +5066,16 @@ def hdhive_public_status() -> dict[str, Any]:
         last_signin_mode = setting(connection, "hdhive_last_signin_mode")
         last_signin_status = setting(connection, "hdhive_last_signin_status")
         last_signin_message = setting(connection, "hdhive_last_signin_message")
+    app_secret = (
+        decrypt_secret(row["app_secret_cipher"])
+        if row["app_secret_cipher"]
+        else ""
+    )
+    saved_proxy_url = (
+        decrypt_secret(row["proxy_url_cipher"])
+        if row["proxy_url_cipher"]
+        else os.getenv("HDHIVE_PROXY_URL", "").strip()
+    )
     configured = bool(row["client_id"] and row["app_secret_cipher"])
     connected = bool(configured and row["access_token_cipher"])
     status = row["status"]
@@ -4941,8 +5098,10 @@ def hdhive_public_status() -> dict[str, Any]:
         "configured": configured,
         "connected": connected,
         "client_id": row["client_id"],
+        "app_secret": app_secret,
         "scopes": row["scopes"] or HDHIVE_SCOPES,
         "redirect_uri": row["redirect_uri"],
+        "proxy_url": saved_proxy_url,
         "proxy_configured": bool(
             row["proxy_url_cipher"] or os.getenv("HDHIVE_PROXY_URL", "").strip()
         ),
@@ -5067,7 +5226,11 @@ async def hdhive_checkin(
             or setting(connection, "hdhive_signin_mode")
             or "normal"
         )
-    result = perform_hdhive_signin(mode, source="manual")
+    result = await asyncio.to_thread(
+        perform_hdhive_signin,
+        mode,
+        source="manual",
+    )
     return {
         "ok": True,
         "message": signin_result_message(result, "影巢签到成功"),
@@ -5177,22 +5340,32 @@ def hdhive_resources(
     media_type: str,
     tmdb_id: int,
     movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
 ) -> dict[str, Any]:
     require_user(movie_session)
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片编号无效")
-    result = hdhive_call("resources", media_type, tmdb_id)
-    data = result.get("data", [])
-    if isinstance(data, dict):
-        items = extract_share_items({"data": data})
-    elif isinstance(data, list):
-        items = [item for item in data if isinstance(item, dict)]
-    else:
-        items = []
-    return {
-        "resources": normalize_supported_hdhive_resources(items),
-        "meta": result.get("meta", {}),
-    }
+    if not refresh:
+        cached = cached_resource_response("hdhive", media_type, tmdb_id)
+        if cached is not None:
+            return cached
+    with resource_request_lock("hdhive", media_type, tmdb_id):
+        if not refresh:
+            cached = cached_resource_response("hdhive", media_type, tmdb_id)
+            if cached is not None:
+                return cached
+        result = hdhive_call("resources", media_type, tmdb_id)
+        data = result.get("data", [])
+        if isinstance(data, dict):
+            items = extract_share_items({"data": data})
+        elif isinstance(data, list):
+            items = [item for item in data if isinstance(item, dict)]
+        else:
+            items = []
+        return cache_resource_response("hdhive", media_type, tmdb_id, {
+            "resources": normalize_supported_hdhive_resources(items),
+            "meta": result.get("meta", {}),
+        })
 
 
 def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
@@ -5312,7 +5485,8 @@ async def create_follow(
         subscription_resource = None
     if tmdb_id <= 0 or media_type not in ("movie", "tv"):
         raise HTTPException(400, "影片编号无效")
-    detail = tmdb_get(
+    detail = await asyncio.to_thread(
+        tmdb_get,
         f"/{media_type}/{tmdb_id}",
         {"language": "zh-CN", "append_to_response": "external_ids"},
     )
@@ -5336,7 +5510,8 @@ async def create_follow(
     ):
         raise HTTPException(409, "请先手动转存初始版本，再开启影巢追更")
     progress = (
-        destination_episode_progress(
+        await asyncio.to_thread(
+            destination_episode_progress,
             user["storage_destination"],
             tmdb_id,
             known_in_library=known_in_library,
@@ -5393,7 +5568,8 @@ async def create_follow(
     bind_error = ""
     if subscription_slug:
         try:
-            row = bind_hdhive_follow_subscription(
+            row = await asyncio.to_thread(
+                bind_hdhive_follow_subscription,
                 int(row["id"]),
                 subscription_slug,
                 subscription_resource,
@@ -5534,7 +5710,8 @@ async def create_hdhive_follow_subscription(
 ) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
-    row = bind_hdhive_follow_subscription(
+    row = await asyncio.to_thread(
+        bind_hdhive_follow_subscription,
         follow_id,
         str(payload.get("slug") or ""),
     )
@@ -5661,27 +5838,37 @@ def dian_resources(
     tmdb_id: int,
     season: Optional[int] = None,
     movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
 ) -> dict[str, Any]:
     require_user(movie_session)
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片编号无效")
-    payload: dict[str, Any] = {
-        "tmdb_id": tmdb_id,
-        "media_type": media_type,
-        "page": 1,
-        "size": 30,
-        "sort": "hot",
-    }
-    # Dian treats season=0 as an explicit S0/specials filter, not "all seasons".
-    # Omit it for the normal title-level lookup and only send it when requested.
-    if media_type == "tv" and season is not None:
-        payload["season"] = max(0, season)
-    result = dian_call("list_shares", payload)
-    return {
-        "resources": normalize_supported_dian_resources(
-            extract_share_items(result)
-        )
-    }
+    if not refresh:
+        cached = cached_resource_response("dian", media_type, tmdb_id, season)
+        if cached is not None:
+            return cached
+    with resource_request_lock("dian", media_type, tmdb_id, season):
+        if not refresh:
+            cached = cached_resource_response("dian", media_type, tmdb_id, season)
+            if cached is not None:
+                return cached
+        payload: dict[str, Any] = {
+            "tmdb_id": tmdb_id,
+            "media_type": media_type,
+            "page": 1,
+            "size": 30,
+            "sort": "hot",
+        }
+        # Dian treats season=0 as an explicit S0/specials filter, not "all seasons".
+        # Omit it for the normal title-level lookup and only send it when requested.
+        if media_type == "tv" and season is not None:
+            payload["season"] = max(0, season)
+        result = dian_call("list_shares", payload)
+        return cache_resource_response("dian", media_type, tmdb_id, {
+            "resources": normalize_supported_dian_resources(
+                extract_share_items(result)
+            )
+        }, season)
 
 
 @APP.post("/api/hdhive/transfer")
@@ -5698,7 +5885,7 @@ async def hdhive_transfer(
     if not slug or media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影巢资源信息无效")
 
-    unlocked = hdhive_call("unlock", slug)
+    unlocked = await asyncio.to_thread(hdhive_call, "unlock", slug)
     data = unlocked.get("data", unlocked)
     if not isinstance(data, dict):
         raise HTTPException(502, "影巢解锁结果格式无效")
@@ -5721,12 +5908,13 @@ async def hdhive_transfer(
             episode_numbers=selected_episode_numbers,
         )
 
-    client = p115_client()
+    client = await asyncio.to_thread(p115_client)
     with db() as connection:
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
-        queued = p115_call(
+        queued = await asyncio.to_thread(
+            p115_call,
             "提交115离线任务失败",
             client.clouddownload_task_add_url,
             {"url": share_url, "wp_path_id": target_cid},
@@ -5736,7 +5924,8 @@ async def hdhive_transfer(
         mode = "offline"
         message = "已提交115离线下载，正在后台处理"
     else:
-        snap = p115_call(
+        snap = await asyncio.to_thread(
+            p115_call,
             "读取115分享失败",
             client.share_snap,
             0,
@@ -5751,7 +5940,8 @@ async def hdhive_transfer(
         ]
         if not selected_ids:
             raise HTTPException(502, "115分享中没有找到可转存内容")
-        received = p115_call(
+        received = await asyncio.to_thread(
+            p115_call,
             "接收115分享失败",
             client.share_receive,
             {"file_id": ",".join(selected_ids), "cid": target_cid},
@@ -5797,7 +5987,11 @@ async def dian_transfer(
     title_spec = parse_episode_spec(payload.get("resource_title"))
     wanted_episodes = set(title_spec["episode_numbers"])
     selected_episode_numbers = sorted(wanted_episodes)
-    unlocked = dian_call("unlock", {"share_id": share_id, "resource_id": resource_id})
+    unlocked = await asyncio.to_thread(
+        dian_call,
+        "unlock",
+        {"share_id": share_id, "resource_id": resource_id},
+    )
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
     unlock_payload = data.get("payload") if "payload" in data else data
@@ -5827,13 +6021,14 @@ async def dian_transfer(
             episode_numbers=selected_episode_numbers,
         )
 
-    client = p115_client()
+    client = await asyncio.to_thread(p115_client)
     with db() as connection:
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not is_115_share_url(share_url):
-        before_tasks = p115_offline_snapshot(client)
+        before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
         if len(links) == 1:
-            queued = p115_call(
+            queued = await asyncio.to_thread(
+                p115_call,
                 "提交115离线任务失败",
                 client.clouddownload_task_add_url,
                 {"url": share_url, "wp_path_id": target_cid}
@@ -5844,22 +6039,25 @@ async def dian_transfer(
                 for index, link in enumerate(links)
             }
             offline_payload["wp_path_id"] = target_cid
-            queued = p115_call(
+            queued = await asyncio.to_thread(
+                p115_call,
                 "批量提交115离线任务失败",
                 client.clouddownload_task_add_urls,
                 offline_payload,
             )
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
-        if not wait_for_p115_change(
+        changed = await asyncio.to_thread(
+            wait_for_p115_change,
             lambda: p115_offline_snapshot(client),
             before_tasks,
-        ):
+        )
+        if not changed:
             raise HTTPException(
                 502,
                 "115接口没有创建云下载任务；返回：" + response_summary(queued),
             )
-        send_notifications(
+        send_notifications_async(
             f"☁️ 115离线任务已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
         )
         record_transfer(
@@ -5879,8 +6077,9 @@ async def dian_transfer(
             "message": f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录",
         }
 
-    before_files = p115_folder_snapshot(client, target_cid)
-    snap = p115_call(
+    before_files = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
+    snap = await asyncio.to_thread(
+        p115_call,
         "读取115分享失败",
         client.share_snap,
         0,
@@ -5896,7 +6095,8 @@ async def dian_transfer(
     )
     if not file_ids:
         raise HTTPException(502, "115分享中没有找到可转存内容")
-    received = p115_call(
+    received = await asyncio.to_thread(
+        p115_call,
         "接收115分享失败",
         client.share_receive,
         {"file_id": file_ids, "cid": target_cid},
@@ -5904,15 +6104,17 @@ async def dian_transfer(
     )
     if not response_ok(received):
         raise HTTPException(502, response_message(received, "115转存失败"))
-    if not wait_for_p115_change(
+    changed = await asyncio.to_thread(
+        wait_for_p115_change,
         lambda: p115_folder_snapshot(client, target_cid),
         before_files,
-    ):
+    )
+    if not changed:
         raise HTTPException(
             502,
             "115接口没有把文件写入目标目录；返回：" + response_summary(received),
         )
-    send_notifications(
+    send_notifications_async(
         f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
     )
     record_transfer(
@@ -5936,7 +6138,6 @@ async def dian_transfer(
 @APP.get("/api/requests")
 def list_requests(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     user = require_user(movie_session)
-    sync_emby_requests()
     query = (
         "SELECT r.*, u.display_name, u.username FROM movie_requests r "
         "JOIN users u ON u.id = r.user_id "
@@ -5962,7 +6163,11 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
         raise HTTPException(400, "影片信息无效")
     # Do not trust movie metadata sent by the browser. Fetch it again from TMDB so
     # every saved request is tied to a real, canonical TMDB movie or TV record.
-    canonical = tmdb_get(f"/{media_type}/{tmdb_id}", {"language": "zh-CN"})
+    canonical = await asyncio.to_thread(
+        tmdb_get,
+        f"/{media_type}/{tmdb_id}",
+        {"language": "zh-CN"},
+    )
     if int(canonical.get("id") or 0) != tmdb_id:
         raise HTTPException(400, "TMDB 没有找到这部影片")
     title = canonical.get("title") or canonical.get("name") or "未命名"
@@ -5998,7 +6203,7 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
         )
         request_id = cursor.lastrowid
     kind = "电影" if media_type == "movie" else "剧集"
-    send_notifications(
+    send_notifications_async(
         f"🎬 新的求片需求\n\n{user['display_name']} 想看："
         f"{title} ({str(date)[:4]})\n"
         f"类型：{kind}\nTMDB：{tmdb_id}"
@@ -6028,7 +6233,7 @@ async def update_request(request_id: int, request: Request, movie_session: Optio
     message = f"📌 求片状态更新\n\n{row['title']} → {STATUS_NAMES[status]}\n申请人：{row['display_name']}"
     if note:
         message += f"\n回复：{note}"
-    send_notifications(message)
+    send_notifications_async(message)
     return {"ok": True}
 
 
@@ -6203,15 +6408,20 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         site_public_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
     return {
         "tmdb_configured": bool(tmdb),
+        "tmdb_token": tmdb,
         "telegram_configured": bool(telegram and chat_id),
+        "telegram_token": telegram,
         "telegram_chat_id": chat_id,
         "emby_configured": bool(emby_url and emby_key),
         "emby_url": emby_url,
+        "emby_api_key": emby_key,
         "p123_emby_configured": bool(p123_emby_url and p123_emby_key),
         "p123_emby_url": p123_emby_url,
+        "p123_emby_api_key": p123_emby_key,
         "telegram_proxy": telegram_proxy,
         "dian_configured": bool(dian_base_url and dian_key),
         "dian_base_url": dian_base_url,
+        "dian_api_key": dian_key,
         "dian_key_prefix": f"{dian_key[:8]}***" if dian_key else "",
         "dian_signin_enabled": dian_signin_enabled,
         "dian_signin_time": dian_signin_time,
@@ -6232,6 +6442,11 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "pansave_connected": bool(pansave_session_cipher and pansave_authorized),
         "pansave_telegram_api_id": pansave_api_id,
         "pansave_telegram_api_hash_configured": bool(pansave_api_hash_cipher),
+        "pansave_telegram_api_hash": (
+            decrypt_secret(pansave_api_hash_cipher)
+            if pansave_api_hash_cipher
+            else ""
+        ),
         "pansave_telegram_phone": pansave_phone,
         "pansave_bot_username": pansave_bot_username,
         "pansave_telegram_proxy": pansave_proxy_url,
@@ -6239,9 +6454,12 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "wecom_callback_configured": bool(callback_token and encoding_key),
         "wecom_corp_id": wecom_corp_id,
         "wecom_agent_id": wecom_agent_id,
+        "wecom_secret": wecom_secret,
         "wecom_to_user": wecom_to_user,
         "wecom_api_base": wecom_api_base,
         "wecom_admin_userid": wecom_admin_userid,
+        "wecom_callback_token": callback_token,
+        "wecom_encoding_aes_key": encoding_key,
         "site_public_url": site_public_url,
         "wecom_callback_url": site_public_url.rstrip("/") + "/api/wecom/callback",
     }
@@ -6286,8 +6504,10 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                 set_setting(connection, key, payload[key])
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
-    configure_telegram_menu()
-    configure_wecom_menu()
+    await asyncio.gather(
+        asyncio.to_thread(configure_telegram_menu),
+        asyncio.to_thread(configure_wecom_menu),
+    )
     return {"ok": True}
 
 
@@ -6300,7 +6520,11 @@ async def dian_signin(
     payload = await request.json()
     with db() as connection:
         mode = str(payload.get("mode") or setting(connection, "dian_signin_mode") or "normal")
-    result = perform_dian_signin(mode, source="manual")
+    result = await asyncio.to_thread(
+        perform_dian_signin,
+        mode,
+        source="manual",
+    )
     message = signin_result_message(result, "癫影签到成功")
     return {"ok": True, "message": message, "result": result}
 
@@ -6569,7 +6793,10 @@ async def p115_qrcode(
         import qrcode
     except ImportError as error:
         raise HTTPException(503, "当前镜像缺少115扫码依赖") from error
-    token_response = P115Client.login_qrcode_token(app_name)
+    token_response = await asyncio.to_thread(
+        P115Client.login_qrcode_token,
+        app_name,
+    )
     token_data = token_response.get("data") or {}
     uid = str(token_data.get("uid") or "")
     if not uid:

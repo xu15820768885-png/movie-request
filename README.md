@@ -76,7 +76,7 @@ http://NAS-IP:1802
 
 未完结剧集分两步处理：先手动选择并转存初始版本，再点击“开启追更”绑定影巢原生订阅。影巢机器人发现更新后发送资源链接，仍由用户手动点击转存，求片网站不自动转存更新资源，因此不再套用自动补集规则。
 
-敏感信息不会写入镜像或 GitHub。OpenAPI Key、115 Cookie、Telegram API Hash、Telegram 用户会话、账号和求片记录全部保存在 NAS 映射的 `/volume1/docker/movie-request/data` 中，其中 API Hash 和用户会话会加密保存且不会回显。115 Cookie 失效后在管理员页面重新扫码；Telegram 会话失效后重新发送验证码登录。
+敏感信息不会写入镜像或 GitHub。OpenAPI Key、115 Cookie、Telegram API Hash、Telegram 用户会话、账号和求片记录全部保存在 NAS 映射的 `/volume1/docker/movie-request/data` 中，其中 API Hash 和用户会话会加密保存。管理员配置页会完整回显可编辑的 Token、API Key、API Hash、Secret 和代理地址；115 Cookie 与 Telegram 会话串仍只作为内部登录会话保存。115 Cookie 失效后在管理员页面重新扫码；Telegram 会话失效后重新发送验证码登录。
 
 115账号和123账号可以分别填写各自的 Emby 地址，例如 `http://NAS-IP:8096` 和 `http://NAS-IP:8097`。建议在两套 Emby 后台分别创建供本系统使用的 API 密钥，方便以后单独撤销。
 

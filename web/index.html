@@ -539,7 +539,8 @@
               <label>Client ID<input id="hdhiveClientId" placeholder="审核通过后填写"></label>
               <label>固定 Redirect URI<input id="hdhiveRedirectUri" placeholder="https://你的域名/api/hdhive/oauth/callback"></label>
               <label>申请权限<input id="hdhiveScopes" value="meta query unlock write vip"></label>
-              <details class="secret-settings"><summary>修改敏感凭据</summary><div class="secret-body"><label>App Secret<input id="hdhiveAppSecret" type="password" autocomplete="new-password" placeholder="输入新值后保存"></label><label>云服务器固定出口代理<input id="hdhiveProxyUrl" type="password" autocomplete="new-password" placeholder="输入新代理地址后保存"></label></div></details>
+              <label>App Secret<input id="hdhiveAppSecret" autocomplete="off" placeholder="已保存值会直接显示"></label>
+              <label>云服务器固定出口代理<input id="hdhiveProxyUrl" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <div class="inline hidden"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">启用低频追更消息检查</label></div>
               <div class="inline"><label>自动签到时间<input id="hdhiveSigninTime" type="time" value="08:35"></label><label>签到模式<select id="hdhiveSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveSigninEnabled" type="checkbox" style="width:auto">启用影巢每日自动签到</label>
@@ -549,7 +550,7 @@
             <form id="integrationForm" class="panel stack storage-panel hidden" data-storage-content="dian">
               <div class="storage-panel-head"><h3>癫影账户与签到</h3><p>配置资源查询接口和每日签到。</p></div>
               <label>OpenAPI 地址<input id="dianBaseUrl" placeholder="https://你的癫影站点"></label>
-              <details class="secret-settings"><summary>修改 OpenAPI Key</summary><div class="secret-body"><label>OpenAPI Key<input id="dianApiKey" type="password" autocomplete="new-password" placeholder="输入新值后保存"></label></div></details>
+              <label>OpenAPI Key<input id="dianApiKey" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <div class="inline"><label>自动签到时间<input id="dianSigninTime" type="time" value="08:30"></label><label>签到模式<select id="dianSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="dianSigninEnabled" type="checkbox" style="width:auto">启用每日自动签到</label>
               <div id="checkinResult" class="checkin-result">尚未执行签到</div>
@@ -570,7 +571,8 @@
               <div class="section-head" style="margin:0"><span>连接资料</span><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
               <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label></div>
               <div class="inline"><label>123 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label><label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890"></label></div>
-              <details class="secret-settings"><summary>重新登录或更换 API Hash</summary><div class="secret-body"><label>Telegram API Hash<input id="pansaveApiHash" type="password" autocomplete="new-password" placeholder="仅在重新登录时输入"></label><div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div></div></details>
+              <label>Telegram API Hash<input id="pansaveApiHash" autocomplete="off" placeholder="已保存值会直接显示"></label>
+              <div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div>
               <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="one-time-code"></label></div>
               <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
             </form>
@@ -585,7 +587,7 @@
         </div>
       </section>
       <section id="settingsView" class="view hidden">
-        <div class="section-head"><div><h2>系统设置</h2><span>按分类查看和修改，不再需要翻完整个长页面</span></div><span>敏感信息只保存在 NAS，不会回显</span></div>
+        <div class="section-head"><div><h2>系统设置</h2><span>按分类查看和修改，不再需要翻完整个长页面</span></div><span>已保存配置会向管理员完整显示</span></div>
         <form id="settingsForm" class="settings-layout">
           <nav class="settings-nav" aria-label="系统设置分类">
             <div class="settings-nav-title">设置分类</div>
@@ -598,20 +600,20 @@
               <div class="settings-panel-head"><h3>媒体与入库</h3><p>配置影片搜索，以及115账号和123账号各自对应的 Emby。</p></div>
               <div class="settings-group">
                 <h4>TMDB 搜索</h4>
-                <label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label>
+                <label>API Read Access Token<input id="settingsTmdb" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <div id="tmdbState" class="muted" style="font-size:12px"></div>
               </div>
               <div class="settings-group">
                 <h4>115 对应 Emby</h4>
                 <label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label>
-                <label>API 密钥<input id="settingsEmbyKey" type="password" placeholder="已保存时留空不修改"></label>
+                <label>API 密钥<input id="settingsEmbyKey" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <div id="embyState" class="muted" style="font-size:12px"></div>
                 <button id="embyTest" class="btn" type="button">测试 115 Emby</button>
               </div>
               <div class="settings-group">
                 <h4>123 Emby</h4>
                 <label>Emby 地址<input id="settingsP123EmbyUrl" placeholder="例如：http://192.168.31.129:8097"></label>
-                <label>API 密钥<input id="settingsP123EmbyKey" type="password" placeholder="已保存时留空不修改"></label>
+                <label>API 密钥<input id="settingsP123EmbyKey" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
                 <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
               </div>
@@ -621,7 +623,7 @@
             <section class="panel settings-panel hidden" data-settings-content="telegram">
               <div class="settings-panel-head"><h3>Telegram 通知与菜单</h3><p>接收转存、失败、入库和签到通知，并使用管理菜单。</p></div>
               <div class="settings-group">
-                <label>Bot Token<input id="settingsTelegramToken" type="password" placeholder="留空表示不修改"></label>
+                <label>Bot Token<input id="settingsTelegramToken" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label>
                 <label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label>
                 <div class="muted" style="font-size:12px;line-height:1.6">菜单包含求片需求、完成情况、影巢账号、癫影账号和公告管理。</div>
@@ -632,13 +634,13 @@
               <div class="settings-panel-head"><h3>企业微信通知与菜单</h3><p>通知内容与 Telegram 同步，菜单可直接进入求片和管理功能。</p></div>
               <div class="settings-group">
                 <div class="inline"><label>企业 ID（CorpID）<input id="settingsWecomCorpId"></label><label>应用 AgentID<input id="settingsWecomAgentId" inputmode="numeric"></label></div>
-                <label>应用 Secret<input id="settingsWecomSecret" type="password" placeholder="已保存时留空不修改"></label>
+                <label>应用 Secret<input id="settingsWecomSecret" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <label>接收成员<input id="settingsWecomToUser" placeholder="@all"></label>
                 <label>企业微信 API / MP 转发地址<input id="settingsWecomApiBase" placeholder="https://wx.weige1999.xin"></label>
                 <label>企业微信管理员 UserID<input id="settingsWecomAdminUserId" placeholder="仅此账号可操作管理菜单"></label>
                 <label>网站公网地址<input id="settingsSitePublicUrl" placeholder="https://qp.weige1999.xin"></label>
                 <label>企业微信接收消息 URL<input id="settingsWecomCallbackUrl" readonly></label>
-                <div class="inline"><label>回调 Token<input id="settingsWecomCallbackToken" type="password" placeholder="已保存时留空不修改"></label><label>回调 EncodingAESKey<input id="settingsWecomEncodingAesKey" type="password" placeholder="43位，已保存时留空不修改"></label></div>
+                <div class="inline"><label>回调 Token<input id="settingsWecomCallbackToken" autocomplete="off" placeholder="已保存值会直接显示"></label><label>回调 EncodingAESKey<input id="settingsWecomEncodingAesKey" autocomplete="off" placeholder="43位，已保存值会直接显示"></label></div>
                 <div id="wecomState" class="muted" style="font-size:12px"></div>
               </div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存企业微信设置</button><button id="wecomTest" class="btn" type="button">发送测试通知</button><button id="wecomMenu" class="btn" type="button">创建/刷新菜单</button></div>
@@ -664,6 +666,7 @@
     let activeResourceProvider = 'hdhive';
     let searchController = null;
     let searchSequence = 0;
+    let requestsLoadPromise = null;
     const detailCache = new Map();
     const resourceCache = new Map();
     const searchCache = new Map();
@@ -759,7 +762,7 @@
         const summary=[item.year||'年份未知',item.latest_episode_label||item.series_status_label||''].filter(Boolean).join(' · ');
         const check=item.in_library?'<span class="library-check" title="已在 Emby 片库">✓</span>':(item.rating?`<span class="rating">★ ${item.rating}</span>`:'');
         const libraryStatus=`<div class="poster-library-status ${item.in_library?'available':'missing'}">${item.in_library?'已入库':'未入库'}</div>`;
-        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${libraryStatus}</article>`;
+        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy" decoding="async">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${libraryStatus}</article>`;
       }).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)],true));
     }
@@ -855,13 +858,13 @@
       renderDetails(currentDetail);
       $('detailCard').scrollTop=scrollTop;
     }
-    async function loadDetailResource(provider,item,tmdbKey,loadId=detailLoadSequence,showLoading=true) {
+    async function loadDetailResource(provider,item,tmdbKey,loadId=detailLoadSequence,showLoading=true,refresh=false) {
       const listKey=`${provider}_resources`;
       const errorKey=`${provider}_error`;
       const loadingKey=`${provider}_loading`;
       if(showLoading&&currentDetail){currentDetail={...currentDetail,[loadingKey]:true,[errorKey]:''};renderCurrentDetail();}
       try {
-        const result=await api(`/api/${provider}/resources/${item.media_type}/${item.tmdb_id}`);
+        const result=await api(`/api/${provider}/resources/${item.media_type}/${item.tmdb_id}${refresh?'?refresh=true':''}`);
         if(loadId!==detailLoadSequence||!currentDetail)return;
         const resources=result.resources||[];
         currentDetail={...currentDetail,[listKey]:resources,[errorKey]:'',[loadingKey]:false};
@@ -915,7 +918,7 @@
       const detailsNotice=item.details_error?`<div class="load-error"><span>TMDB 资料暂时不可用：${escapeHtml(item.details_error)}。现有片名、简介和资源搜索仍可继续使用。</span><button class="btn btn-small" type="button" data-retry-details>重新加载资料</button></div>`:'';
       const episodeProgress=item.media_type==='tv'?`<section class="episode-progress"><div class="episode-progress-item accent"><div class="episode-progress-name">官方播出进度</div><div class="episode-progress-value">${escapeHtml(item.latest_episode_label||'暂时未知')}</div></div><div class="episode-progress-item"><div class="episode-progress-name">Emby 本地进度</div><div class="episode-progress-value">${escapeHtml(item.emby_progress_loading?'正在后台检查…':item.emby_episode_label||(item.in_library?'已入库，集数待识别':'尚未入库'))}</div></div><div class="episode-progress-item"><div class="episode-progress-name">下一集计划</div><div class="episode-progress-value">${escapeHtml(item.next_episode_air_date?`${item.next_episode_label||'下一集'} · ${formatEpisodeAirDate(item.next_episode_air_date)}`:(item.series_status==='ongoing'?'待公布':'暂无更新'))}</div></div></section>`:'';
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
-      const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
+      const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="" loading="lazy" decoding="async">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
       const hdhiveResources=item.hdhive_resources||[];
       const dianResources=item.dian_resources||[];
       const resourceCards=(resources,provider)=>resources.map((resource,index)=>{
@@ -945,7 +948,7 @@
       $('detailCard').querySelectorAll('[data-recommend]').forEach(button=>button.onclick=()=>openDetails(currentDetail.recommendations[Number(button.dataset.recommend)]));
       $('detailCard').querySelectorAll('[data-transfer-index]').forEach(button=>button.onclick=()=>{const provider=button.dataset.provider;const resources=provider==='hdhive'?currentDetail.hdhive_resources:currentDetail.dian_resources;previewTransfer(resources[Number(button.dataset.transferIndex)],button,provider);});
       $('detailCard').querySelectorAll('[data-retry-details]').forEach(button=>button.onclick=retryDetailMetadata);
-      $('detailCard').querySelectorAll('[data-retry-resource]').forEach(button=>button.onclick=()=>loadDetailResource(button.dataset.retryResource,currentDetail,`tmdb:${currentDetail.media_type}:${currentDetail.tmdb_id}`));
+      $('detailCard').querySelectorAll('[data-retry-resource]').forEach(button=>button.onclick=()=>loadDetailResource(button.dataset.retryResource,currentDetail,`tmdb:${currentDetail.media_type}:${currentDetail.tmdb_id}`,detailLoadSequence,true,true));
       $('detailCard').querySelectorAll('[data-resource-provider]').forEach(button=>button.onclick=()=>{
         activeResourceProvider=button.dataset.resourceProvider;
         $('detailCard').querySelectorAll('[data-resource-provider]').forEach(tab=>tab.classList.toggle('active',tab.dataset.resourceProvider===activeResourceProvider));
@@ -1091,13 +1094,17 @@
       } catch(error){button.disabled=false;toast(error.message,true);}
     }
     async function loadRequests() {
-      const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
-      $('adminCount').textContent=currentUser.role==='admin'&&items.filter(x=>x.status==='pending').length?`· ${items.filter(x=>x.status==='pending').length}`:'';
-      const mine=currentUser.role==='admin'?items:items.filter(x=>Number(x.user_id)===Number(currentUser.id)||!x.user_id);
-      $('mineCount').textContent=mine.length?`· ${mine.length}`:'';
-      $('mineRequests').innerHTML=mine.length?mine.map(requestRow).join(''):'<div class="empty">还没有提交过需求。</div>';
-      $('mineRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
-      if(currentUser.role==='admin') { updateMemberFilter(items); renderAdminRequests(items); }
+      if(requestsLoadPromise)return requestsLoadPromise;
+      requestsLoadPromise=(async()=>{
+        const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
+        $('adminCount').textContent=currentUser.role==='admin'&&items.filter(x=>x.status==='pending').length?`· ${items.filter(x=>x.status==='pending').length}`:'';
+        const mine=currentUser.role==='admin'?items:items.filter(x=>Number(x.user_id)===Number(currentUser.id)||!x.user_id);
+        $('mineCount').textContent=mine.length?`· ${mine.length}`:'';
+        $('mineRequests').innerHTML=mine.length?mine.map(requestRow).join(''):'<div class="empty">还没有提交过需求。</div>';
+        $('mineRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
+        if(currentUser.role==='admin') { updateMemberFilter(items); renderAdminRequests(items); }
+      })();
+      try{return await requestsLoadPromise;}finally{requestsLoadPromise=null;}
     }
     function updateMemberFilter(items) {
       const filter=$('requestUserFilter'); const selected=filter.value; const members=[]; const seen=new Set();
@@ -1157,17 +1164,39 @@
     }
     async function loadSettings() {
       if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
-      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby'; $('settingsP123EmbyUrl').value=settings.p123_emby_url||''; $('p123EmbyState').textContent=settings.p123_emby_configured?'123 Emby 已配置':'尚未配置 123 Emby'; $('settingsWecomCorpId').value=settings.wecom_corp_id||''; $('settingsWecomAgentId').value=settings.wecom_agent_id||''; $('settingsWecomToUser').value=settings.wecom_to_user||'@all'; $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin'; $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||''; $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin'; $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||''; $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
+      const settings=await api('/api/admin/settings');
+      $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB';
+      $('settingsTmdb').value=settings.tmdb_token||'';
+      $('settingsTelegramToken').value=settings.telegram_token||'';
+      $('settingsTelegramChatId').value=settings.telegram_chat_id||'';
+      $('settingsTelegramProxy').value=settings.telegram_proxy||'';
+      $('settingsEmbyUrl').value=settings.emby_url||'';
+      $('settingsEmbyKey').value=settings.emby_api_key||'';
+      $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby';
+      $('settingsP123EmbyUrl').value=settings.p123_emby_url||'';
+      $('settingsP123EmbyKey').value=settings.p123_emby_api_key||'';
+      $('p123EmbyState').textContent=settings.p123_emby_configured?'123 Emby 已配置':'尚未配置 123 Emby';
+      $('settingsWecomCorpId').value=settings.wecom_corp_id||'';
+      $('settingsWecomAgentId').value=settings.wecom_agent_id||'';
+      $('settingsWecomSecret').value=settings.wecom_secret||'';
+      $('settingsWecomToUser').value=settings.wecom_to_user||'@all';
+      $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin';
+      $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||'';
+      $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin';
+      $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||'';
+      $('settingsWecomCallbackToken').value=settings.wecom_callback_token||'';
+      $('settingsWecomEncodingAesKey').value=settings.wecom_encoding_aes_key||'';
+      $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
     }
     async function loadIntegrations() {
       let hdhive,settings;
       if(preview){
-        hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
+        hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',app_secret:'preview_app_secret',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_url:'http://203.0.113.10:7890',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
         settings={
-        dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
+        dian_base_url:'https://dian.example.com',dian_api_key:'preview_dian_api_key',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
         p115_target_cid:'123456',p115_target_name:'影视自动转存',
-        pansave_configured:true,pansave_connected:true,pansave_telegram_api_id:'1234567',pansave_telegram_phone:'+8613800138000',pansave_bot_username:'pansavenb_bot',pansave_telegram_proxy:'http://192.168.31.129:7890',
+        pansave_configured:true,pansave_connected:true,pansave_telegram_api_id:'1234567',pansave_telegram_api_hash:'0123456789abcdef0123456789abcdef',pansave_telegram_phone:'+8613800138000',pansave_bot_username:'pansavenb_bot',pansave_telegram_proxy:'http://192.168.31.129:7890',
           p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
         };
       }else{
@@ -1177,7 +1206,9 @@
       $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成资源查询与转存配置';
       $('hdhiveProxyState').textContent=hdhive.proxy_label||'固定出口待配置';
       $('hdhiveClientId').value=hdhive.client_id||'';
+      $('hdhiveAppSecret').value=hdhive.app_secret||'';
       $('hdhiveRedirectUri').value=hdhive.redirect_uri||'';
+      $('hdhiveProxyUrl').value=hdhive.proxy_url||'';
       const hdhiveScopes=(hdhive.scopes||'meta query unlock write vip').split(/\s+/).filter(scope=>scope&&!['subscription','messages'].includes(scope));
       if(!hdhiveScopes.includes('write'))hdhiveScopes.push('write');
       $('hdhiveScopes').value=hdhiveScopes.join(' ');
@@ -1190,6 +1221,7 @@
       $('hdhiveAuthorize').disabled=!hdhive.configured||hdhive.connected;
       $('hdhiveDisconnect').disabled=!hdhive.connected;
       $('dianBaseUrl').value=settings.dian_base_url||'';
+      $('dianApiKey').value=settings.dian_api_key||'';
       $('dianSigninEnabled').checked=Boolean(settings.dian_signin_enabled);
       $('dianSigninTime').value=settings.dian_signin_time||'08:30';
       $('dianSigninMode').value=settings.dian_signin_mode||'normal';
@@ -1202,6 +1234,7 @@
       $('selectedFolderPath').textContent=settings.p115_target_name?`115网盘 / ${settings.p115_target_name}`:'尚未选择转存文件夹';
       $('pansaveStatus').textContent=settings.pansave_connected?'已登录':settings.pansave_configured?'待验证码验证':'待配置';
       $('pansaveApiId').value=settings.pansave_telegram_api_id||'';
+      $('pansaveApiHash').value=settings.pansave_telegram_api_hash||'';
       $('pansavePhone').value=settings.pansave_telegram_phone||'';
       $('pansaveBotUsername').value=settings.pansave_bot_username||'pansavenb_bot';
       $('pansaveProxy').value=settings.pansave_telegram_proxy||'';
@@ -1330,7 +1363,7 @@
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
     $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
     $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview){$('newUserCard').open=false;return toast('预览模式：成员账号创建成功');}try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();$('newUserCard').open=false;toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
-    $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');event.target.querySelectorAll('input[type="password"]').forEach(input=>input.value='');loadSettings();}catch(error){toast(error.message,true);}};
+    $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');loadSettings();}catch(error){toast(error.message,true);}};
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('wecomTest').onclick=async()=>{if(preview)return toast('预览模式：企业微信测试成功');try{await api('/api/admin/wecom-test',{method:'POST'});toast('企业微信测试通知已发送');}catch(error){toast(error.message,true);}};
     $('wecomMenu').onclick=async()=>{if(preview)return toast('预览模式：企业微信菜单已刷新');try{await api('/api/admin/wecom-menu',{method:'POST'});toast('企业微信菜单已创建/刷新');}catch(error){toast(error.message,true);}};
@@ -1339,11 +1372,11 @@
     $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，已自动清除1条入库需求');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，已自动清除${result.removed}条入库需求`);loadRequests();}catch(error){toast(error.message,true);}};
     $('testAllIntegrations').onclick=testAllIntegrations;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
-    $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
-    $('pansaveForm').onsubmit=async event=>{event.preventDefault();if(preview){$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');return toast('预览模式：Telegram 验证码已发送');}try{const result=await api('/api/admin/pansave/login/start',{method:'POST',body:JSON.stringify({api_id:$('pansaveApiId').value,api_hash:$('pansaveApiHash').value,phone:$('pansavePhone').value,bot_username:$('pansaveBotUsername').value,proxy_url:$('pansaveProxy').value})});$('pansaveApiHash').value='';$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');toast(result.message);}catch(error){toast(error.message,true);}};
+    $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('pansaveForm').onsubmit=async event=>{event.preventDefault();if(preview){$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');return toast('预览模式：Telegram 验证码已发送');}try{const result=await api('/api/admin/pansave/login/start',{method:'POST',body:JSON.stringify({api_id:$('pansaveApiId').value,api_hash:$('pansaveApiHash').value,phone:$('pansavePhone').value,bot_username:$('pansaveBotUsername').value,proxy_url:$('pansaveProxy').value})});$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');toast(result.message);}catch(error){toast(error.message,true);}};
     $('pansaveVerify').onclick=async()=>{if(preview){$('pansaveStatus').textContent='已登录';return toast('预览模式：Telegram 用户账号已登录');}try{const result=await api('/api/admin/pansave/login/verify',{method:'POST',body:JSON.stringify({code:$('pansaveCode').value,password:$('pansavePassword').value})});$('pansaveCode').value='';$('pansavePassword').value='';$('pansaveVerifyPanel').classList.add('hidden');$('pansaveVerifyActions').classList.add('hidden');toast(result.message);loadIntegrations();}catch(error){toast(error.message,true);}};
     $('pansaveTest').onclick=async()=>{if(preview)return toast('Telegram 会话正常，已找到 @pansavenb_bot');try{const result=await api('/api/admin/pansave/test',{method:'POST'});toast(result.message);}catch(error){toast(error.message,true);}};
-    $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});$('hdhiveAppSecret').value='';$('hdhiveProxyUrl').value='';toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢配置与签到时间已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};
     $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？已有配置不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveCheckinNow').onclick=async()=>{if(preview){$('hdhiveCheckinResult').textContent='刚刚影巢签到成功 · 普通签到 · 获得 8 积分';return toast('影巢签到成功');}try{const result=await api('/api/admin/hdhive/checkin',{method:'POST',body:JSON.stringify({mode:$('hdhiveSigninMode').value})});toast(result.message||'影巢签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
@@ -1359,19 +1392,19 @@
         $('previewRibbon').textContent = previewMode === 'member'
           ? '成员端预览 · 可选癫影版本或继续求片'
           : '管理员预览 · 癫影签到与 115 转存设置';
-        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();loadRequests();
-        if(currentUser.role==='admin') switchView('admin');
+        $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();
+        if(currentUser.role==='admin')switchView('admin');else loadRequests();
         return;
       }
-      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();loadRequests();if(currentUser.role==='admin')switchView('admin');} catch(error){showAuth(false);toast(error.message,true);}
+      try {const data=await api('/api/bootstrap');if(data.needs_setup)return showAuth(true);if(!data.user)return showAuth(false);currentUser=data.user;showApp();loadSiteNotice();if(currentUser.role==='admin')switchView('admin');else loadRequests();} catch(error){showAuth(false);toast(error.message,true);}
     }
     init();
     setInterval(() => {
-      if (currentUser && !preview) loadRequests().catch(() => {});
-    }, 60000);
+      if (currentUser && !preview && document.visibilityState==='visible') loadRequests().catch(() => {});
+    }, 120000);
     setInterval(() => {
-      if (currentUser && !preview) loadSiteNotice();
-    }, 15000);
+      if (currentUser && !preview && document.visibilityState==='visible') loadSiteNotice();
+    }, 60000);
   </script>
 </body>
 </html>

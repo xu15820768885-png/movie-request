@@ -24,6 +24,8 @@ class MovieRequestTests(unittest.TestCase):
             app.TMDB_RESPONSE_CACHE.clear()
             app.TMDB_REFRESHING.clear()
             app.SETTINGS_CACHE.clear()
+            app.RESOURCE_RESPONSE_CACHE.clear()
+            app.RESOURCE_REQUEST_LOCKS.clear()
             app.EMBY_LIBRARY_CACHE.update(
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
@@ -318,7 +320,7 @@ class MovieRequestTests(unittest.TestCase):
         progress.assert_called_once_with(
             101172,
             known_in_library=True,
-            force=True,
+            force=False,
         )
 
     def test_emby_episode_progress_explicitly_clears_removed_series(self):
@@ -334,12 +336,50 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["emby_latest_episode_number"], 0)
         self.assertEqual(result["emby_episode_label"], "")
         self.assertEqual(result["emby_episode_numbers"], {})
-        library.assert_called_once_with(force=True)
+        library.assert_called_once_with(prefer_cached=True)
         progress.assert_called_once_with(
             223911,
             known_in_library=False,
-            force=True,
+            force=False,
         )
+
+    def test_request_listing_never_waits_for_emby_sync(self):
+        with patch.object(
+            app,
+            "sync_emby_requests",
+            side_effect=AssertionError("request listing must stay database-only"),
+        ):
+            result = app.list_requests(self.token)
+        self.assertEqual(result, {"requests": []})
+
+    def test_resource_responses_are_short_cached_and_refreshable(self):
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": [], "meta": {"source": "test"}},
+        ) as call:
+            first = app.hdhive_resources("movie", 157336, self.token)
+            second = app.hdhive_resources("movie", 157336, self.token)
+            refreshed = app.hdhive_resources(
+                "movie",
+                157336,
+                self.token,
+                refresh=True,
+            )
+        self.assertEqual(first, second)
+        self.assertEqual(refreshed["meta"], {"source": "test"})
+        self.assertEqual(call.call_count, 2)
+
+    def test_html_compression_and_small_poster_defaults_are_enabled(self):
+        self.assertTrue(
+            any(middleware.cls is app.GZipMiddleware for middleware in app.APP.user_middleware)
+        )
+        item = app.tmdb_media_item(
+            {"id": 157336, "title": "星际穿越", "poster_path": "/poster.jpg"},
+            "movie",
+            set(),
+        )
+        self.assertEqual(item["poster_url"], "/api/tmdb/image/w342/poster.jpg")
 
     def test_request_rejected_when_already_in_emby(self):
         canonical = {
@@ -1385,6 +1425,7 @@ class MovieRequestTests(unittest.TestCase):
             asyncio.run(app.update_settings(FakeRequest(payload), self.token))
         settings = app.get_settings(self.token)
         self.assertTrue(settings["dian_configured"])
+        self.assertEqual(settings["dian_api_key"], "dys_secret")
         self.assertEqual(settings["dian_key_prefix"], "dys_secr***")
         self.assertEqual(settings["dian_signin_time"], "07:45")
         self.assertEqual(settings["p115_target_cid"], "9988")
@@ -1790,7 +1831,7 @@ class MovieRequestTests(unittest.TestCase):
             "socks5",
         )
 
-    def test_pansave_secrets_are_encrypted_and_not_returned(self):
+    def test_pansave_api_hash_is_encrypted_at_rest_and_visible_to_admin(self):
         with app.db() as connection:
             app.set_setting(connection, "pansave_telegram_api_id", "123456")
             app.set_setting(
@@ -1809,7 +1850,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(settings["pansave_configured"])
         self.assertTrue(settings["pansave_connected"])
         self.assertNotIn("pansave_telegram_session", settings)
-        self.assertNotIn("pansave_telegram_api_hash", settings)
+        self.assertEqual(settings["pansave_telegram_api_hash"], "a" * 32)
 
     def test_new_accounts_keep_p115_default_and_can_be_assigned_p123(self):
         asyncio.run(
@@ -2043,7 +2084,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(payload["touser"], "@all")
         self.assertEqual(payload["agentid"], 1000005)
 
-    def test_wecom_signature_is_stable_and_secrets_are_not_returned(self):
+    def test_wecom_signature_is_stable_and_secrets_are_visible_to_admin(self):
         self.assertEqual(
             app.wecom_signature("token", "1700000000", "nonce", "cipher"),
             app.wecom_signature("token", "1700000000", "nonce", "cipher"),
@@ -2056,9 +2097,9 @@ class MovieRequestTests(unittest.TestCase):
             app.set_setting(connection, "wecom_encoding_aes_key", "A" * 43)
         settings = app.get_settings(self.token)
         self.assertTrue(settings["wecom_configured"])
-        self.assertNotIn("wecom_secret", settings)
-        self.assertNotIn("wecom_callback_token", settings)
-        self.assertNotIn("wecom_encoding_aes_key", settings)
+        self.assertEqual(settings["wecom_secret"], "top-secret")
+        self.assertEqual(settings["wecom_callback_token"], "callback-secret")
+        self.assertEqual(settings["wecom_encoding_aes_key"], "A" * 43)
 
 
 if __name__ == "__main__":

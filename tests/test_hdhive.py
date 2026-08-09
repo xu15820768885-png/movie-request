@@ -923,6 +923,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             )
         )
         status = app.hdhive_admin_status(self.admin_token)
+        self.assertEqual(status["app_secret"], "secret")
         self.assertTrue(status["signin_enabled"])
         self.assertEqual(status["signin_time"], "07:45")
         self.assertEqual(status["signin_mode"], "normal")
