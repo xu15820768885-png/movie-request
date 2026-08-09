@@ -1125,6 +1125,44 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(row["baseline_episode"], 0)
         library.assert_called_once_with(force=True)
 
+    def test_follow_progress_endpoint_refreshes_stale_emby_episode(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 151, 151, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            app.set_setting(connection, "emby_url", "http://emby.test")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+
+        with patch.object(
+            app, "destination_emby_ids", return_value={223911}
+        ) as library:
+            with patch.object(
+                app,
+                "destination_episode_progress",
+                return_value={
+                    "emby_latest_season_number": 1,
+                    "emby_latest_episode_number": 152,
+                },
+            ) as progress:
+                result = app.follow_emby_progress(follow_id, self.token)
+
+        self.assertEqual(result["baseline_episode"], 152)
+        self.assertEqual(
+            app.list_follows(self.token)["follows"][0]["baseline_episode"],
+            152,
+        )
+        library.assert_called_once_with("p115", force=True)
+        progress.assert_called_once_with(
+            "p115", 223911, known_in_library=True, force=True
+        )
+
     def test_admin_can_confirm_whole_transfer_with_existing_episodes(self):
         class FakeP115:
             def clouddownload_task_list(self, _payload):
