@@ -101,7 +101,7 @@ async def movie_http_exception_handler(
         if user:
             send_notifications(
                 f"❌ 资源转存失败 · "
-                f"{'PanSave' if user['storage_destination'] == 'p123' else '115'}\n\n"
+                f"{'123' if user['storage_destination'] == 'p123' else '115'}\n\n"
                 f"账号：{user['display_name']}\n原因：{error.detail}"
             )
     return JSONResponse(
@@ -1091,7 +1091,7 @@ def pansave_login_settings() -> dict[str, Any]:
 def clean_pansave_bot_username(value: Any) -> str:
     username = str(value or "pansavenb_bot").strip().lstrip("@")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", username):
-        raise HTTPException(400, "PanSave 机器人用户名格式无效")
+        raise HTTPException(400, "123机器人用户名格式无效")
     return username
 
 
@@ -1106,7 +1106,7 @@ async def pansave_send_link(share_url: str) -> dict[str, Any]:
         and settings["phone"]
         and settings["session"]
     ):
-        raise HTTPException(503, "管理员尚未完成 PanSave Telegram 用户账号登录")
+        raise HTTPException(503, "管理员尚未完成123 Telegram用户账号登录")
     client = pansave_client(
         settings["api_id"],
         settings["api_hash"],
@@ -1116,7 +1116,7 @@ async def pansave_send_link(share_url: str) -> dict[str, Any]:
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            raise HTTPException(401, "PanSave Telegram 用户会话已失效，请重新登录")
+            raise HTTPException(401, "123 Telegram用户会话已失效，请重新登录")
         bot_username = clean_pansave_bot_username(settings["bot_username"])
         message = await client.send_message(bot_username, url)
         return {
@@ -1126,7 +1126,7 @@ async def pansave_send_link(share_url: str) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(502, f"发送给 PanSave 失败：{error}") from error
+        raise HTTPException(502, f"发送给123失败：{error}") from error
     finally:
         await client.disconnect()
 
@@ -1143,7 +1143,7 @@ async def deliver_to_pansave(
     episode_numbers: Optional[list[int]] = None,
 ) -> dict[str, Any]:
     result = await pansave_send_link(share_url)
-    message = "资源链接已发送给 PanSave 机器人"
+    message = "资源链接已发送给123机器人"
     record_transfer(
         user_id=int(user["id"]),
         source=source,
@@ -1156,7 +1156,7 @@ async def deliver_to_pansave(
         episode_numbers=episode_numbers or [],
     )
     send_notifications(
-        f"📨 资源已提交 PanSave\n\n"
+        f"📨 资源已提交123\n\n"
         f"{title or '资源'} · {user['display_name']}\n"
         f"已发送给 @{result['bot_username']}"
     )
@@ -2896,7 +2896,7 @@ def sync_emby_requests(
     destination: Optional[str] = None,
 ) -> int:
     destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
-    updated = 0
+    removed = 0
     for current in destinations:
         tmdb_ids = emby_library_tmdb_ids(force=force, destination=current)
         if not tmdb_ids:
@@ -2906,25 +2906,24 @@ def sync_emby_requests(
             rows = connection.execute(
                 f"SELECT r.id, r.title, r.year, u.display_name "
                 f"FROM movie_requests r JOIN users u ON u.id = r.user_id "
-                f"WHERE r.tmdb_id IN ({placeholders}) AND r.media_type = 'movie' "
-                f"AND r.status != 'available' AND u.storage_destination = ?",
+                f"WHERE r.tmdb_id IN ({placeholders}) "
+                f"AND u.storage_destination = ?",
                 (*tmdb_ids, current),
             ).fetchall()
             if rows:
                 ids = [int(row["id"]) for row in rows]
                 marks = ",".join("?" for _ in ids)
                 connection.execute(
-                    f"UPDATE movie_requests SET status = 'available', updated_at = ? "
-                    f"WHERE id IN ({marks})",
-                    (now_iso(), *ids),
+                    f"DELETE FROM movie_requests WHERE id IN ({marks})",
+                    ids,
                 )
         for row in rows:
             send_notifications(
-                f"✅ 入库完成 · {'PanSave 对应' if current == 'p123' else '115'} Emby\n\n"
+                f"✅ 已入库并清除求片 · {'123' if current == 'p123' else '115'} Emby\n\n"
                 f"{row['title']} ({row['year']})\n申请人：{row['display_name']}"
             )
-        updated += len(rows)
-    return updated
+        removed += len(rows)
+    return removed
 
 
 def normalize_search_text(value: Any) -> str:
@@ -3513,6 +3512,17 @@ def send_notifications(text: str) -> None:
     send_wecom(text)
 
 
+def send_notifications_async(text: str) -> None:
+    """Send optional notifications without extending a completed web request."""
+    def deliver() -> None:
+        try:
+            send_notifications(text)
+        except Exception:
+            pass
+
+    Thread(target=deliver, name="movie-request-notification", daemon=True).start()
+
+
 def wecom_menu_payload() -> dict[str, Any]:
     with db() as connection:
         site_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
@@ -3958,7 +3968,7 @@ def auto_replenish_hdhive_follow(
     if follow["storage_destination"] == "p123":
         return {
             "transferred": [],
-            "message": "PanSave 模式只在手动选中资源时发送链接，不自动补集",
+            "message": "123模式只在手动选中资源时发送链接，不自动补集",
         }
 
     tmdb_id = int(follow["tmdb_id"])
@@ -5675,7 +5685,6 @@ async def hdhive_transfer(
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
-        before_tasks = p115_offline_snapshot(client)
         queued = p115_call(
             "提交115离线任务失败",
             client.clouddownload_task_add_url,
@@ -5683,14 +5692,9 @@ async def hdhive_transfer(
         )
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
-        if not wait_for_p115_change(
-            lambda: p115_offline_snapshot(client), before_tasks
-        ):
-            raise HTTPException(502, "115接口没有创建云下载任务")
         mode = "offline"
-        message = "已加入115离线下载"
+        message = "已提交115离线下载，正在后台处理"
     else:
-        before_files = p115_folder_snapshot(client, target_cid)
         snap = p115_call(
             "读取115分享失败",
             client.share_snap,
@@ -5714,12 +5718,8 @@ async def hdhive_transfer(
         )
         if not response_ok(received):
             raise HTTPException(502, response_message(received, "115转存失败"))
-        if not wait_for_p115_change(
-            lambda: p115_folder_snapshot(client, target_cid), before_files
-        ):
-            raise HTTPException(502, "115接口没有把文件写入目标目录")
         mode = "share"
-        message = "已手动转存所选资源"
+        message = "已提交到115，正在后台处理"
 
     record_transfer(
         user_id=int(user["id"]),
@@ -5732,8 +5732,8 @@ async def hdhive_transfer(
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
-    send_notifications(
-        f"☁️ 影巢资源已转存\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
+    send_notifications_async(
+        f"☁️ 影巢资源已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
     return {"ok": True, "mode": mode, "message": message}
 
@@ -6506,7 +6506,7 @@ async def pansave_test(
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(502, f"无法找到 PanSave 机器人：{error}") from error
+        raise HTTPException(502, f"无法找到123机器人：{error}") from error
     finally:
         await client.disconnect()
     username = str(getattr(bot, "username", "") or settings["bot_username"])
@@ -6667,7 +6667,7 @@ def emby_sync(
         raise HTTPException(400, "Emby 类型无效")
     return {
         "ok": True,
-        "updated": sync_emby_requests(force=True, destination=destination),
+        "removed": sync_emby_requests(force=True, destination=destination),
     }
 
 
@@ -6676,7 +6676,7 @@ def wecom_test(movie_session: Optional[str] = Cookie(default=None)) -> dict[str,
     require_admin(movie_session)
     if not send_wecom(
         "✅ 映单：企业微信通知测试成功\n\n"
-        "115转存、PanSave链接投递与对应 Emby 入库结果都会同步通知。"
+        "115转存、123链接投递与对应 Emby 入库结果都会同步通知。"
     ):
         raise HTTPException(502, "企业微信发送失败，请检查 CorpID、AgentID、Secret 和转发地址")
     return {"ok": True}

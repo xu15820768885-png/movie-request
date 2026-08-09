@@ -1040,7 +1040,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                         )
 
         self.assertEqual(result["mode"], "offline")
-        self.assertEqual(result["message"], "已加入115离线下载")
+        self.assertEqual(result["message"], "已提交115离线下载，正在后台处理")
 
     def test_manual_transfer_receives_full_share_and_allows_retry(self):
         class FakeP115:
@@ -1172,7 +1172,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                         )
 
         self.assertEqual(result["mode"], "offline")
-        self.assertEqual(result["message"], "已加入115离线下载")
+        self.assertEqual(result["message"], "已提交115离线下载，正在后台处理")
 
 
 if __name__ == "__main__":
