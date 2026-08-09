@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#11100f">
+  <meta name="theme-color" content="#0d0f12">
   <title>映单</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #11100f;
-      --panel: #1b1917;
-      --panel-soft: #24211e;
-      --line: #35312c;
-      --text: #f7f1e8;
-      --muted: #aaa097;
+      --bg: #0d0f12;
+      --panel: #17191e;
+      --panel-soft: #202329;
+      --line: #30343c;
+      --text: #f6f2eb;
+      --muted: #9ca2ac;
       --cream: #f3dfb3;
       --orange: #ff7a45;
       --orange-2: #ff9a62;
@@ -31,19 +31,19 @@
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at 12% -10%, rgba(255,122,69,.14), transparent 30rem),
-        radial-gradient(circle at 100% 12%, rgba(243,223,179,.06), transparent 26rem),
+        radial-gradient(circle at 8% -8%, rgba(255,122,69,.15), transparent 32rem),
+        radial-gradient(circle at 92% 8%, rgba(119,174,232,.07), transparent 28rem),
         var(--bg);
     }
     button, input, textarea, select { font: inherit; }
     button { cursor: pointer; }
     .hidden { display: none !important; }
     .muted { color: var(--muted); }
-    .shell { width: min(1160px, calc(100% - 36px)); margin: 0 auto; }
+    .shell { width: min(1240px, calc(100% - 40px)); margin: 0 auto; }
     .topbar {
       position: sticky; top: 0; z-index: 20;
       border-bottom: 1px solid rgba(53,49,44,.75);
-      background: rgba(17,16,15,.83); backdrop-filter: blur(18px);
+      background: rgba(13,15,18,.82); backdrop-filter: blur(20px);
     }
     .topbar-inner { height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
     .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
@@ -72,7 +72,7 @@
     .btn-danger:hover { border-color: var(--red); background: rgba(228,123,123,.14); }
     .btn-small { min-height: 34px; padding: 6px 11px; font-size: 12px; border-radius: 9px; }
     .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
-    main { padding: 46px 0 80px; }
+    main { padding: 40px 0 80px; }
     .hero {
       display: grid; grid-template-columns: minmax(0,1fr) auto;
       grid-template-areas: "copy stamp"; gap: 28px; align-items: end; margin-bottom: 28px;
@@ -80,7 +80,7 @@
     .hero.has-notice { grid-template-columns: minmax(0,1fr) minmax(320px,.95fr) auto; grid-template-areas: "copy notice stamp"; }
     .hero-copy { grid-area: copy; }
     .eyebrow { color: var(--orange-2); font-size: 12px; font-weight: 800; letter-spacing: .16em; }
-    h1 { max-width: 720px; margin: 10px 0 12px; font-size: clamp(32px, 5vw, 58px); line-height: 1.06; letter-spacing: -.04em; }
+    h1 { max-width: 720px; margin: 10px 0 12px; font-size: clamp(32px, 4.4vw, 54px); line-height: 1.06; letter-spacing: -.04em; }
     .hero p { max-width: 600px; margin: 0; color: var(--muted); line-height: 1.75; }
     .hero-stamp { grid-area: stamp; color: #776e66; font-size: 12px; text-align: right; line-height: 1.7; }
     .site-notice {
@@ -97,7 +97,7 @@
     }
     .search-box input { width: 100%; min-height: 50px; border: 0; outline: 0; padding: 0 14px; color: var(--text); background: transparent; font-size: 16px; }
     .search-box input::placeholder { color: #7e746c; }
-    .search-tip { margin: 11px 4px 0; color: #857b72; font-size: 12px; }
+    .search-tip { margin: 11px 4px 0; color: #838a94; font-size: 12px; }
     .tabs { display: flex; gap: 6px; margin: 36px 0 18px; overflow-x: auto; scrollbar-width: none; }
     .tab { white-space: nowrap; padding: 9px 14px; border: 0; border-radius: 10px; color: var(--muted); background: transparent; }
     .tab.active { color: var(--text); background: var(--panel-soft); }
@@ -198,7 +198,7 @@
     .badge-available { color: #b7f1d4; background: rgba(103,199,154,.14); }
     .badge-rejected { color: #ffc4c4; background: rgba(228,123,123,.14); }
     .admin-grid { display: grid; grid-template-columns: minmax(0,1.65fr) minmax(300px,.8fr); gap: 18px; }
-    .panel { padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+    .panel { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(155deg,rgba(255,255,255,.018),transparent 52%),var(--panel); box-shadow: 0 14px 34px rgba(0,0,0,.12); }
     .panel h3 { margin: 0 0 14px; font-size: 15px; }
     .admin-request { padding: 14px 0; border-bottom: 1px solid var(--line); }
     .admin-request:first-child { padding-top: 0; }
@@ -216,14 +216,30 @@
     label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
     .stack { display: grid; gap: 12px; }
     .inline { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .user-row { display: grid; grid-template-columns: 1fr; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+    .user-row { display: grid; grid-template-columns: 1fr; align-items: center; gap: 12px; padding: 15px 0; border-bottom: 1px solid var(--line); }
     .user-row:last-child { border: 0; }
     .user-name { font-weight: 700; }
     .user-login { margin-top: 3px; color: var(--muted); font-size: 11px; }
     .user-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .user-editor { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; align-items: center; }
+    .user-editor { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; align-items: center; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(0,0,0,.12); }
     .user-editor input { min-width: 0; }
     .user-editor .btn { width: 100%; min-width: 56px; white-space: nowrap; }
+    .user-edit { border: 0; }
+    .user-edit > summary { width: fit-content; margin-left: auto; list-style: none; color: var(--orange-2); cursor: pointer; font-size: 12px; font-weight: 800; }
+    .user-edit > summary::-webkit-details-marker { display: none; }
+    .user-edit[open] > summary { margin-bottom: 10px; }
+    .family-layout { display: grid; gap: 14px; }
+    .member-create { padding: 0; overflow: hidden; }
+    .member-create > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; list-style: none; cursor: pointer; font-weight: 850; }
+    .member-create > summary::-webkit-details-marker { display: none; }
+    .member-create > summary::after { content: '+'; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; color: #2c160b; background: var(--orange); font-size: 20px; }
+    .member-create[open] > summary::after { content: '−'; }
+    .member-create form { padding: 0 20px 20px; }
+    .member-create-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+    .secret-settings { border: 1px solid var(--line); border-radius: 13px; background: rgba(0,0,0,.12); }
+    .secret-settings > summary { padding: 13px 14px; list-style: none; color: var(--orange-2); cursor: pointer; font-size: 12px; font-weight: 800; }
+    .secret-settings > summary::-webkit-details-marker { display: none; }
+    .secret-settings > .secret-body { display: grid; gap: 12px; padding: 0 14px 14px; }
     .detail-overlay { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 18px; background: rgba(5,4,3,.82); backdrop-filter: blur(14px); }
     .detail-card { position: relative; width: min(900px,100%); max-height: calc(100vh - 36px); overflow: auto; border: 1px solid #4a433c; border-radius: 24px; background: #171513; box-shadow: var(--shadow); }
     .detail-close { position: sticky; z-index: 4; top: 14px; float: right; width: 42px; height: 42px; margin: 14px 14px -56px 0; padding: 0; border: 1px solid rgba(255,255,255,.18); border-radius: 50%; color: white; background: rgba(10,9,8,.78); font-size: 22px; }
@@ -335,6 +351,10 @@
     .settings-group:last-of-type { border-bottom: 0; padding-bottom: 0; }
     .settings-group h4 { margin: 0; font-size: 14px; }
     .settings-save { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 20px; }
+    .storage-panel { min-height: 430px; }
+    .storage-panel-head { margin-bottom: 18px; padding-bottom: 15px; border-bottom: 1px solid var(--line); }
+    .storage-panel-head h3 { margin: 0 0 6px; font-size: 18px; }
+    .storage-panel-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
     .recommend-title { margin: 28px 0 12px; font-size: 16px; }
     .recommend-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; }
     .recommend-card { padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--panel); text-align: left; }
@@ -402,6 +422,7 @@
       .settings-nav-title { display: none; }
       .settings-nav-button { width: auto; flex: 0 0 auto; white-space: nowrap; padding: 10px 12px; }
       .settings-panel { min-height: 0; }
+      .storage-panel { min-height: 0; }
       .settings-save { display: grid; grid-template-columns: 1fr; }
       .settings-save .btn { width: 100%; min-height: 42px; }
       .recommend-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -414,6 +435,7 @@
       .user-row { grid-template-columns: 1fr; }
       .user-editor { grid-template-columns: 1fr; }
       .user-editor .btn { min-height: 42px; }
+      .member-create-grid { grid-template-columns: 1fr; }
       .inline { grid-template-columns: 1fr; }
     }
     @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
@@ -453,7 +475,7 @@
         <div class="hero-stamp">精准匹配影片资料<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
-      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。手动选择满意版本后，115账号直接转存，PanSave账号只把解锁链接发送给机器人。</div>
+      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。</div>
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
@@ -471,72 +493,85 @@
       </section>
       <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看自己开启的影巢追更；更新资源仍由管理员手动转存</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
-      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>Emby 检测到资源后会自动显示“已入库”</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源；资源进入 Emby 并带有对应 TMDB ID 后，系统会自动改成“已入库”。也可以留下简短回复，比如“正在找国语版”。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
+      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>资源进入对应 Emby 后会自动清除需求</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，系统会自动清除这条需求。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
-        <div class="section-head"><div><h2>影巢、癫影、115 与 PanSave</h2><span>115账号直接转存；PanSave账号把解锁链接发送给机器人处理</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
+        <div class="section-head"><div><h2>资源和网盘</h2><span>按服务分类配置，状态和测速集中查看</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
         <div class="integration-status">
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>癫影 OpenAPI</div><div id="dianStatus" class="status-value">待配置</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>115 账号</div><div id="p115Status" class="status-value">待扫码</div></div>
-          <div class="status-card"><div class="status-label"><span class="status-dot"></span>PanSave 投递</div><div id="pansaveStatus" class="status-value">待配置</div></div>
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>123 投递</div><div id="pansaveStatus" class="status-value">待配置</div></div>
         </div>
-        <section class="panel" style="margin-bottom:18px">
-          <div class="section-head" style="margin:0"><div><h3>接口速度检测</h3><span>分别检测三条外部线路；某一项失败不会影响另外两项重试</span></div><button id="testAllIntegrations" class="btn" type="button">全部测速</button></div>
-          <div class="diagnostic-grid">
-            <div class="diagnostic-card"><strong>TMDB · NAS 出口</strong><div id="diagnosticTmdb" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="tmdb">单独重试</button></div>
-            <div class="diagnostic-card"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
-            <div class="diagnostic-card"><strong>癫影 · OpenAPI</strong><div id="diagnosticDian" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="dian">单独重试</button></div>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="资源和网盘分类">
+            <div class="settings-nav-title">资源分类</div>
+            <button class="settings-nav-button active" type="button" data-storage-panel="overview">状态与测速</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="hdhive">影巢</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="dian">癫影</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="p115">115 网盘</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="pansave">123</button>
+          </nav>
+          <div class="settings-content">
+            <section class="panel storage-panel" data-storage-content="overview">
+              <div class="storage-panel-head"><h3>状态与测速</h3><p>快速确认三条外部线路是否正常，不需要翻找具体配置。</p></div>
+              <div class="section-head" style="margin:0"><div><h3>接口速度检测</h3><span>某一项失败不会影响另外两项</span></div><button id="testAllIntegrations" class="btn" type="button">全部测速</button></div>
+              <div class="diagnostic-grid">
+                <div class="diagnostic-card"><strong>TMDB · NAS 出口</strong><div id="diagnosticTmdb" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="tmdb">单独重试</button></div>
+                <div class="diagnostic-card"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
+                <div class="diagnostic-card"><strong>癫影 · OpenAPI</strong><div id="diagnosticDian" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="dian">单独重试</button></div>
+              </div>
+            </section>
+            <form id="hdhiveForm" class="panel stack storage-panel hidden" data-storage-content="hdhive">
+              <div class="storage-panel-head"><h3>影巢 OAuth 与固定出口</h3><p id="hdhiveState">未填写凭证时保持关闭，不影响现有网站</p></div>
+              <div class="section-head" style="margin:0"><span>连接与签到</span><span id="hdhiveProxyState" class="badge badge-approved">固定出口待配置</span></div>
+              <label>Client ID<input id="hdhiveClientId" placeholder="审核通过后填写"></label>
+              <label>固定 Redirect URI<input id="hdhiveRedirectUri" placeholder="https://你的域名/api/hdhive/oauth/callback"></label>
+              <label>申请权限<input id="hdhiveScopes" value="meta query unlock write vip"></label>
+              <details class="secret-settings"><summary>修改敏感凭据</summary><div class="secret-body"><label>App Secret<input id="hdhiveAppSecret" type="password" autocomplete="new-password" placeholder="输入新值后保存"></label><label>云服务器固定出口代理<input id="hdhiveProxyUrl" type="password" autocomplete="new-password" placeholder="输入新代理地址后保存"></label></div></details>
+              <div class="inline hidden"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">启用低频追更消息检查</label></div>
+              <div class="inline"><label>自动签到时间<input id="hdhiveSigninTime" type="time" value="08:35"></label><label>签到模式<select id="hdhiveSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
+              <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveSigninEnabled" type="checkbox" style="width:auto">启用影巢每日自动签到</label>
+              <div id="hdhiveCheckinResult" class="checkin-result">影巢尚未执行签到</div>
+              <div class="integration-actions"><button class="btn" type="submit">保存配置</button><button id="hdhiveAuthorize" class="btn btn-primary" type="button">连接影巢</button><button id="hdhiveCheckinNow" class="btn btn-primary" type="button">立即签到</button><button id="hdhiveDisconnect" class="btn btn-danger" type="button">断开授权</button></div>
+            </form>
+            <form id="integrationForm" class="panel stack storage-panel hidden" data-storage-content="dian">
+              <div class="storage-panel-head"><h3>癫影账户与签到</h3><p>配置资源查询接口和每日签到。</p></div>
+              <label>OpenAPI 地址<input id="dianBaseUrl" placeholder="https://你的癫影站点"></label>
+              <details class="secret-settings"><summary>修改 OpenAPI Key</summary><div class="secret-body"><label>OpenAPI Key<input id="dianApiKey" type="password" autocomplete="new-password" placeholder="输入新值后保存"></label></div></details>
+              <div class="inline"><label>自动签到时间<input id="dianSigninTime" type="time" value="08:30"></label><label>签到模式<select id="dianSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
+              <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="dianSigninEnabled" type="checkbox" style="width:auto">启用每日自动签到</label>
+              <div id="checkinResult" class="checkin-result">尚未执行签到</div>
+              <div class="integration-actions"><button class="btn" type="submit">保存配置</button><button id="dianCheckinPreview" class="btn btn-primary" type="button">立即签到</button></div>
+            </form>
+            <section class="panel storage-panel hidden" data-storage-content="p115">
+              <div class="storage-panel-head"><h3>115 转存设置</h3><p>登录 115 并选择所有成员共用的转存目录。</p></div>
+              <label>扫码设备<select id="p115App"></select></label>
+              <div class="integration-line"><div><div class="integration-label">登录状态</div><div id="p115LoginValue" class="integration-value">尚未扫码</div></div><button id="qrLoginPreview" class="btn btn-small" type="button">扫码登录</button></div>
+              <div id="qrPanel" class="hidden" style="text-align:center;padding:14px"><img id="qrImage" alt="115登录二维码" style="width:210px;max-width:100%;border-radius:12px;background:white;padding:8px"><div class="muted" style="margin-top:8px;font-size:12px">请使用115手机App扫码确认</div></div>
+              <div class="integration-label" style="margin-top:14px">家人选中资源后转存到</div>
+              <div id="selectedFolderPath" class="folder-path">115网盘 / 我的接收 / 影视自动转存</div>
+              <div class="integration-actions"><button id="folderSelectPreview" class="btn">选择转存文件夹</button></div>
+              <div id="folderPicker" class="folder-picker hidden"></div>
+            </section>
+            <form id="pansaveForm" class="panel stack storage-panel hidden" data-storage-content="pansave">
+              <div class="storage-panel-head"><h3>123 投递</h3><p>使用 Telegram 用户账号把解锁链接单向发送给123机器人。</p></div>
+              <div class="section-head" style="margin:0"><span>连接资料</span><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
+              <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label></div>
+              <div class="inline"><label>123 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label><label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890"></label></div>
+              <details class="secret-settings"><summary>重新登录或更换 API Hash</summary><div class="secret-body"><label>Telegram API Hash<input id="pansaveApiHash" type="password" autocomplete="new-password" placeholder="仅在重新登录时输入"></label><div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div></div></details>
+              <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="one-time-code"></label></div>
+              <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
+            </form>
           </div>
-        </section>
-        <form id="hdhiveForm" class="panel stack" style="margin-bottom:18px">
-          <div class="section-head" style="margin:0"><div><h3>影巢 OAuth 与固定出口</h3><span id="hdhiveState">未填写凭证时保持关闭，不影响现有网站</span></div><span id="hdhiveProxyState" class="badge badge-approved">固定出口待配置</span></div>
-          <div class="inline"><label>Client ID<input id="hdhiveClientId" placeholder="审核通过后填写"></label><label>App Secret<input id="hdhiveAppSecret" type="password" placeholder="留空表示不修改"></label></div>
-          <label>固定 Redirect URI<input id="hdhiveRedirectUri" placeholder="https://你的域名/api/hdhive/oauth/callback"></label>
-          <label>云服务器固定出口代理<input id="hdhiveProxyUrl" type="password" placeholder="例如：http://用户名:密码@38.55.106.163:3128"></label>
-          <label>申请权限<input id="hdhiveScopes" value="meta query unlock write vip"></label>
-          <div class="inline hidden"><label>低频检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">启用低频追更消息检查</label></div>
-          <div class="inline"><label>影巢自动签到时间<input id="hdhiveSigninTime" type="time" value="08:35"></label><label>影巢签到模式<select id="hdhiveSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
-          <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveSigninEnabled" type="checkbox" style="width:auto">启用影巢每日自动签到</label>
-          <div id="hdhiveCheckinResult" class="checkin-result">影巢尚未执行签到</div>
-          <div class="transfer-note">影巢签到需要 <strong>write</strong> 权限；首次启用前，请在影巢应用后台补充该权限并重新授权。</div>
-          <div class="integration-actions"><button class="btn" type="submit">保存影巢配置</button><button id="hdhiveAuthorize" class="btn btn-primary" type="button">连接影巢</button><button id="hdhiveDisconnect" class="btn btn-danger" type="button">断开授权</button></div>
-          <div class="integration-actions"><button id="hdhiveCheckinNow" class="btn btn-primary" type="button">影巢立即签到</button></div>
-          <div class="transfer-note">App Secret 和 OAuth 令牌使用独立密钥加密保存在 NAS；影巢请求不会使用当前会变化的全局代理。</div>
-        </form>
-        <div class="integration-grid">
-          <form id="integrationForm" class="panel stack">
-            <h3>癫影账户与签到</h3>
-            <label>OpenAPI 地址<input id="dianBaseUrl" placeholder="https://你的癫影站点"></label>
-            <label>OpenAPI Key<input id="dianApiKey" type="password" placeholder="留空表示不修改"></label>
-            <div class="inline"><label>自动签到时间<input id="dianSigninTime" type="time" value="08:30"></label><label>签到模式<select id="dianSigninMode"><option value="normal">普通签到</option><option value="lucky">运气签到</option></select></label></div>
-            <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="dianSigninEnabled" type="checkbox" style="width:auto">启用每日自动签到</label>
-            <div id="checkinResult" class="checkin-result">尚未执行签到</div>
-            <div class="integration-actions"><button class="btn" type="submit">保存配置</button><button id="dianCheckinPreview" class="btn btn-primary" type="button">立即签到</button></div>
-          </form>
-          <section class="panel">
-            <h3>115 转存设置</h3>
-            <label>扫码设备<select id="p115App"></select></label>
-            <div class="integration-line"><div><div class="integration-label">登录状态</div><div id="p115LoginValue" class="integration-value">尚未扫码</div></div><button id="qrLoginPreview" class="btn btn-small" type="button">扫码登录</button></div>
-            <div id="qrPanel" class="hidden" style="text-align:center;padding:14px"><img id="qrImage" alt="115登录二维码" style="width:210px;max-width:100%;border-radius:12px;background:white;padding:8px"><div class="muted" style="margin-top:8px;font-size:12px">请使用115手机App扫码确认</div></div>
-            <div class="integration-label" style="margin-top:14px">家人选中资源后转存到</div>
-            <div id="selectedFolderPath" class="folder-path">115网盘 / 我的接收 / 影视自动转存</div>
-            <div class="integration-actions"><button id="folderSelectPreview" class="btn">选择转存文件夹</button></div>
-            <div id="folderPicker" class="folder-picker hidden"></div>
-          </section>
         </div>
-        <form id="pansaveForm" class="panel stack" style="margin-top:18px">
-          <div class="section-head" style="margin:0"><div><h3>PanSave · Telegram 用户账号</h3><span>仅用于把影巢解锁链接单向发送给 PanSave，不监听机器人消息</span></div><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
-          <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram API Hash<input id="pansaveApiHash" type="password" autocomplete="off" placeholder="登录时填写，不会回显"></label></div>
-          <div class="inline"><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label><label>PanSave 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label></div>
-          <label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890 或 socks5://地址:端口"></label>
-          <div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div>
-          <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="current-password"></label></div>
-          <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
-          <div class="transfer-note">API Hash、登录会话会加密保存在 NAS 的 /data 中。网站发送链接后立即断开 Telegram，不获取 PanSave 的转存进度或回复。</div>
-        </form>
-        <div class="transfer-note" style="margin-top:18px">影巢和癫影凭据、115 Cookie、Telegram 用户会话只保存在 NAS，不会进入网页或 GitHub。</div>
       </section>
-      <section id="familyView" class="view hidden"><div class="section-head"><h2>成员账号</h2><span>每个账号选择115直转或发送给 PanSave</span></div><div class="admin-grid"><div id="userList" class="panel"></div><form id="newUserForm" class="panel stack"><h3>新增成员</h3><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">发送给 PanSave</option></select></label><button class="btn btn-primary" type="submit">创建账号</button></form></div></section>
+      <section id="familyView" class="view hidden">
+        <div class="section-head"><div><h2>成员账号</h2><span>成员只看到自己的求片与追更；转存方式由管理员固定</span></div></div>
+        <div class="family-layout">
+          <details id="newUserCard" class="panel member-create"><summary>新增成员账号</summary><form id="newUserForm" class="stack"><div class="member-create-grid"><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" autocomplete="off" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">发送给123</option></select></label></div><div class="integration-actions"><button class="btn btn-primary" type="submit">创建账号</button></div></form></details>
+          <div id="userList" class="panel"></div>
+        </div>
+      </section>
       <section id="settingsView" class="view hidden">
         <div class="section-head"><div><h2>系统设置</h2><span>按分类查看和修改，不再需要翻完整个长页面</span></div><span>敏感信息只保存在 NAS，不会回显</span></div>
         <form id="settingsForm" class="settings-layout">
@@ -548,7 +583,7 @@
           </nav>
           <div class="settings-content">
             <section class="panel settings-panel" data-settings-content="media">
-              <div class="settings-panel-head"><h3>媒体与入库</h3><p>配置影片搜索，以及115直转账号和 PanSave 账号各自对应的 Emby。</p></div>
+              <div class="settings-panel-head"><h3>媒体与入库</h3><p>配置影片搜索，以及115账号和123账号各自对应的 Emby。</p></div>
               <div class="settings-group">
                 <h4>TMDB 搜索</h4>
                 <label>API Read Access Token<input id="settingsTmdb" type="password" placeholder="留空表示不修改"></label>
@@ -562,13 +597,13 @@
                 <button id="embyTest" class="btn" type="button">测试 115 Emby</button>
               </div>
               <div class="settings-group">
-                <h4>PanSave 账号对应 Emby</h4>
+                <h4>123 Emby</h4>
                 <label>Emby 地址<input id="settingsP123EmbyUrl" placeholder="例如：http://192.168.31.129:8097"></label>
                 <label>API 密钥<input id="settingsP123EmbyKey" type="password" placeholder="已保存时留空不修改"></label>
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
-                <button id="p123EmbyTest" class="btn" type="button">测试 PanSave 对应 Emby</button>
+                <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
               </div>
-              <div class="transfer-note">115账号查询115对应 Emby 并直接转存；PanSave账号查询自己的 Emby，但网站只负责把资源链接发给机器人。</div>
+              <div class="transfer-note">115账号查询115 Emby并直接转存；123账号查询123 Emby，网站负责把资源链接发给123机器人。</div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存媒体设置</button></div>
             </section>
             <section class="panel settings-panel hidden" data-settings-content="telegram">
@@ -866,7 +901,7 @@
       const followReady=Boolean(item.in_library||item.has_manual_transfer);
       const followLabel=item.hdhive_subscribed?'✓ 已追更':!followReady?'先转存，再追更':item.is_following?'重试追更':'下一步：开启追更';
       const followShortcut=followAvailable?`<button id="detailFollow" class="btn request-shortcut ${followReady&&!item.hdhive_subscribed?'btn-primary':''}" ${item.hdhive_subscribed||!followReady||item.hdhive_loading||!subscriptionResource?'disabled':''}>${item.hdhive_loading?'追更资源读取中':!subscriptionResource?'暂无追更资源':followLabel}</button>`:'';
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">选择满意版本后，系统会按当前账号配置直转115或把链接发送给 PanSave。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'PanSave':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${followShortcut}${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">PanSave目标只发送解锁后的链接；后续处理由机器人完成，本站不监听结果。</div></section>`:'';
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">选择满意版本后，系统会按当前账号配置直转115或把链接发送给123。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'123':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${followShortcut}${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}<div class="transfer-note">123目标只发送解锁后的链接；后续处理由机器人完成。</div></section>`:'';
       $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${detailsNotice}${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
@@ -893,15 +928,15 @@
       const status=$('detailCard').querySelector(`[data-transfer-status="${provider}-${index}"]`);
       const originalLabel=button.textContent;
       button.disabled=true; button.textContent='转存中…';
-      if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'PanSave':'115'}…`;}
+      if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'123':'115'}…`;}
       try {
         const result=provider==='hdhive'
           ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
           : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})});
-        button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送 PanSave':'已完成转存';
-        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'115已确认创建任务';}
+        button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已提交115';
+        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已提交到115后台处理';}
         markInitialTransferComplete();
-        toast(destination==='p123'?(result.message||'资源链接已发送给 PanSave'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
+        toast(destination==='p123'?(result.message||'资源链接已发送给123'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
       } catch(error) {
         button.disabled=false;button.textContent=originalLabel;
         if(status){status.className='resource-transfer-status error';status.textContent=error.message;}
@@ -1040,9 +1075,9 @@
     }
     async function loadUsers() {
       const users=preview
-        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115'},{id:3,username:'pansave',display_name:'PanSave专用',role:'member',active:1,storage_destination:'p123'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115'}]
+        ? [{id:2,username:'mama',display_name:'妈妈',role:'member',active:1,storage_destination:'p115'},{id:3,username:'cloud123',display_name:'123专用',role:'member',active:1,storage_destination:'p123'},{id:1,username:'admin',display_name:'管理员',role:'admin',active:1,storage_destination:'p115'}]
         : (await api('/api/admin/users')).users;
-      $('userList').innerHTML='<h3>已有成员</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">账号 ${escapeHtml(user.username)} · ${user.storage_destination==='p123'?'发送给 PanSave':'115直转'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><div class="user-editor"><input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" aria-label="显示名称" placeholder="显示名称"><input data-user-login="${user.id}" value="${escapeHtml(user.username)}" aria-label="登录账号" placeholder="登录账号"><input data-user-password="${user.id}" type="password" autocomplete="new-password" aria-label="新密码" placeholder="新密码（留空不改）"><select data-user-destination="${user.id}" aria-label="固定转存目标"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>115直转</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>发送给 PanSave</option></select><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除</button>`}</div></div>`).join('');
+      $('userList').innerHTML='<h3>已有账号</h3>'+users.map(user=>`<div class="user-row"><div class="user-summary"><div><div class="user-name">${escapeHtml(user.display_name)}</div><div class="user-login">登录账号：${escapeHtml(user.username)} · ${user.storage_destination==='p123'?'发送给123':'115直转'}</div></div><span class="badge ${user.active?'badge-available':'badge-rejected'}">${user.role==='admin'?'管理员':user.active?'正常':'已停用'}</span></div><details class="user-edit"><summary>编辑账号</summary><div class="user-editor"><label>显示名称<input data-user-name="${user.id}" value="${escapeHtml(user.display_name)}" placeholder="显示名称"></label><label>登录账号<input data-user-login="${user.id}" value="${escapeHtml(user.username)}" autocomplete="off" placeholder="登录账号"></label><label>新密码<input data-user-password="${user.id}" type="password" autocomplete="new-password" placeholder="留空不修改"></label><label>固定转存目标<select data-user-destination="${user.id}"><option value="p115" ${user.storage_destination!=='p123'?'selected':''}>115直转</option><option value="p123" ${user.storage_destination==='p123'?'selected':''}>发送给123</option></select></label><button class="btn btn-primary btn-small" type="button" data-user-save="${user.id}">保存修改</button>${user.role==='admin'?'':`<button class="btn btn-danger btn-small" type="button" data-user-delete="${user.id}" data-user-label="${escapeHtml(user.display_name)}">删除账号</button>`}</div></details></div>`).join('');
       $('userList').querySelectorAll('[data-user-save]').forEach(button=>button.onclick=()=>saveUser(Number(button.dataset.userSave),button));
       $('userList').querySelectorAll('[data-user-delete]').forEach(button=>button.onclick=()=>deleteUser(Number(button.dataset.userDelete),button.dataset.userLabel,button));
     }
@@ -1073,17 +1108,22 @@
     }
     async function loadSettings() {
       if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
-      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby'; $('settingsP123EmbyUrl').value=settings.p123_emby_url||''; $('p123EmbyState').textContent=settings.p123_emby_configured?'PanSave 对应 Emby 已配置':'尚未配置 PanSave 对应 Emby'; $('settingsWecomCorpId').value=settings.wecom_corp_id||''; $('settingsWecomAgentId').value=settings.wecom_agent_id||''; $('settingsWecomToUser').value=settings.wecom_to_user||'@all'; $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin'; $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||''; $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin'; $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||''; $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
+      const settings=await api('/api/admin/settings'); $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB'; $('settingsTelegramChatId').value=settings.telegram_chat_id||''; $('settingsTelegramProxy').value=settings.telegram_proxy||''; $('settingsEmbyUrl').value=settings.emby_url||''; $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby'; $('settingsP123EmbyUrl').value=settings.p123_emby_url||''; $('p123EmbyState').textContent=settings.p123_emby_configured?'123 Emby 已配置':'尚未配置 123 Emby'; $('settingsWecomCorpId').value=settings.wecom_corp_id||''; $('settingsWecomAgentId').value=settings.wecom_agent_id||''; $('settingsWecomToUser').value=settings.wecom_to_user||'@all'; $('settingsWecomApiBase').value=settings.wecom_api_base||'https://wx.weige1999.xin'; $('settingsWecomAdminUserId').value=settings.wecom_admin_userid||''; $('settingsSitePublicUrl').value=settings.site_public_url||'https://qp.weige1999.xin'; $('settingsWecomCallbackUrl').value=settings.wecom_callback_url||''; $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
     }
     async function loadIntegrations() {
-      const hdhive=preview?{status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''}:await api('/api/admin/hdhive/status');
-      const settings=preview?{
+      let hdhive,settings;
+      if(preview){
+        hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',scopes:'meta query unlock write vip',redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:false,poll_interval:1800,signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
+        settings={
         dian_base_url:'https://dian.example.com',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
         p115_target_cid:'123456',p115_target_name:'影视自动转存',
         pansave_configured:true,pansave_connected:true,pansave_telegram_api_id:'1234567',pansave_telegram_phone:'+8613800138000',pansave_bot_username:'pansavenb_bot',pansave_telegram_proxy:'http://192.168.31.129:7890',
-        p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
-      }:await api('/api/admin/integrations');
+          p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
+        };
+      }else{
+        [hdhive,settings]=await Promise.all([api('/api/admin/hdhive/status'),api('/api/admin/integrations')]);
+      }
       $('hdhiveStatus').textContent=hdhive.status_label||'等待审核';
       $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成资源查询与转存配置';
       $('hdhiveProxyState').textContent=hdhive.proxy_label||'固定出口待配置';
@@ -1232,18 +1272,22 @@
       document.querySelectorAll('[data-settings-panel]').forEach(item=>item.classList.toggle('active',item===button));
       document.querySelectorAll('[data-settings-content]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.settingsContent!==button.dataset.settingsPanel));
     });
+    document.querySelectorAll('[data-storage-panel]').forEach(button=>button.onclick=()=>{
+      document.querySelectorAll('[data-storage-panel]').forEach(item=>item.classList.toggle('active',item===button));
+      document.querySelectorAll('[data-storage-content]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.storageContent!==button.dataset.storagePanel));
+    });
     $('detailOverlay').onclick=event=>{if(event.target===$('detailOverlay'))closeDetails();};
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
     $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
-    $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：成员账号创建成功');try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
+    $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview){$('newUserCard').open=false;return toast('预览模式：成员账号创建成功');}try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();$('newUserCard').open=false;toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
     $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');event.target.querySelectorAll('input[type="password"]').forEach(input=>input.value='');loadSettings();}catch(error){toast(error.message,true);}};
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('wecomTest').onclick=async()=>{if(preview)return toast('预览模式：企业微信测试成功');try{await api('/api/admin/wecom-test',{method:'POST'});toast('企业微信测试通知已发送');}catch(error){toast(error.message,true);}};
     $('wecomMenu').onclick=async()=>{if(preview)return toast('预览模式：企业微信菜单已刷新');try{await api('/api/admin/wecom-menu',{method:'POST'});toast('企业微信菜单已创建/刷新');}catch(error){toast(error.message,true);}};
-    $('p123EmbyTest').onclick=async()=>{if(preview)return toast('预览模式：PanSave 对应 Emby 连接正常');try{const data=await api('/api/admin/emby-test?destination=p123',{method:'POST'});toast(`${data.server_name}：${data.library_tmdb_count} 个 TMDB 条目`);}catch(error){toast(error.message,true);}};
+    $('p123EmbyTest').onclick=async()=>{if(preview)return toast('预览模式：123 Emby 连接正常');try{const data=await api('/api/admin/emby-test?destination=p123',{method:'POST'});toast(`${data.server_name}：${data.library_tmdb_count} 个 TMDB 条目`);}catch(error){toast(error.message,true);}};
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
-    $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，1 条需求已更新为“已入库”');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，${result.updated} 条需求更新为“已入库”`);loadRequests();}catch(error){toast(error.message,true);}};
+    $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，已自动清除1条入库需求');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，已自动清除${result.removed}条入库需求`);loadRequests();}catch(error){toast(error.message,true);}};
     $('testAllIntegrations').onclick=testAllIntegrations;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});$('dianApiKey').value='';toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};

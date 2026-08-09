@@ -385,7 +385,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(request["title"], "仙逆")
         self.assertEqual(request["media_type"], "tv")
 
-    def test_emby_sync_keeps_tv_request_open_for_moviepilot_followup(self):
+    def test_emby_sync_removes_movie_and_tv_requests_after_ingest(self):
         timestamp = app.now_iso()
         with app.db() as connection:
             user_id = connection.execute(
@@ -409,19 +409,15 @@ class MovieRequestTests(unittest.TestCase):
             "emby_library_tmdb_ids",
             return_value={1001, 1002},
         ):
-            updated = app.sync_emby_requests(force=True)
+            removed = app.sync_emby_requests(force=True)
 
         with app.db() as connection:
-            rows = {
-                row["media_type"]: row["status"]
-                for row in connection.execute(
-                    "SELECT media_type, status FROM movie_requests "
-                    "WHERE tmdb_id IN (1001, 1002)"
-                )
-            }
-        self.assertEqual(updated, 1)
-        self.assertEqual(rows["movie"], "available")
-        self.assertEqual(rows["tv"], "pending")
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests "
+                "WHERE tmdb_id IN (1001, 1002)"
+            ).fetchone()[0]
+        self.assertEqual(removed, 2)
+        self.assertEqual(remaining, 0)
 
     def test_details_include_story_cast_and_recommendations(self):
         details = {
@@ -1843,6 +1839,43 @@ class MovieRequestTests(unittest.TestCase):
             "https://115.com/s/example",
         )
 
+    def test_hdhive_115_transfer_returns_after_accepted_submission(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                raise AssertionError("影巢直转不应再等待目标目录轮询")
+
+            def share_snap(self, *_args, **kwargs):
+                self.share_url = kwargs["share_url"]
+                return {"state": True, "data": {"list": [{"fid": "101"}]}}
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        payload = {
+            "slug": "fast-resource",
+            "tmdb_id": 101,
+            "media_type": "movie",
+            "title": "测试电影",
+            "resource_title": "测试电影 4K",
+        }
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"full_url": "https://115.com/s/example"}},
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "send_notifications_async") as notify:
+                    result = asyncio.run(
+                        app.hdhive_transfer(FakeRequest(payload), self.token)
+                    )
+
+        self.assertEqual(result["mode"], "share")
+        self.assertIn("正在后台处理", result["message"])
+        self.assertEqual(client.received["file_id"], "101")
+        notify.assert_called_once()
+
     def test_pansave_send_link_uses_saved_user_session(self):
         with app.db() as connection:
             app.set_setting(connection, "pansave_telegram_api_id", "123456")
@@ -1947,17 +1980,14 @@ class MovieRequestTests(unittest.TestCase):
             ),
         ):
             with patch.object(app, "send_notifications") as notify:
-                updated = app.sync_emby_requests(force=True)
-        self.assertEqual(updated, 2)
+                removed = app.sync_emby_requests(force=True)
+        self.assertEqual(removed, 2)
         self.assertEqual(notify.call_count, 2)
         with app.db() as connection:
-            statuses = {
-                row["tmdb_id"]: row["status"]
-                for row in connection.execute(
-                    "SELECT tmdb_id, status FROM movie_requests"
-                )
-            }
-        self.assertEqual(statuses, {101: "available", 202: "available"})
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
 
     def test_notification_fanout_sends_telegram_and_wecom(self):
         with patch.object(app, "send_telegram") as telegram:
