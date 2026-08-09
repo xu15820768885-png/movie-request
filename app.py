@@ -5256,6 +5256,32 @@ def list_follows(
     return {"follows": [serialize_follow(row) for row in rows]}
 
 
+@APP.get("/api/follows/{follow_id}/emby-progress")
+def follow_emby_progress(
+    follow_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1",
+            (follow_id,),
+        ).fetchone()
+    if not row or (user["role"] != "admin" and row["user_id"] != user["id"]):
+        raise HTTPException(404, "没有找到这条追更")
+    row = refresh_follow_emby_baseline(follow_id)
+    return {
+        "follow_id": follow_id,
+        "baseline_season": int(row["baseline_season"] or 1),
+        "baseline_episode": int(row["baseline_episode"] or 0),
+        "baseline_label": episode_progress_label(
+            int(row["baseline_season"] or 1),
+            int(row["baseline_episode"] or 0),
+            "已从",
+        ),
+    }
+
+
 @APP.post("/api/follows")
 async def create_follow(
     request: Request,

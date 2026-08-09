@@ -13,6 +13,7 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("我的追更", html)
         self.assertIn("查看自己开启的影巢追更", html)
         self.assertNotIn('data-follow-index="${index}"', html)
+
         self.assertIn('id="detailFollow"', html)
         self.assertIn("item.series_status==='ongoing'", html)
         self.assertIn("slug:resource.slug", html)
@@ -71,6 +72,16 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertNotIn("115安全预检", html)
         self.assertNotIn("confirm_whole:", html)
         self.assertNotIn("按实际缺集自动安全补齐", html)
+
+    def test_detail_does_not_repeat_p123_robot_delivery_note(self):
+        html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+        self.assertNotIn("123目标只发送解锁后的链接", html)
+
+    def test_follow_progress_refreshes_after_initial_list_render(self):
+        html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+        self.assertIn("refreshFollowEmbyProgress(follows)", html)
+        self.assertIn("/emby-progress`)", html)
+        self.assertNotIn("await refreshFollowEmbyProgress(follows)", html)
 
 
 if __name__ == "__main__":
