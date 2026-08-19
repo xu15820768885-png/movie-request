@@ -1917,10 +1917,10 @@ class MovieRequestTests(unittest.TestCase):
             "https://115.com/s/example",
         )
 
-    def test_hdhive_115_transfer_returns_after_accepted_submission(self):
+    def test_hdhive_115_transfer_waits_until_target_folder_changes(self):
         class FakeP115:
             def fs_files(self, _payload):
-                raise AssertionError("影巢直转不应再等待目标目录轮询")
+                return {"state": True, "data": {"list": []}}
 
             def share_snap(self, *_args, **kwargs):
                 self.share_url = kwargs["share_url"]
@@ -1944,14 +1944,16 @@ class MovieRequestTests(unittest.TestCase):
             return_value={"data": {"full_url": "https://115.com/s/example"}},
         ):
             with patch.object(app, "p115_client", return_value=client):
-                with patch.object(app, "send_notifications_async") as notify:
-                    result = asyncio.run(
-                        app.hdhive_transfer(FakeRequest(payload), self.token)
-                    )
+                with patch.object(app, "wait_for_p115_change", return_value=True) as wait:
+                    with patch.object(app, "send_notifications_async") as notify:
+                        result = asyncio.run(
+                            app.hdhive_transfer(FakeRequest(payload), self.token)
+                        )
 
         self.assertEqual(result["mode"], "share")
-        self.assertIn("正在后台处理", result["message"])
+        self.assertEqual(result["message"], "已转存到115所选目录")
         self.assertEqual(client.received["file_id"], "101")
+        wait.assert_called_once()
         notify.assert_called_once()
 
     def test_pansave_send_link_uses_saved_user_session(self):

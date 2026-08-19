@@ -92,9 +92,18 @@ https://qp.weige1999.xin/api/wecom/callback
 
 ## 更新
 
+项目从 `1.0.0` 开始实行版本发布：每次改动发布都必须先更新根目录的 `VERSION`，并创建同号 GitHub Release。小修复递增末位版本号（如 `1.0.1`），新增功能递增中间版本号（如 `1.1.0`）。
+
+每次发布会同时生成：
+
+- `ghcr.io/xu15820768885-png/movie-request:latest`：最新版
+- `ghcr.io/xu15820768885-png/movie-request:1.0.0`：固定版本，可随时回退
+
 ```bash
 docker compose pull
 docker compose up -d
 ```
+
+需要锁定或回退时，把 Compose 中的镜像标签从 `latest` 改为目标版本号，再执行上面的更新命令。
 
 数据库位于 NAS 映射目录中，更新容器不会删除账号和求片记录。每次推送到 GitHub 的 `main` 分支都会自动构建并发布新的 Docker 镜像。

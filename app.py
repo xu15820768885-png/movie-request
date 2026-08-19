@@ -5913,6 +5913,7 @@ async def hdhive_transfer(
         target_cid = setting(connection, "p115_target_cid") or "0"
 
     if not is_115_share_url(share_url):
+        before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
         queued = await asyncio.to_thread(
             p115_call,
             "提交115离线任务失败",
@@ -5921,9 +5922,24 @@ async def hdhive_transfer(
         )
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+        changed = await asyncio.to_thread(
+            wait_for_p115_change,
+            lambda: p115_offline_snapshot(client),
+            before_tasks,
+        )
+        if not changed:
+            raise HTTPException(
+                502,
+                "115接口没有创建云下载任务；返回：" + response_summary(queued),
+            )
         mode = "offline"
-        message = "已提交115离线下载，正在后台处理"
+        message = "已加入115离线下载，完成后会出现在所选目录"
     else:
+        before_files = await asyncio.to_thread(
+            p115_folder_snapshot,
+            client,
+            target_cid,
+        )
         snap = await asyncio.to_thread(
             p115_call,
             "读取115分享失败",
@@ -5949,8 +5965,18 @@ async def hdhive_transfer(
         )
         if not response_ok(received):
             raise HTTPException(502, response_message(received, "115转存失败"))
+        changed = await asyncio.to_thread(
+            wait_for_p115_change,
+            lambda: p115_folder_snapshot(client, target_cid),
+            before_files,
+        )
+        if not changed:
+            raise HTTPException(
+                502,
+                "115接口没有把文件写入目标目录；返回：" + response_summary(received),
+            )
         mode = "share"
-        message = "已提交到115，正在后台处理"
+        message = "已转存到115所选目录"
 
     record_transfer(
         user_id=int(user["id"]),
@@ -5964,7 +5990,8 @@ async def hdhive_transfer(
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
     send_notifications_async(
-        f"☁️ 影巢资源已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
+        f"☁️ 影巢资源{'已加入离线下载' if mode == 'offline' else '转存成功'}\n\n"
+        f"{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
     return {"ok": True, "mode": mode, "message": message}
 

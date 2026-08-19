@@ -970,8 +970,8 @@
         const result=provider==='hdhive'
           ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
           : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})});
-        button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已提交115';
-        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已提交到115后台处理';}
+        button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已完成转存';
+        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已转存到115所选目录';}
         markInitialTransferComplete();
         toast(destination==='p123'?(result.message||'资源链接已发送给123'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
       } catch(error) {
