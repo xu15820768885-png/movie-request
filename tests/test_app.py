@@ -2126,8 +2126,13 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(first, {"p115": set()})
         self.assertEqual(second, {"p115": {2, 3}})
         self.assertEqual(notify.call_count, 2)
-        notify.assert_any_call(updated[1], "movie")
-        notify.assert_any_call(updated[2], "tv", "S01 E01-E02")
+        notify.assert_any_call(updated[1], "movie", destination="p115")
+        notify.assert_any_call(
+            updated[2],
+            "tv",
+            "S01 E01-E02",
+            destination="p115",
+        )
 
     def test_emby_library_notification_switches_are_independent(self):
         settings = app.get_settings(self.token)
@@ -2235,7 +2240,7 @@ class MovieRequestTests(unittest.TestCase):
                 "S01 E01-E08",
             )
         self.assertIn(
-            "📥 入库完成 | 弥留之国的爱丽丝 (2020) S01 E01-E08",
+            "📥 入库完成 | 115 Emby · 弥留之国的爱丽丝 (2020) S01 E01-E08",
             caption,
         )
         self.assertIn("⭐ 综合评分 | 8.1", caption)
@@ -2245,6 +2250,45 @@ class MovieRequestTests(unittest.TestCase):
             image_url,
             "https://image.tmdb.org/t/p/w780/backdrop.jpg",
         )
+
+    def test_library_notification_identifies_p123_emby(self):
+        item = {"Name": "测试影片", "ProductionYear": 2026}
+        with patch.object(app, "tmdb_library_metadata", return_value={}):
+            with patch.object(app, "cache_emby_library_image", return_value=""):
+                caption, image_url = app.mp_library_notification(
+                    item,
+                    "movie",
+                    destination="p123",
+                )
+        self.assertIn("📥 入库完成 | 123 Emby · 测试影片 (2026)", caption)
+        self.assertTrue(image_url.endswith("/api/library-notification-fallback.png"))
+
+    def test_emby_image_is_cached_for_notification_fallback(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://emby.local:8096")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+            app.set_setting(connection, "site_public_url", "https://movies.example.com")
+
+        class FakeImageResponse:
+            content = b"fake-image-content" * 20
+            headers = {"Content-Type": "image/jpeg"}
+
+            def raise_for_status(self):
+                return None
+
+        with patch.object(app.requests, "get", return_value=FakeImageResponse()):
+            image_url = app.cache_emby_library_image(
+                "p115",
+                {"Id": "emby-item-1"},
+            )
+        self.assertTrue(
+            image_url.startswith(
+                "https://movies.example.com/api/library-notification-image/"
+            )
+        )
+        filename = image_url.rsplit("/", 1)[-1]
+        response = app.library_notification_image(filename)
+        self.assertTrue(Path(response.path).is_file())
 
     def test_wecom_send_accepts_success_errcode_zero(self):
         with app.db() as connection:

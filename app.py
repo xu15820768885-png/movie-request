@@ -36,6 +36,9 @@ from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "movie-request.db"
 WEB_PATH = Path(__file__).parent / "web" / "index.html"
+LIBRARY_NOTIFICATION_FALLBACK_PATH = (
+    Path(__file__).parent / "web" / "assets" / "library-notification-fallback.png"
+)
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
 # Native HDHive subscriptions are created on demand.  The website deliberately
@@ -3150,10 +3153,76 @@ def tmdb_library_metadata(media_type: str, tmdb_id: int) -> dict[str, Any]:
         return {}
 
 
+def library_notification_asset_url(path: str) -> str:
+    with db() as connection:
+        site_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
+    return f"{site_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def cache_emby_library_image(
+    destination: str,
+    item: dict[str, Any],
+) -> str:
+    item_id = str(item.get("Id") or "")
+    base_url, api_key = emby_credentials(destination)
+    if not item_id or not base_url or not api_key:
+        return ""
+    cache_dir = DATA_DIR / "library-notification-images"
+    candidates = ("Backdrop/0", "Primary")
+    for image_type in candidates:
+        cache_key = hashlib.sha256(
+            f"{storage_destination(destination)}|{base_url}|{item_id}|{image_type}".encode()
+        ).hexdigest()
+        existing = next(cache_dir.glob(f"{cache_key}.*"), None) if cache_dir.exists() else None
+        if existing and existing.is_file():
+            return library_notification_asset_url(
+                f"/api/library-notification-image/{existing.name}"
+            )
+        try:
+            response = requests.get(
+                emby_api_url(
+                    base_url,
+                    f"/Items/{quote(item_id, safe='')}/Images/{image_type}",
+                ),
+                headers={"X-Emby-Token": api_key, "Accept": "image/*"},
+                params={"maxWidth": 1280, "quality": 90},
+                timeout=20,
+            )
+            response.raise_for_status()
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if not content_type.startswith("image/") or len(response.content) < 100:
+                continue
+            suffix = (
+                ".png" if "png" in content_type
+                else ".webp" if "webp" in content_type
+                else ".jpg"
+            )
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"{cache_key}{suffix}"
+            cache_path.write_bytes(response.content)
+            files = sorted(
+                (path for path in cache_dir.iterdir() if path.is_file()),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for stale_path in files[500:]:
+                try:
+                    stale_path.unlink()
+                except OSError:
+                    pass
+            return library_notification_asset_url(
+                f"/api/library-notification-image/{cache_path.name}"
+            )
+        except (requests.RequestException, OSError):
+            continue
+    return ""
+
+
 def mp_library_notification(
     item: dict[str, Any],
     media_type: str,
     season_episode: str = "",
+    destination: str = "p115",
 ) -> tuple[str, str]:
     tmdb_id = emby_item_tmdb_id(item)
     metadata = tmdb_library_metadata(media_type, tmdb_id)
@@ -3196,7 +3265,8 @@ def mp_library_notification(
     content_type = " · ".join(value for value in (type_name, category) if value)
     overview = str(metadata.get("overview") or item.get("Overview") or "暂无简介").strip()
     overview = overview[:520] + ("…" if len(overview) > 520 else "")
-    heading = f"📥 入库完成 | {title}"
+    source_name = "123 Emby" if storage_destination(destination) == "p123" else "115 Emby"
+    heading = f"📥 入库完成 | {source_name} · {title}"
     if year:
         heading += f" ({year})"
     if season_episode:
@@ -3212,6 +3282,12 @@ def mp_library_notification(
         f"https://image.tmdb.org/t/p/w780/{str(image_path).lstrip('/')}"
         if image_path else ""
     )
+    if not image_url:
+        image_url = cache_emby_library_image(destination, item)
+    if not image_url:
+        image_url = library_notification_asset_url(
+            "/api/library-notification-fallback.png"
+        )
     return caption[:1024], image_url
 
 
@@ -3219,8 +3295,14 @@ def send_mp_library_notification(
     item: dict[str, Any],
     media_type: str,
     season_episode: str = "",
+    destination: str = "p115",
 ) -> None:
-    caption, image_url = mp_library_notification(item, media_type, season_episode)
+    caption, image_url = mp_library_notification(
+        item,
+        media_type,
+        season_episode,
+        destination,
+    )
     send_telegram_photo(caption, image_url)
     send_wecom_article(caption, image_url)
 
@@ -3287,7 +3369,7 @@ def sync_emby_library_notifications(
             if str(item.get("Type") or "") != "Movie":
                 continue
             tmdb_id = emby_item_tmdb_id(item)
-            send_mp_library_notification(item, "movie")
+            send_mp_library_notification(item, "movie", destination=current)
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
 
@@ -3301,7 +3383,12 @@ def sync_emby_library_notifications(
                 series = dict(episodes[0])
             series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
             tmdb_id = emby_item_tmdb_id(series)
-            send_mp_library_notification(series, "tv", emby_episode_range(episodes))
+            send_mp_library_notification(
+                series,
+                "tv",
+                emby_episode_range(episodes),
+                destination=current,
+            )
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
     return notified
@@ -4833,6 +4920,34 @@ def startup() -> None:
 @APP.get("/")
 def index() -> FileResponse:
     return FileResponse(WEB_PATH, headers={"Cache-Control": "no-cache"})
+
+
+@APP.get("/api/library-notification-fallback.png")
+def library_notification_fallback_image() -> FileResponse:
+    return FileResponse(
+        LIBRARY_NOTIFICATION_FALLBACK_PATH,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@APP.get("/api/library-notification-image/{filename}")
+def library_notification_image(filename: str) -> FileResponse:
+    if not re.fullmatch(r"[0-9a-f]{64}\.(?:jpg|png|webp)", filename):
+        raise HTTPException(404, "图片不存在")
+    path = DATA_DIR / "library-notification-images" / filename
+    if not path.is_file():
+        raise HTTPException(404, "图片不存在")
+    media_type = (
+        "image/png" if path.suffix == ".png"
+        else "image/webp" if path.suffix == ".webp"
+        else "image/jpeg"
+    )
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=2592000, immutable"},
+    )
 
 
 @APP.get("/api/health")
