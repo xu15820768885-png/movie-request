@@ -3049,6 +3049,16 @@ def emby_item_tmdb_id(item: dict[str, Any]) -> int:
     return integer_value(provider_ids.get("Tmdb") or provider_ids.get("TMDB"))
 
 
+def emby_library_notification_enabled(destination: str) -> bool:
+    key = (
+        "p123_emby_library_notification_enabled"
+        if storage_destination(destination) == "p123"
+        else "emby_library_notification_enabled"
+    )
+    with db() as connection:
+        return setting(connection, key) != "0"
+
+
 def emby_recent_library_items(
     destination: str = "p115",
     limit: int = 200,
@@ -3223,6 +3233,8 @@ def sync_emby_library_notifications(
     destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
     notified: dict[str, set[int]] = {current: set() for current in destinations}
     for current in destinations:
+        if not emby_library_notification_enabled(current):
+            continue
         items = emby_recent_library_items(current)
         if not items:
             continue
@@ -6732,6 +6744,12 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         emby_key = setting(connection, "emby_api_key")
         p123_emby_url = setting(connection, "p123_emby_url")
         p123_emby_key = setting(connection, "p123_emby_api_key")
+        emby_library_notification_enabled_value = (
+            setting(connection, "emby_library_notification_enabled") != "0"
+        )
+        p123_emby_library_notification_enabled_value = (
+            setting(connection, "p123_emby_library_notification_enabled") != "0"
+        )
         telegram_proxy = setting(connection, "telegram_proxy")
         dian_base_url = setting(connection, "dian_base_url")
         dian_key = setting(connection, "dian_api_key")
@@ -6778,9 +6796,13 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "emby_configured": bool(emby_url and emby_key),
         "emby_url": emby_url,
         "emby_api_key": emby_key,
+        "emby_library_notification_enabled": emby_library_notification_enabled_value,
         "p123_emby_configured": bool(p123_emby_url and p123_emby_key),
         "p123_emby_url": p123_emby_url,
         "p123_emby_api_key": p123_emby_key,
+        "p123_emby_library_notification_enabled": (
+            p123_emby_library_notification_enabled_value
+        ),
         "telegram_proxy": telegram_proxy,
         "dian_configured": bool(dian_base_url and dian_key),
         "dian_base_url": dian_base_url,
@@ -6867,6 +6889,20 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                 set_setting(connection, key, payload[key])
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
+        for key, destination in (
+            ("emby_library_notification_enabled", "p115"),
+            ("p123_emby_library_notification_enabled", "p123"),
+        ):
+            if key not in payload:
+                continue
+            was_enabled = setting(connection, key) != "0"
+            is_enabled = bool(payload[key])
+            set_setting(connection, key, "1" if is_enabled else "0")
+            if not is_enabled or not was_enabled:
+                connection.execute(
+                    "DELETE FROM emby_library_monitor_state WHERE destination = ?",
+                    (destination,),
+                )
     await asyncio.gather(
         asyncio.to_thread(configure_telegram_menu),
         asyncio.to_thread(configure_wecom_menu),

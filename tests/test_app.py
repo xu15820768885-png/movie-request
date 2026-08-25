@@ -2129,6 +2129,67 @@ class MovieRequestTests(unittest.TestCase):
         notify.assert_any_call(updated[1], "movie")
         notify.assert_any_call(updated[2], "tv", "S01 E01-E02")
 
+    def test_emby_library_notification_switches_are_independent(self):
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["emby_library_notification_enabled"])
+        self.assertTrue(settings["p123_emby_library_notification_enabled"])
+        with patch.object(app, "configure_telegram_menu"):
+            with patch.object(app, "configure_wecom_menu"):
+                asyncio.run(
+                    app.update_settings(
+                        FakeRequest({
+                            "emby_library_notification_enabled": False,
+                            "p123_emby_library_notification_enabled": True,
+                        }),
+                        self.token,
+                    )
+                )
+        settings = app.get_settings(self.token)
+        self.assertFalse(settings["emby_library_notification_enabled"])
+        self.assertTrue(settings["p123_emby_library_notification_enabled"])
+        with patch.object(
+            app,
+            "emby_recent_library_items",
+            side_effect=AssertionError("关闭后不应扫描入库通知"),
+        ):
+            self.assertEqual(
+                app.sync_emby_library_notifications("p115"),
+                {"p115": set()},
+            )
+
+    def test_reenabling_emby_notification_rebaselines_without_backlog(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            app.set_setting(connection, "emby_library_notification_enabled", "0")
+            connection.execute(
+                "INSERT INTO emby_library_monitor_state("
+                "destination, initialized_at, last_checked_at) VALUES('p115', ?, ?)",
+                (timestamp, timestamp),
+            )
+        with patch.object(app, "configure_telegram_menu"):
+            with patch.object(app, "configure_wecom_menu"):
+                asyncio.run(
+                    app.update_settings(
+                        FakeRequest({"emby_library_notification_enabled": True}),
+                        self.token,
+                    )
+                )
+        with app.db() as connection:
+            state = connection.execute(
+                "SELECT 1 FROM emby_library_monitor_state WHERE destination = 'p115'"
+            ).fetchone()
+        self.assertIsNone(state)
+        item = {
+            "Id": "added-while-off",
+            "Type": "Movie",
+            "Name": "关闭期间新增",
+            "ProviderIds": {"Tmdb": "404"},
+        }
+        with patch.object(app, "emby_recent_library_items", return_value=[item]):
+            with patch.object(app, "send_mp_library_notification") as notify:
+                app.sync_emby_library_notifications("p115")
+        notify.assert_not_called()
+
     def test_rich_emby_notification_still_auto_removes_matching_request(self):
         timestamp = app.now_iso()
         with app.db() as connection:

@@ -607,6 +607,7 @@
                 <h4>115 对应 Emby</h4>
                 <label>Emby 地址<input id="settingsEmbyUrl" placeholder="例如：http://192.168.31.129:8096"></label>
                 <label>API 密钥<input id="settingsEmbyKey" autocomplete="off" placeholder="已保存值会直接显示"></label>
+                <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="settingsEmbyLibraryNotification" type="checkbox" style="width:auto">启用 115 Emby 入库通知</label>
                 <div id="embyState" class="muted" style="font-size:12px"></div>
                 <button id="embyTest" class="btn" type="button">测试 115 Emby</button>
               </div>
@@ -614,6 +615,7 @@
                 <h4>123 Emby</h4>
                 <label>Emby 地址<input id="settingsP123EmbyUrl" placeholder="例如：http://192.168.31.129:8097"></label>
                 <label>API 密钥<input id="settingsP123EmbyKey" autocomplete="off" placeholder="已保存值会直接显示"></label>
+                <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="settingsP123EmbyLibraryNotification" type="checkbox" style="width:auto">启用 123 Emby 入库通知</label>
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
                 <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
               </div>
@@ -1163,7 +1165,7 @@
       } catch(error){toast(error.message,true);button.disabled=false;}
     }
     async function loadSettings() {
-      if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
+      if(preview){ $('tmdbState').textContent='TMDB 已连接 · 示例使用真实 TMDB ID'; $('embyState').textContent='Emby 已连接 · 共匹配到 428 条带 TMDB ID 的资源'; $('settingsEmbyUrl').value='http://192.168.31.129:8096'; $('settingsEmbyLibraryNotification').checked=true; $('settingsP123EmbyLibraryNotification').checked=true; $('settingsTelegramProxy').value='http://192.168.31.129:7890'; return; }
       const settings=await api('/api/admin/settings');
       $('tmdbState').textContent=settings.tmdb_configured?'TMDB 已配置':'尚未配置 TMDB';
       $('settingsTmdb').value=settings.tmdb_token||'';
@@ -1172,9 +1174,11 @@
       $('settingsTelegramProxy').value=settings.telegram_proxy||'';
       $('settingsEmbyUrl').value=settings.emby_url||'';
       $('settingsEmbyKey').value=settings.emby_api_key||'';
+      $('settingsEmbyLibraryNotification').checked=Boolean(settings.emby_library_notification_enabled);
       $('embyState').textContent=settings.emby_configured?'115 Emby 已配置':'尚未配置 115 Emby';
       $('settingsP123EmbyUrl').value=settings.p123_emby_url||'';
       $('settingsP123EmbyKey').value=settings.p123_emby_api_key||'';
+      $('settingsP123EmbyLibraryNotification').checked=Boolean(settings.p123_emby_library_notification_enabled);
       $('p123EmbyState').textContent=settings.p123_emby_configured?'123 Emby 已配置':'尚未配置 123 Emby';
       $('settingsWecomCorpId').value=settings.wecom_corp_id||'';
       $('settingsWecomAgentId').value=settings.wecom_agent_id||'';
@@ -1363,7 +1367,7 @@
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
     $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
     $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview){$('newUserCard').open=false;return toast('预览模式：成员账号创建成功');}try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();$('newUserCard').open=false;toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};
-    $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');loadSettings();}catch(error){toast(error.message,true);}};
+    $('settingsForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：双 Emby 与通知设置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({tmdb_token:$('settingsTmdb').value,telegram_token:$('settingsTelegramToken').value,telegram_chat_id:$('settingsTelegramChatId').value,telegram_proxy:$('settingsTelegramProxy').value,emby_url:$('settingsEmbyUrl').value,emby_api_key:$('settingsEmbyKey').value,emby_library_notification_enabled:$('settingsEmbyLibraryNotification').checked,p123_emby_url:$('settingsP123EmbyUrl').value,p123_emby_api_key:$('settingsP123EmbyKey').value,p123_emby_library_notification_enabled:$('settingsP123EmbyLibraryNotification').checked,wecom_corp_id:$('settingsWecomCorpId').value,wecom_agent_id:$('settingsWecomAgentId').value,wecom_secret:$('settingsWecomSecret').value,wecom_to_user:$('settingsWecomToUser').value,wecom_api_base:$('settingsWecomApiBase').value,wecom_admin_userid:$('settingsWecomAdminUserId').value,site_public_url:$('settingsSitePublicUrl').value,wecom_callback_token:$('settingsWecomCallbackToken').value,wecom_encoding_aes_key:$('settingsWecomEncodingAesKey').value})});toast('设置已保存');loadSettings();}catch(error){toast(error.message,true);}};
     $('telegramTest').onclick=async()=>{if(preview)return toast('预览模式：Telegram 测试成功');try{await api('/api/admin/telegram-test',{method:'POST'});toast('测试消息已发送');}catch(error){toast(error.message,true);}};
     $('wecomTest').onclick=async()=>{if(preview)return toast('预览模式：企业微信测试成功');try{await api('/api/admin/wecom-test',{method:'POST'});toast('企业微信测试通知已发送');}catch(error){toast(error.message,true);}};
     $('wecomMenu').onclick=async()=>{if(preview)return toast('预览模式：企业微信菜单已刷新');try{await api('/api/admin/wecom-menu',{method:'POST'});toast('企业微信菜单已创建/刷新');}catch(error){toast(error.message,true);}};
