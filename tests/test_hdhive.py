@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import app
-from hdhive_openapi import HDHiveOpenAPI
+from hdhive_openapi import HDHiveOpenAPI, TokenSet
 
 
 class FakeResponse:
@@ -136,6 +136,51 @@ class HDHiveFoundationTests(unittest.TestCase):
             },
         )
 
+    def test_client_uses_documented_file_list_and_unread_count_paths(self):
+        session = FakeSession(
+            [
+                FakeResponse({"success": True, "data": {"files": []}}),
+                FakeResponse({"success": True, "data": {"unread_count": 2}}),
+            ]
+        )
+        client = HDHiveOpenAPI(
+            api_key="secret",
+            access_token="access",
+            session=session,
+        )
+
+        client.resource_file_list("resource-slug")
+        client.unread_message_count(subscription_only=True)
+
+        self.assertTrue(session.calls[0][1].endswith(
+            "/api/open/resources/file-list/resource-slug"
+        ))
+        self.assertTrue(session.calls[1][1].endswith(
+            "/api/open/messages/unread-count"
+        ))
+        self.assertEqual(
+            session.calls[1][2]["params"], {"subscription_only": True}
+        )
+
+    def test_file_list_candidates_select_largest_file_for_episode(self):
+        candidates = app.hdhive_file_episode_candidates(
+            "resource-slug",
+            {
+                "data": {
+                    "provider": "115",
+                    "result_type": "files",
+                    "files": [
+                        {"name": "Series.S01E155.small.mkv", "size": 900_000_000},
+                        {"name": "Series.S01E155.large.mkv", "size": 1_100_000_000},
+                        {"name": "Series.S01E155.zh.ass", "size": 30_000},
+                    ],
+                }
+            },
+            1,
+        )
+
+        self.assertEqual(candidates[(1, 155)]["file_name"], "Series.S01E155.large.mkv")
+        self.assertEqual(candidates[(1, 155)]["file_size"], 1_100_000_000)
     def test_client_preserves_meta_instead_of_stripping_wrapper(self):
         session = FakeSession(
             [
@@ -414,7 +459,7 @@ class HDHiveFoundationTests(unittest.TestCase):
                 "tv",
             )
 
-    def test_hdhive_official_group_is_preferred_before_size(self):
+    def test_hdhive_size_is_preferred_over_official_group(self):
         official = app.normalize_hdhive_resource(
             {
                 "slug": "official",
@@ -442,9 +487,9 @@ class HDHiveFoundationTests(unittest.TestCase):
 
         self.assertTrue(official["is_official_group"])
         self.assertTrue(official["vip_free"])
-        self.assertEqual(ordered[0]["slug"], "official")
+        self.assertEqual(ordered[0]["slug"], "large")
 
-    def test_hdhive_size_is_preferred_before_pack_within_same_tier(self):
+    def test_hdhive_episode_completeness_is_preferred_before_size(self):
         larger_single = app.normalize_hdhive_resource(
             {
                 "slug": "larger-single",
@@ -469,7 +514,7 @@ class HDHiveFoundationTests(unittest.TestCase):
         )
 
         self.assertTrue(smaller_pack["is_pack"])
-        self.assertEqual(ordered[0]["slug"], "larger-single")
+        self.assertEqual(ordered[0]["slug"], "smaller-pack")
 
 
 class HDHiveFollowRouteTests(unittest.TestCase):
@@ -513,14 +558,42 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.data_patch.stop()
         self.temporary.cleanup()
 
-    def test_disabled_follow_feature_always_reports_polling_off(self):
+    def test_follow_feature_reports_saved_polling_state(self):
         with app.db() as connection:
             app.set_setting(connection, "hdhive_poll_enabled", "1")
 
         status = app.hdhive_public_status()
 
-        self.assertFalse(app.HDHIVE_MESSAGE_POLLING_ENABLED)
-        self.assertFalse(status["poll_enabled"])
+        self.assertTrue(app.HDHIVE_MESSAGE_POLLING_ENABLED)
+        self.assertTrue(status["poll_enabled"])
+
+    def test_status_requires_reauthorization_until_new_scopes_are_in_token(self):
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET client_id = 'app_test', "
+                "app_secret_cipher = ?, access_token_cipher = ?, scopes = ?, "
+                "authorized_scopes = ?, status = 'connected' WHERE id = 1",
+                (
+                    app.encrypt_secret("secret"),
+                    app.encrypt_secret("old-token"),
+                    app.HDHIVE_SCOPES,
+                    "meta query unlock write vip",
+                ),
+            )
+        self.assertTrue(app.hdhive_public_status()["reauthorization_required"])
+
+        app.hdhive_save_tokens(
+            TokenSet(
+                access_token="new-token",
+                refresh_token="refresh-token",
+                scopes=app.HDHIVE_SCOPES.split(),
+            )
+        )
+
+        status = app.hdhive_public_status()
+        self.assertFalse(status["reauthorization_required"])
+        self.assertTrue(status["subscription_authorized"])
+        self.assertTrue(status["messages_authorized"])
 
     def test_follow_uses_emby_episode_as_baseline(self):
         detail = {
@@ -695,6 +768,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "create_subscription")
         self.assertEqual(calls[1][2]["target_type"], "media_resource")
         self.assertEqual(calls[1][2]["target_key"], "tv:77")
+        self.assertEqual(calls[1][2]["media_filters"], {"websites": ["115"]})
 
     def test_native_subscription_resolves_media_page_target_and_caches_it(self):
         with app.db() as connection:
@@ -953,11 +1027,14 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 ") VALUES(?, 101172, '吞噬星空', 232, 232, 55, ?, ?)",
                 (user_id, app.now_iso(), app.now_iso()),
             ).lastrowid
+            app.set_setting(connection, "hdhive_auto_transfer", "0")
 
         calls = []
 
         def fake_hdhive_call(method, *args, **kwargs):
             calls.append((method, args, kwargs))
+            if method == "unread_message_count":
+                return {"data": {"unread_count": 1}}
             if method == "messages":
                 return {
                     "data": [
@@ -995,9 +1072,85 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertIn("第233集", follow["last_message"])
         self.assertTrue(telegram.called)
         message_call = next(call for call in calls if call[0] == "messages")
-        self.assertEqual(message_call[2]["type"], "subscription")
+        self.assertTrue(message_call[2]["subscription_only"])
+        self.assertEqual(message_call[2]["status"], "unread")
         read_call = next(call for call in calls if call[0] == "mark_messages_read")
         self.assertEqual(read_call[1][0], [9001])
+
+    def test_auto_wash_processes_changed_candidate_once_per_fingerprint(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, last_seen_episode, "
+                "hdhive_subscription_id, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 154, 154, 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        class FakeP115:
+            def share_receive(self, _payload, **_kwargs):
+                return {"state": True}
+
+        calls = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            calls.append((method, args, kwargs))
+            if method == "resource_file_list":
+                return {
+                    "data": {
+                        "provider": "115",
+                        "result_type": "files",
+                        "files": [
+                            {"name": "XianNi.S01E155.mkv", "size": 1_100_000_000}
+                        ],
+                    }
+                }
+            if method == "unlock":
+                return {"data": {"full_url": "https://115.com/s/example?password=abcd"}}
+            raise AssertionError(method)
+
+        tree = [
+            {
+                "_share_name": "XianNi.S01E155.mkv",
+                "_share_id": "file-155",
+                "_share_is_dir": False,
+                "s": 1_100_000_000,
+            }
+        ]
+        resource = {
+            "slug": "resource-slug",
+            "title": "仙逆 S01E155 4K",
+            "pan_type": "115",
+            "episode_numbers": [155],
+            "size_gb": "1.1G",
+        }
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(app, "destination_episode_progress", return_value={
+                "emby_latest_season_number": 1,
+                "emby_episode_numbers": {"1": list(range(1, 155))},
+            }):
+                with patch.object(app, "p115_client", return_value=FakeP115()):
+                    with patch.object(app, "p115_share_tree", return_value=tree):
+                        with patch.object(app, "p115_folder_snapshot", return_value={"before"}):
+                            with patch.object(app, "wait_for_p115_change", return_value=True):
+                                with patch.object(app, "send_notifications"):
+                                    first = app.auto_wash_hdhive_follow(follow_id, [resource])
+                                    second = app.auto_wash_hdhive_follow(follow_id, [resource])
+
+        self.assertEqual(first["transferred"], [[1, 155]])
+        self.assertEqual(second["transferred"], [])
+        self.assertEqual([call[0] for call in calls].count("unlock"), 1)
+        with app.db() as connection:
+            episode = connection.execute(
+                "SELECT process_count, last_file_size FROM hdhive_wash_episodes "
+                "WHERE follow_id = ? AND season_number = 1 AND episode_number = 155",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(episode["process_count"], 1)
+        self.assertEqual(episode["last_file_size"], 1_100_000_000)
 
     def test_manual_transfer_ignores_existing_library_episode_rules(self):
         class FakeP115:

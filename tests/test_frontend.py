@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 class FollowFeatureVisibilityTest(unittest.TestCase):
-    def test_native_follow_is_available_without_automatic_transfer(self):
+    def test_native_follow_and_automatic_wash_controls_are_visible(self):
         html = (Path(__file__).parents[1] / "web" / "index.html").read_text(
             encoding="utf-8"
         )
@@ -11,7 +11,7 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn('id="followTab" class="tab hidden"', html)
         self.assertIn("$('followTab').classList.remove('hidden')", html)
         self.assertIn("我的追更", html)
-        self.assertIn("查看自己开启的影巢追更", html)
+        self.assertIn("115自动洗版窗口", html)
         self.assertNotIn('data-follow-index="${index}"', html)
 
         self.assertIn('id="detailFollow"', html)
@@ -54,7 +54,12 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("p123_emby_library_notification_enabled:$('settingsP123EmbyLibraryNotification').checked", html)
         self.assertIn("emby_webhook_enabled:$('settingsEmbyWebhookEnabled').checked", html)
         self.assertIn("p123_emby_webhook_enabled:$('settingsP123EmbyWebhookEnabled').checked", html)
-        self.assertNotIn("PanSave", html)
+        self.assertIn("PanSave", html)
+        self.assertIn('id="hdhiveAutoTransfer"', html)
+        self.assertIn('id="hdhiveWashWindow"', html)
+        self.assertIn('id="hdhiveMaxTransfers"', html)
+        self.assertIn('data-hdhive-filter="${key}"', html)
+        self.assertIn("推荐按集数完整度、集数和文件大小排序", html)
         self.assertIn('data-storage-panel="overview"', html)
         self.assertIn('data-storage-panel="hdhive"', html)
         self.assertIn('data-storage-panel="p115"', html)

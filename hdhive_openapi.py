@@ -154,6 +154,12 @@ class HDHiveOpenAPI:
             f"/api/open/resources/{media_type}/{int(tmdb_id)}",
         )
 
+    def resource_file_list(self, slug: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/open/resources/file-list/{slug.strip()}",
+        )
+
     def unlock(self, slug: str) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -257,6 +263,11 @@ class HDHiveOpenAPI:
 
     def messages(self, **params: Any) -> dict[str, Any]:
         return self._request("GET", "/api/open/messages", params=params)
+
+    def unread_message_count(self, **params: Any) -> dict[str, Any]:
+        return self._request(
+            "GET", "/api/open/messages/unread-count", params=params
+        )
 
     def mark_messages_read(self, message_ids: list[int]) -> dict[str, Any]:
         return self._request(

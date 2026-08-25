@@ -41,10 +41,9 @@ LIBRARY_NOTIFICATION_FALLBACK_PATH = (
 )
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
-# Native HDHive subscriptions are created on demand.  The website deliberately
-# does not poll subscription messages or transfer updated resources; HDHive's
-# own bot sends the update link and the user decides what to save.
-HDHIVE_MESSAGE_POLLING_ENABLED = False
+# Native HDHive subscriptions are created on demand. Subscription messages are
+# consumed only when the granted OAuth token contains both required scopes.
+HDHIVE_MESSAGE_POLLING_ENABLED = True
 STATUS_NAMES = {
     "pending": "待处理",
     "approved": "已收到",
@@ -333,6 +332,7 @@ def init_db() -> None:
                 access_token_cipher TEXT NOT NULL DEFAULT '',
                 refresh_token_cipher TEXT NOT NULL DEFAULT '',
                 scopes TEXT NOT NULL DEFAULT '',
+                authorized_scopes TEXT NOT NULL DEFAULT '',
                 redirect_uri TEXT NOT NULL DEFAULT '',
                 proxy_url_cipher TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'waiting_approval',
@@ -392,9 +392,11 @@ def init_db() -> None:
             CREATE UNIQUE INDEX resource_transfer_success_idx
                 ON resource_transfer_log(source, resource_key, transfer_scope, episode_number)
                 WHERE status = 'success';
-            CREATE UNIQUE INDEX IF NOT EXISTS resource_episode_success_idx
+            DROP INDEX IF EXISTS resource_episode_success_idx;
+            CREATE UNIQUE INDEX resource_episode_success_idx
                 ON resource_transfer_log(tmdb_id, season_number, episode_number)
-                WHERE status = 'success' AND episode_number > 0;
+                WHERE status = 'success' AND episode_number > 0
+                  AND transfer_scope != 'auto_wash';
             CREATE INDEX IF NOT EXISTS resource_manual_success_tmdb_idx
                 ON resource_transfer_log(tmdb_id)
                 WHERE transfer_scope = 'manual'
@@ -447,6 +449,36 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(media_type, tmdb_id)
             );
+            CREATE TABLE IF NOT EXISTS hdhive_wash_episodes (
+                follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
+                season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                opened_at TEXT NOT NULL,
+                closes_at TEXT NOT NULL,
+                locked_at TEXT NOT NULL DEFAULT '',
+                process_count INTEGER NOT NULL DEFAULT 0,
+                last_resource_slug TEXT NOT NULL DEFAULT '',
+                last_file_name TEXT NOT NULL DEFAULT '',
+                last_file_size INTEGER NOT NULL DEFAULT 0,
+                last_message TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(follow_id, season_number, episode_number)
+            );
+            CREATE TABLE IF NOT EXISTS hdhive_wash_attempts (
+                fingerprint TEXT PRIMARY KEY,
+                follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
+                season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                resource_slug TEXT NOT NULL,
+                file_name TEXT NOT NULL DEFAULT '',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS hdhive_wash_episode_time_idx
+                ON hdhive_wash_episodes(follow_id, closes_at);
             """
         )
         user_columns = {
@@ -472,6 +504,19 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE tv_follows "
                 "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'tv'"
+            )
+        oauth_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(hdhive_oauth)").fetchall()
+        }
+        if "authorized_scopes" not in oauth_columns:
+            connection.execute(
+                "ALTER TABLE hdhive_oauth "
+                "ADD COLUMN authorized_scopes TEXT NOT NULL DEFAULT ''"
+            )
+            connection.execute(
+                "UPDATE hdhive_oauth SET authorized_scopes = scopes "
+                "WHERE access_token_cipher != ''"
             )
         hot_setting_keys = (
             "tmdb_token", "emby_url", "emby_api_key",
@@ -571,7 +616,7 @@ def set_setting(connection: sqlite3.Connection, key: str, value: Any) -> None:
         SETTINGS_CACHE[(str(DB_PATH), key)] = clean_value
 
 
-HDHIVE_SCOPES = "meta query unlock write vip"
+HDHIVE_SCOPES = "meta query unlock write vip subscription messages"
 
 
 def hdhive_key_path() -> Path:
@@ -626,13 +671,15 @@ def hdhive_save_tokens(tokens: TokenSet) -> None:
         refresh = tokens.refresh_token or decrypt_secret(current["refresh_token_cipher"])
         connection.execute(
             "UPDATE hdhive_oauth SET access_token_cipher = ?, "
-            "refresh_token_cipher = ?, scopes = ?, token_expires_at = ?, "
+            "refresh_token_cipher = ?, authorized_scopes = ?, token_expires_at = ?, "
             "authorized_at = ?, status = 'connected', last_error = '', updated_at = ? "
             "WHERE id = 1",
             (
                 encrypt_secret(tokens.access_token),
                 encrypt_secret(refresh),
-                " ".join(tokens.scopes) or current["scopes"] or HDHIVE_SCOPES,
+                " ".join(tokens.scopes)
+                or current["authorized_scopes"]
+                or current["scopes"],
                 expires_at,
                 now_iso(),
                 now_iso(),
@@ -2039,14 +2086,10 @@ def canonical_resource(
 def hdhive_resource_priority(resource: dict[str, Any]) -> tuple[int, int, int, int]:
     episode_count = len(resource.get("episode_numbers") or [])
     return (
-        2
-        if resource.get("is_official_group")
-        else 1
-        if resource.get("vip_free")
-        else 0,
-        resource_size_bytes(resource.get("size_gb")),
         1 if resource.get("is_pack") or episode_count > 1 else 0,
         episode_count,
+        resource_size_bytes(resource.get("size_gb")),
+        1 if resource.get("is_official_group") else 0,
     )
 
 
@@ -4581,6 +4624,386 @@ def transferred_episode_set(tmdb_id: int, season_number: int) -> set[int]:
     return {int(row["episode_number"]) for row in rows}
 
 
+def hdhive_wash_config() -> dict[str, Any]:
+    with db() as connection:
+        return {
+            "enabled": setting(connection, "hdhive_auto_transfer") != "0",
+            "window_hours": max(
+                12,
+                min(
+                    72,
+                    int(setting(connection, "hdhive_wash_window_hours") or 48),
+                ),
+            ),
+            "wash_after_emby": setting(connection, "hdhive_wash_after_emby") != "0",
+            "reprocess_changed": setting(connection, "hdhive_reprocess_changed") != "0",
+            "max_transfers": max(
+                1,
+                min(
+                    10,
+                    int(setting(connection, "hdhive_max_episode_transfers") or 4),
+                ),
+            ),
+            "lock_after_window": setting(connection, "hdhive_lock_after_window") != "0",
+        }
+
+
+def hdhive_file_episode_candidates(
+    slug: str,
+    result: dict[str, Any],
+    fallback_season: int,
+) -> dict[tuple[int, int], dict[str, Any]]:
+    data = hdhive_response_data(result)
+    if not isinstance(data, dict):
+        return {}
+    provider = str(data.get("provider") or data.get("list_type") or "").lower()
+    if provider and "115" not in provider:
+        return {}
+    if str(data.get("result_type") or "").lower() == "validation":
+        return {}
+    if str(data.get("resource_validate_status") or "").lower() in {
+        "invalid", "expired", "deleted", "failed"
+    }:
+        return {}
+    files = data.get("files")
+    if not isinstance(files, list):
+        return {}
+    video_extensions = {
+        ".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".wmv", ".webm"
+    }
+    candidates: dict[tuple[int, int], dict[str, Any]] = {}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or Path(str(item.get("path") or "")).name)
+        suffix = str(item.get("extension") or Path(name).suffix).lower()
+        if suffix and not suffix.startswith("."):
+            suffix = f".{suffix}"
+        if suffix and suffix not in video_extensions:
+            continue
+        parsed = parse_episode_spec(f"{item.get('path') or ''} {name}")
+        season = int(parsed.get("season_number") or fallback_season or 1)
+        size = resource_size_bytes(item.get("size"))
+        for episode in parsed.get("episode_numbers") or []:
+            episode = int(episode)
+            if episode <= 0:
+                continue
+            fingerprint = hashlib.sha256(
+                f"{slug}\0{season}\0{episode}\0{name}\0{size}".encode()
+            ).hexdigest()
+            candidate = {
+                "slug": slug,
+                "season_number": season,
+                "episode_number": episode,
+                "file_name": name,
+                "file_size": size,
+                "fingerprint": fingerprint,
+            }
+            current = candidates.get((season, episode))
+            if current is None or size > int(current["file_size"]):
+                candidates[(season, episode)] = candidate
+    return candidates
+
+
+def hdhive_wash_candidate_allowed(
+    follow: sqlite3.Row,
+    candidate: dict[str, Any],
+    config: dict[str, Any],
+    emby_present: set[tuple[int, int]],
+) -> bool:
+    follow_id = int(follow["id"])
+    season = int(candidate["season_number"])
+    episode = int(candidate["episode_number"])
+    baseline = (
+        int(follow["baseline_season"] or 1),
+        int(follow["baseline_episode"] or 0),
+    )
+    now = datetime.now(timezone.utc)
+    with db() as connection:
+        row = connection.execute(
+            "SELECT * FROM hdhive_wash_episodes WHERE follow_id = ? "
+            "AND season_number = ? AND episode_number = ?",
+            (follow_id, season, episode),
+        ).fetchone()
+        if row is None:
+            if (season, episode) <= baseline:
+                return False
+            if not config["wash_after_emby"] and (season, episode) in emby_present:
+                return False
+            opened_at = now.isoformat()
+            closes_at = (now + timedelta(hours=config["window_hours"])).isoformat()
+            connection.execute(
+                "INSERT INTO hdhive_wash_episodes("
+                "follow_id, season_number, episode_number, opened_at, closes_at, "
+                "updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+                (follow_id, season, episode, opened_at, closes_at, opened_at),
+            )
+            process_count = 0
+        else:
+            if row["locked_at"]:
+                return False
+            closes_at_value = datetime.fromisoformat(str(row["closes_at"]))
+            if closes_at_value <= now:
+                if config["lock_after_window"]:
+                    connection.execute(
+                        "UPDATE hdhive_wash_episodes SET locked_at = ?, "
+                        "last_message = ?, updated_at = ? WHERE follow_id = ? "
+                        "AND season_number = ? AND episode_number = ?",
+                        (
+                            now.isoformat(),
+                            "洗版窗口已结束，后续候选已锁定",
+                            now.isoformat(),
+                            follow_id,
+                            season,
+                            episode,
+                        ),
+                    )
+                    return False
+                connection.execute(
+                    "UPDATE hdhive_wash_episodes SET opened_at = ?, closes_at = ?, "
+                    "process_count = 0, updated_at = ? WHERE follow_id = ? "
+                    "AND season_number = ? AND episode_number = ?",
+                    (
+                        now.isoformat(),
+                        (now + timedelta(hours=config["window_hours"])).isoformat(),
+                        now.isoformat(),
+                        follow_id,
+                        season,
+                        episode,
+                    ),
+                )
+                process_count = 0
+            else:
+                process_count = int(row["process_count"] or 0)
+        if process_count >= int(config["max_transfers"]):
+            return False
+        attempt = connection.execute(
+            "SELECT status FROM hdhive_wash_attempts WHERE fingerprint = ?",
+            (candidate["fingerprint"],),
+        ).fetchone()
+        if attempt and attempt["status"] == "success":
+            return False
+        if not config["reprocess_changed"]:
+            same_resource = connection.execute(
+                "SELECT 1 FROM hdhive_wash_attempts WHERE follow_id = ? "
+                "AND season_number = ? AND episode_number = ? "
+                "AND resource_slug = ? AND status = 'success' LIMIT 1",
+                (follow_id, season, episode, candidate["slug"]),
+            ).fetchone()
+            if same_resource:
+                return False
+    return True
+
+
+def auto_wash_hdhive_follow(
+    follow_id: int,
+    resources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    config = hdhive_wash_config()
+    if not config["enabled"]:
+        return {"transferred": [], "message": "追更自动洗版已关闭"}
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.id = ? AND f.active = 1",
+            (follow_id,),
+        ).fetchone()
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    if not follow or follow["storage_destination"] != "p115":
+        return {"transferred": [], "message": "自动洗版仅处理115对应的追更"}
+
+    progress = destination_episode_progress(
+        "p115", int(follow["tmdb_id"]), known_in_library=True
+    )
+    emby_present = {
+        (int(season), int(episode))
+        for season, episodes in (progress.get("emby_episode_numbers") or {}).items()
+        for episode in episodes
+        if int(episode) > 0
+    }
+    fallback_season = int(
+        progress.get("emby_latest_season_number")
+        or follow["last_seen_season"]
+        or follow["baseline_season"]
+        or 1
+    )
+    prepared: list[tuple[dict[str, Any], dict[tuple[int, int], dict[str, Any]]]] = []
+    for resource in sorted(resources, key=hdhive_resource_priority, reverse=True)[:12]:
+        slug = str(resource.get("slug") or "").strip()
+        if not slug or not hdhive_resource_is_supported(resource):
+            continue
+        try:
+            file_result = hdhive_call("resource_file_list", slug)
+        except HTTPException:
+            continue
+        candidates = hdhive_file_episode_candidates(slug, file_result, fallback_season)
+        allowed = {
+            key: candidate
+            for key, candidate in candidates.items()
+            if hdhive_wash_candidate_allowed(
+                follow, candidate, config, emby_present
+            )
+        }
+        if allowed:
+            prepared.append((resource, allowed))
+
+    if not prepared:
+        return {"transferred": [], "message": "没有新的115洗版候选"}
+
+    ranked_by_episode: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for _resource, candidates in prepared:
+        for key, candidate in candidates.items():
+            ranked_by_episode.setdefault(key, []).append(candidate)
+    allowed_fingerprints: set[str] = set()
+    with db() as connection:
+        for (season, episode), candidates in ranked_by_episode.items():
+            row = connection.execute(
+                "SELECT process_count FROM hdhive_wash_episodes "
+                "WHERE follow_id = ? AND season_number = ? AND episode_number = ?",
+                (follow_id, season, episode),
+            ).fetchone()
+            remaining = max(
+                0,
+                int(config["max_transfers"])
+                - int(row["process_count"] if row else 0),
+            )
+            candidates.sort(key=lambda value: int(value["file_size"]), reverse=True)
+            allowed_fingerprints.update(
+                candidate["fingerprint"] for candidate in candidates[:remaining]
+            )
+    prepared = [
+        (
+            resource,
+            {
+                key: candidate
+                for key, candidate in candidates.items()
+                if candidate["fingerprint"] in allowed_fingerprints
+            },
+        )
+        for resource, candidates in prepared
+    ]
+    prepared = [(resource, candidates) for resource, candidates in prepared if candidates]
+
+    client = p115_client()
+    transferred: set[tuple[int, int]] = set()
+    summaries: list[str] = []
+    for resource, candidates in prepared:
+        slug = str(resource.get("slug") or "")
+        target_episodes = {episode for _season, episode in candidates}
+        try:
+            unlocked = hdhive_call("unlock", slug)
+            data = hdhive_response_data(unlocked)
+            share_url = (
+                str(data.get("full_url") or data.get("url") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
+            if not is_115_share_url(share_url):
+                continue
+            tree = p115_share_tree(client, share_url)
+            selected, selected_episodes = select_largest_missing_episode_files(
+                tree, target_episodes
+            )
+            selected_ids = [
+                str(item.get("_share_id") or "")
+                for item in selected
+                if item.get("_share_id")
+            ]
+            if not selected_ids or not selected_episodes:
+                continue
+            before_files = p115_folder_snapshot(client, target_cid)
+            received = p115_call(
+                "接收115分享失败",
+                client.share_receive,
+                {"file_id": ",".join(selected_ids), "cid": target_cid},
+                share_url=share_url,
+            )
+            if not response_ok(received) or not wait_for_p115_change(
+                lambda: p115_folder_snapshot(client, target_cid), before_files
+            ):
+                continue
+        except HTTPException:
+            continue
+
+        checked_at = now_iso()
+        for (season, episode), candidate in candidates.items():
+            if episode not in selected_episodes:
+                continue
+            detail = (
+                f"自动洗版第{episode}集：{candidate['file_name']} "
+                f"({resource_size_label(candidate['file_size'])})"
+            )
+            with db() as connection:
+                connection.execute(
+                    "INSERT INTO hdhive_wash_attempts("
+                    "fingerprint, follow_id, season_number, episode_number, "
+                    "resource_slug, file_name, file_size, status, detail, "
+                    "created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, "
+                    "'success', ?, ?, ?) ON CONFLICT(fingerprint) DO UPDATE SET "
+                    "status = 'success', detail = excluded.detail, "
+                    "updated_at = excluded.updated_at",
+                    (
+                        candidate["fingerprint"], follow_id, season, episode,
+                        slug, candidate["file_name"], candidate["file_size"],
+                        detail, checked_at, checked_at,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE hdhive_wash_episodes SET process_count = process_count + 1, "
+                    "last_resource_slug = ?, last_file_name = ?, last_file_size = ?, "
+                    "last_message = ?, updated_at = ? WHERE follow_id = ? "
+                    "AND season_number = ? AND episode_number = ?",
+                    (
+                        slug, candidate["file_name"], candidate["file_size"], detail,
+                        checked_at, follow_id, season, episode,
+                    ),
+                )
+            record_transfer(
+                user_id=int(follow["user_id"]),
+                source="hdhive",
+                resource_key=candidate["fingerprint"],
+                tmdb_id=int(follow["tmdb_id"]),
+                transfer_scope="auto_wash",
+                status="success",
+                detail=detail,
+                follow_id=follow_id,
+                season_number=season,
+                episode_numbers=[episode],
+            )
+            transferred.add((season, episode))
+            summaries.append(
+                f"S{season:02d}E{episode:02d} · "
+                f"{resource_size_label(candidate['file_size'])}"
+            )
+
+    if not transferred:
+        return {"transferred": [], "message": "候选资源未能完成115转存"}
+    latest = max(transferred)
+    message = f"已提交洗版：{', '.join(summaries)}"
+    with db() as connection:
+        connection.execute(
+            "UPDATE tv_follows SET last_transferred_season = ?, "
+            "last_transferred_episode = MAX(last_transferred_episode, ?), "
+            "last_seen_season = ?, last_seen_episode = MAX(last_seen_episode, ?), "
+            "last_checked_at = ?, last_message = ?, updated_at = ? WHERE id = ?",
+            (
+                latest[0], latest[1], latest[0], latest[1], now_iso(), message,
+                now_iso(), follow_id,
+            ),
+        )
+    send_notifications(
+        f"✅ 影巢追更已提交 PanSave 洗版\n\n"
+        f"剧集：{follow['title']}\n"
+        f"候选：{', '.join(summaries)}\n"
+        f"规则：仅115 · 单集窗口 {config['window_hours']} 小时 · "
+        f"每集最多 {config['max_transfers']} 次"
+    )
+    return {
+        "transferred": [list(value) for value in sorted(transferred)],
+        "message": message,
+    }
+
+
 def auto_replenish_hdhive_follow(
     follow_id: int,
     resources: Optional[list[dict[str, Any]]] = None,
@@ -4794,12 +5217,12 @@ def auto_replenish_hdhive_follow(
     }
 
 
-def refresh_hdhive_subscribed_follows() -> int:
+def refresh_hdhive_subscribed_follows(include_unsubscribed: bool = False) -> int:
     with db() as connection:
-        follows = connection.execute(
-            "SELECT * FROM tv_follows WHERE active = 1 "
-            "AND hdhive_subscription_id IS NOT NULL"
-        ).fetchall()
+        query = "SELECT * FROM tv_follows WHERE active = 1"
+        if not include_unsubscribed:
+            query += " AND hdhive_subscription_id IS NOT NULL"
+        follows = connection.execute(query).fetchall()
     changed = 0
     for follow in follows:
         media_type = str(follow["media_type"] or "tv")
@@ -4830,6 +5253,21 @@ def refresh_hdhive_subscribed_follows() -> int:
                 )
             continue
         cache_follow_resources(int(follow["id"]), "hdhive", resources)
+        wash_config = hdhive_wash_config()
+        if wash_config["enabled"]:
+            wash_result = auto_wash_hdhive_follow(int(follow["id"]), resources)
+            transferred = wash_result.get("transferred") or []
+            if transferred:
+                changed += len(transferred)
+            else:
+                checked_at = now_iso()
+                with db() as connection:
+                    connection.execute(
+                        "UPDATE tv_follows SET last_checked_at = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (checked_at, checked_at, follow["id"]),
+                    )
+            continue
         candidates: set[tuple[int, int]] = set()
         for resource in resources:
             season = int(
@@ -4890,15 +5328,26 @@ def poll_hdhive_follow_messages() -> int:
         )
     if not active_count:
         return 0
+    unread_result = hdhive_call(
+        "unread_message_count",
+        subscription_only=True,
+    )
+    unread_data = hdhive_response_data(unread_result)
+    unread_count = int(
+        unread_data.get("unread_count") or 0
+        if isinstance(unread_data, dict)
+        else 0
+    )
+    if unread_count <= 0:
+        return 0
     result = hdhive_call(
         "messages",
-        type="subscription",
+        subscription_only=True,
         status="unread",
-        page=1,
-        page_size=50,
+        page_size=100,
     )
     items = extract_share_items(result)
-    created = 0
+    pending: list[tuple[str, str, dict[str, Any]]] = []
     message_ids: list[int] = []
     for item in items:
         message_key = str(
@@ -4910,30 +5359,44 @@ def poll_hdhive_follow_messages() -> int:
         )
         event_type = str(item.get("event_type") or item.get("type") or "")
         with db() as connection:
-            cursor = connection.execute(
-                "INSERT OR IGNORE INTO hdhive_message_log("
-                "message_key, event_type, payload_json, created_at"
-                ") VALUES(?, ?, ?, ?)",
-                (
-                    message_key,
-                    event_type,
-                    json.dumps(item, ensure_ascii=False),
-                    now_iso(),
-                ),
-            )
-        if cursor.rowcount:
-            created += 1
+            exists = connection.execute(
+                "SELECT 1 FROM hdhive_message_log WHERE message_key = ?",
+                (message_key,),
+            ).fetchone()
+        if not exists:
+            pending.append((message_key, event_type, item))
         try:
             message_id = int(item.get("id") or item.get("message_id") or 0)
         except (TypeError, ValueError):
             message_id = 0
         if message_id > 0:
             message_ids.append(message_id)
-    if created:
+    if pending:
         refresh_hdhive_subscribed_follows()
+        stored_at = now_iso()
+        with db() as connection:
+            for message_key, event_type, item in pending:
+                connection.execute(
+                    "INSERT OR IGNORE INTO hdhive_message_log("
+                    "message_key, event_type, payload_json, created_at"
+                    ") VALUES(?, ?, ?, ?)",
+                    (
+                        message_key,
+                        event_type,
+                        json.dumps(item, ensure_ascii=False),
+                        stored_at,
+                    ),
+                )
+            latest = pending[0][2]
+            set_setting(connection, "hdhive_last_message_at", stored_at)
+            set_setting(
+                connection,
+                "hdhive_last_message_title",
+                str(latest.get("title") or latest.get("body") or "订阅资源有更新")[:160],
+            )
     if message_ids:
         hdhive_call("mark_messages_read", sorted(set(message_ids)))
-    return created
+    return len(pending)
 
 
 def hdhive_follow_loop() -> None:
@@ -4947,10 +5410,21 @@ def hdhive_follow_loop() -> None:
                 row = hdhive_oauth_row(connection)
                 enabled = setting(connection, "hdhive_poll_enabled") != "0"
                 interval = max(
-                    900,
-                    int(setting(connection, "hdhive_poll_interval") or 1800),
+                    300,
+                    int(setting(connection, "hdhive_poll_interval") or 900),
                 )
                 last_poll = setting(connection, "hdhive_last_poll_at")
+                authorized_scopes = {
+                    value
+                    for value in str(row["authorized_scopes"] or "").split()
+                    if value
+                }
+                unsubscribed_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
+                        "AND hdhive_subscription_id IS NULL"
+                    ).fetchone()[0]
+                )
                 configured = bool(
                     row["access_token_cipher"]
                     and row["app_secret_cipher"]
@@ -4967,11 +5441,20 @@ def hdhive_follow_loop() -> None:
                 and configured
                 and time.time() - last_time >= interval
             ):
-                poll_hdhive_follow_messages()
+                if {"subscription", "messages"}.issubset(authorized_scopes):
+                    poll_hdhive_follow_messages()
+                    if unsubscribed_count:
+                        refresh_hdhive_subscribed_follows(include_unsubscribed=True)
+                else:
+                    # Existing query scope remains a safe fallback while the
+                    # administrator is adding subscription/messages scopes.
+                    refresh_hdhive_subscribed_follows(include_unsubscribed=True)
                 with db() as connection:
                     set_setting(connection, "hdhive_last_poll_at", now_iso())
-        except Exception:
-            pass
+                    set_setting(connection, "hdhive_last_poll_error", "")
+        except Exception as error:
+            with db() as connection:
+                set_setting(connection, "hdhive_last_poll_error", str(error)[:240])
         time.sleep(60)
 
 
@@ -5600,14 +6083,37 @@ def emby_episode_progress(
 def hdhive_public_status() -> dict[str, Any]:
     with db() as connection:
         row = hdhive_oauth_row(connection)
+        authorized_scopes = {
+            value for value in str(row["authorized_scopes"] or "").split() if value
+        }
         poll_enabled = (
             HDHIVE_MESSAGE_POLLING_ENABLED
             and setting(connection, "hdhive_poll_enabled") != "0"
         )
         poll_interval = max(
-            900, int(setting(connection, "hdhive_poll_interval") or 1800)
+            300, int(setting(connection, "hdhive_poll_interval") or 900)
         )
         last_poll = setting(connection, "hdhive_last_poll_at")
+        last_message_at = setting(connection, "hdhive_last_message_at")
+        last_message_title = setting(connection, "hdhive_last_message_title")
+        last_poll_error = setting(connection, "hdhive_last_poll_error")
+        auto_transfer = setting(connection, "hdhive_auto_transfer") != "0"
+        wash_window_hours = max(
+            12, min(72, int(setting(connection, "hdhive_wash_window_hours") or 48))
+        )
+        wash_after_emby = setting(connection, "hdhive_wash_after_emby") != "0"
+        reprocess_changed = setting(connection, "hdhive_reprocess_changed") != "0"
+        max_episode_transfers = max(
+            1, min(10, int(setting(connection, "hdhive_max_episode_transfers") or 4))
+        )
+        lock_after_window = setting(connection, "hdhive_lock_after_window") != "0"
+        pending_candidates = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM hdhive_wash_episodes "
+                "WHERE locked_at = '' AND closes_at > ?",
+                (now_iso(),),
+            ).fetchone()[0]
+        )
         signin_enabled = setting(connection, "hdhive_signin_enabled") == "1"
         signin_time = setting(connection, "hdhive_signin_time") or "08:35"
         signin_mode = setting(connection, "hdhive_signin_mode") or "normal"
@@ -5649,6 +6155,13 @@ def hdhive_public_status() -> dict[str, Any]:
         "client_id": row["client_id"],
         "app_secret": app_secret,
         "scopes": row["scopes"] or HDHIVE_SCOPES,
+        "authorized_scopes": sorted(authorized_scopes),
+        "subscription_authorized": "subscription" in authorized_scopes,
+        "messages_authorized": "messages" in authorized_scopes,
+        "reauthorization_required": bool(
+            connected
+            and not {"subscription", "messages"}.issubset(authorized_scopes)
+        ),
         "redirect_uri": row["redirect_uri"],
         "proxy_url": saved_proxy_url,
         "proxy_configured": bool(
@@ -5665,6 +6178,17 @@ def hdhive_public_status() -> dict[str, Any]:
         "poll_enabled": poll_enabled,
         "poll_interval": poll_interval,
         "last_poll_at": last_poll,
+        "last_message_at": last_message_at,
+        "last_message_title": last_message_title,
+        "last_poll_error": last_poll_error,
+        "auto_transfer": auto_transfer,
+        "only_115": True,
+        "wash_window_hours": wash_window_hours,
+        "wash_after_emby": wash_after_emby,
+        "reprocess_changed": reprocess_changed,
+        "max_episode_transfers": max_episode_transfers,
+        "lock_after_window": lock_after_window,
+        "pending_candidates": pending_candidates,
         "signin_enabled": signin_enabled,
         "signin_time": signin_time,
         "signin_mode": signin_mode,
@@ -5742,13 +6266,30 @@ async def update_hdhive_config(
             set_setting(
                 connection,
                 "hdhive_poll_enabled",
-                "1"
-                if HDHIVE_MESSAGE_POLLING_ENABLED and payload["poll_enabled"]
-                else "0",
+                "1" if payload["poll_enabled"] else "0",
             )
         if payload.get("poll_interval"):
-            interval = max(900, min(86400, int(payload["poll_interval"])))
+            interval = max(300, min(3600, int(payload["poll_interval"])))
             set_setting(connection, "hdhive_poll_interval", interval)
+        boolean_settings = {
+            "auto_transfer": "hdhive_auto_transfer",
+            "wash_after_emby": "hdhive_wash_after_emby",
+            "reprocess_changed": "hdhive_reprocess_changed",
+            "lock_after_window": "hdhive_lock_after_window",
+        }
+        for payload_key, setting_key in boolean_settings.items():
+            if payload_key in payload:
+                set_setting(
+                    connection,
+                    setting_key,
+                    "1" if payload[payload_key] else "0",
+                )
+        if payload.get("wash_window_hours"):
+            hours = max(12, min(72, int(payload["wash_window_hours"])))
+            set_setting(connection, "hdhive_wash_window_hours", hours)
+        if payload.get("max_episode_transfers"):
+            maximum = max(1, min(10, int(payload["max_episode_transfers"])))
+            set_setting(connection, "hdhive_max_episode_transfers", maximum)
         if "signin_enabled" in payload:
             set_setting(
                 connection,
@@ -5876,7 +6417,7 @@ def disconnect_hdhive(
     with db() as connection:
         connection.execute(
             "UPDATE hdhive_oauth SET access_token_cipher = '', "
-            "refresh_token_cipher = '', authorized_at = '', token_expires_at = '', "
+            "refresh_token_cipher = '', authorized_scopes = '', authorized_at = '', token_expires_at = '', "
             "status = 'ready_to_authorize', last_error = '', updated_at = ? "
             "WHERE id = 1",
             (now_iso(),),
@@ -5932,6 +6473,33 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
         int(item["last_seen_episode"]),
         "已看到",
     )
+    with db() as connection:
+        wash = connection.execute(
+            "SELECT season_number, episode_number, closes_at, locked_at, "
+            "process_count, last_file_size, last_message "
+            "FROM hdhive_wash_episodes WHERE follow_id = ? "
+            "ORDER BY season_number DESC, episode_number DESC LIMIT 1",
+            (int(item["id"]),),
+        ).fetchone()
+    item["wash"] = None
+    if wash:
+        remaining_seconds = max(
+            0,
+            int(
+                datetime.fromisoformat(str(wash["closes_at"])).timestamp()
+                - time.time()
+            ),
+        )
+        item["wash"] = {
+            "season_number": int(wash["season_number"]),
+            "episode_number": int(wash["episode_number"]),
+            "process_count": int(wash["process_count"] or 0),
+            "last_file_size": int(wash["last_file_size"] or 0),
+            "last_file_size_label": resource_size_label(wash["last_file_size"]),
+            "remaining_seconds": remaining_seconds,
+            "locked": bool(wash["locked_at"]),
+            "last_message": str(wash["last_message"] or ""),
+        }
     return item
 
 
@@ -6219,6 +6787,7 @@ def bind_hdhive_follow_subscription(
         target_type=target["target_type"],
         target_id=target["target_id"],
         target_key=target["target_key"],
+        media_filters={"websites": ["115"]},
     )
     if not target_was_cached:
         cache_hdhive_media_target(
