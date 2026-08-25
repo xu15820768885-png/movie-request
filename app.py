@@ -90,6 +90,8 @@ IMAGE_CACHE_MAX_FILES = 3000
 IMAGE_CACHE_TARGET_FILES = 2500
 WECOM_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
 WECOM_TOKEN_LOCK = Lock()
+EMBY_WEBHOOK_LOCK = Lock()
+EMBY_WEBHOOK_PENDING: set[str] = set()
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 P115_APPS = {
@@ -485,6 +487,11 @@ def init_db() -> None:
         with CACHE_LOCK:
             for key in hot_setting_keys:
                 SETTINGS_CACHE[(str(DB_PATH), key)] = hot_settings.get(key, "")
+        for key in ("emby_webhook_token", "p123_emby_webhook_token"):
+            connection.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)",
+                (key, secrets.token_urlsafe(24)),
+            )
 
 
 def hash_password(password: str, salt: Optional[bytes] = None) -> str:
@@ -3062,6 +3069,38 @@ def emby_library_notification_enabled(destination: str) -> bool:
         return setting(connection, key) != "0"
 
 
+def emby_webhook_enabled(destination: str) -> bool:
+    key = (
+        "p123_emby_webhook_enabled"
+        if storage_destination(destination) == "p123"
+        else "emby_webhook_enabled"
+    )
+    with db() as connection:
+        return setting(connection, key) == "1"
+
+
+def emby_webhook_token(destination: str) -> str:
+    key = (
+        "p123_emby_webhook_token"
+        if storage_destination(destination) == "p123"
+        else "emby_webhook_token"
+    )
+    with db() as connection:
+        return setting(connection, key)
+
+
+def emby_webhook_url(destination: str, site_url: str = "") -> str:
+    current = storage_destination(destination)
+    token = emby_webhook_token(current)
+    if not site_url:
+        with db() as connection:
+            site_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
+    return (
+        f"{site_url.rstrip('/')}/api/emby-webhook/{current}/"
+        f"{quote(token, safe='')}"
+    )
+
+
 def emby_recent_library_items(
     destination: str = "p115",
     limit: int = 200,
@@ -3392,6 +3431,36 @@ def sync_emby_library_notifications(
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
     return notified
+
+
+def process_emby_webhook(destination: str, delay_seconds: float = 20) -> None:
+    current = storage_destination(destination)
+    try:
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        notified = sync_emby_library_notifications(current)
+        sync_emby_requests(
+            destination=current,
+            suppress_notifications=notified,
+        )
+    finally:
+        with EMBY_WEBHOOK_LOCK:
+            EMBY_WEBHOOK_PENDING.discard(current)
+
+
+def queue_emby_webhook(destination: str) -> bool:
+    current = storage_destination(destination)
+    with EMBY_WEBHOOK_LOCK:
+        if current in EMBY_WEBHOOK_PENDING:
+            return False
+        EMBY_WEBHOOK_PENDING.add(current)
+    Thread(
+        target=process_emby_webhook,
+        args=(current,),
+        name=f"emby-webhook-{current}",
+        daemon=True,
+    ).start()
+    return True
 
 
 def sync_emby_requests(
@@ -4948,6 +5017,23 @@ def library_notification_image(filename: str) -> FileResponse:
         media_type=media_type,
         headers={"Cache-Control": "public, max-age=2592000, immutable"},
     )
+
+
+@APP.post("/api/emby-webhook/{destination}/{token}")
+def receive_emby_webhook(destination: str, token: str) -> dict[str, Any]:
+    if destination not in ("p115", "p123"):
+        raise HTTPException(404, "Webhook 不存在")
+    expected = emby_webhook_token(destination)
+    if not expected or not hmac.compare_digest(str(token), expected):
+        raise HTTPException(404, "Webhook 不存在")
+    if not emby_webhook_enabled(destination):
+        raise HTTPException(409, "该 Emby 的实时联动尚未开启")
+    queued = queue_emby_webhook(destination)
+    return {
+        "ok": True,
+        "queued": queued,
+        "message": "已接收入库事件" if queued else "已合并重复入库事件",
+    }
 
 
 @APP.get("/api/health")
@@ -6865,6 +6951,14 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p123_emby_library_notification_enabled_value = (
             setting(connection, "p123_emby_library_notification_enabled") != "0"
         )
+        emby_webhook_enabled_value = setting(connection, "emby_webhook_enabled") == "1"
+        p123_emby_webhook_enabled_value = (
+            setting(connection, "p123_emby_webhook_enabled") == "1"
+        )
+        emby_webhook_token_value = setting(connection, "emby_webhook_token")
+        p123_emby_webhook_token_value = setting(
+            connection, "p123_emby_webhook_token"
+        )
         telegram_proxy = setting(connection, "telegram_proxy")
         dian_base_url = setting(connection, "dian_base_url")
         dian_key = setting(connection, "dian_api_key")
@@ -6912,11 +7006,21 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "emby_url": emby_url,
         "emby_api_key": emby_key,
         "emby_library_notification_enabled": emby_library_notification_enabled_value,
+        "emby_webhook_enabled": emby_webhook_enabled_value,
+        "emby_webhook_url": (
+            f"{site_public_url.rstrip('/')}/api/emby-webhook/p115/"
+            f"{quote(emby_webhook_token_value, safe='')}"
+        ),
         "p123_emby_configured": bool(p123_emby_url and p123_emby_key),
         "p123_emby_url": p123_emby_url,
         "p123_emby_api_key": p123_emby_key,
         "p123_emby_library_notification_enabled": (
             p123_emby_library_notification_enabled_value
+        ),
+        "p123_emby_webhook_enabled": p123_emby_webhook_enabled_value,
+        "p123_emby_webhook_url": (
+            f"{site_public_url.rstrip('/')}/api/emby-webhook/p123/"
+            f"{quote(p123_emby_webhook_token_value, safe='')}"
         ),
         "telegram_proxy": telegram_proxy,
         "dian_configured": bool(dian_base_url and dian_key),
@@ -7018,6 +7122,9 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                     "DELETE FROM emby_library_monitor_state WHERE destination = ?",
                     (destination,),
                 )
+        for key in ("emby_webhook_enabled", "p123_emby_webhook_enabled"):
+            if key in payload:
+                set_setting(connection, key, "1" if payload[key] else "0")
     await asyncio.gather(
         asyncio.to_thread(configure_telegram_menu),
         asyncio.to_thread(configure_wecom_menu),

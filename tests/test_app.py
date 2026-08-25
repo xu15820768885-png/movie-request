@@ -30,6 +30,8 @@ class MovieRequestTests(unittest.TestCase):
                 {"key": "", "expires": 0.0, "ids": set(), "refreshing": False}
             )
             app.EMBY_EPISODE_CACHE.clear()
+        with app.EMBY_WEBHOOK_LOCK:
+            app.EMBY_WEBHOOK_PENDING.clear()
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -2161,6 +2163,66 @@ class MovieRequestTests(unittest.TestCase):
                 app.sync_emby_library_notifications("p115"),
                 {"p115": set()},
             )
+
+    def test_emby_webhook_switches_and_urls_are_independent(self):
+        settings = app.get_settings(self.token)
+        self.assertFalse(settings["emby_webhook_enabled"])
+        self.assertFalse(settings["p123_emby_webhook_enabled"])
+        self.assertIn("/api/emby-webhook/p115/", settings["emby_webhook_url"])
+        self.assertIn(
+            "/api/emby-webhook/p123/",
+            settings["p123_emby_webhook_url"],
+        )
+        self.assertNotEqual(
+            settings["emby_webhook_url"],
+            settings["p123_emby_webhook_url"],
+        )
+        with patch.object(app, "configure_telegram_menu"):
+            with patch.object(app, "configure_wecom_menu"):
+                asyncio.run(
+                    app.update_settings(
+                        FakeRequest({
+                            "emby_webhook_enabled": True,
+                            "p123_emby_webhook_enabled": False,
+                        }),
+                        self.token,
+                    )
+                )
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["emby_webhook_enabled"])
+        self.assertFalse(settings["p123_emby_webhook_enabled"])
+
+    def test_emby_webhook_validates_token_and_coalesces_events(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_webhook_enabled", "1")
+        token = app.emby_webhook_token("p115")
+        with self.assertRaises(app.HTTPException) as invalid:
+            app.receive_emby_webhook("p115", "wrong-token")
+        self.assertEqual(invalid.exception.status_code, 404)
+        with patch.object(app, "Thread") as thread:
+            first = app.receive_emby_webhook("p115", token)
+            second = app.receive_emby_webhook("p115", token)
+        self.assertTrue(first["queued"])
+        self.assertFalse(second["queued"])
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["name"], "emby-webhook-p115")
+
+    def test_emby_webhook_runs_immediate_sync_and_clears_pending_state(self):
+        with app.EMBY_WEBHOOK_LOCK:
+            app.EMBY_WEBHOOK_PENDING.add("p123")
+        with patch.object(
+            app,
+            "sync_emby_library_notifications",
+            return_value={"p123": {505}},
+        ) as notification_sync:
+            with patch.object(app, "sync_emby_requests") as request_sync:
+                app.process_emby_webhook("p123", delay_seconds=0)
+        notification_sync.assert_called_once_with("p123")
+        request_sync.assert_called_once_with(
+            destination="p123",
+            suppress_notifications={"p123": {505}},
+        )
+        self.assertNotIn("p123", app.EMBY_WEBHOOK_PENDING)
 
     def test_reenabling_emby_notification_rebaselines_without_backlog(self):
         timestamp = app.now_iso()
