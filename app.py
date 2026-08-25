@@ -3729,7 +3729,7 @@ def sync_emby_webhook_notifications(
     return notified_tmdb_ids, notification_count
 
 
-def process_emby_webhook(destination: str, delay_seconds: float = 20) -> None:
+def process_emby_webhook(destination: str, delay_seconds: float = 5) -> None:
     current = storage_destination(destination)
     try:
         if delay_seconds > 0:
