@@ -404,6 +404,24 @@ def init_db() -> None:
                 message_key TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS emby_library_monitor_state (
+                destination TEXT PRIMARY KEY,
+                initialized_at TEXT NOT NULL,
+                last_checked_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS emby_library_snapshot (
+                destination TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                series_id TEXT NOT NULL DEFAULT '',
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                season_number INTEGER NOT NULL DEFAULT 0,
+                episode_number INTEGER NOT NULL DEFAULT 0,
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY(destination, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS emby_library_snapshot_series_idx
+                ON emby_library_snapshot(destination, series_id);
             CREATE TABLE IF NOT EXISTS tv_follow_resources (
                 follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
                 source TEXT NOT NULL,
@@ -3019,9 +3037,268 @@ def refresh_emby_library_cache(destination: str = "p115") -> None:
             EMBY_LIBRARY_CACHES[storage_destination(destination)]["refreshing"] = False
 
 
+def integer_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def emby_item_tmdb_id(item: dict[str, Any]) -> int:
+    provider_ids = item.get("ProviderIds") or {}
+    return integer_value(provider_ids.get("Tmdb") or provider_ids.get("TMDB"))
+
+
+def emby_recent_library_items(
+    destination: str = "p115",
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Read only the newest Emby records used by the library notification monitor."""
+
+    base_url, api_key = emby_credentials(destination)
+    if not base_url or not api_key:
+        return []
+    try:
+        response = requests.get(
+            emby_api_url(base_url, "/Items"),
+            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            params={
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie,Series,Episode",
+                "Fields": (
+                    "ProviderIds,SeriesId,SeriesName,ParentIndexNumber,IndexNumber,"
+                    "DateCreated,Overview,Genres,CommunityRating,ProductionYear"
+                ),
+                "SortBy": "DateCreated",
+                "SortOrder": "Descending",
+                "Limit": max(1, min(int(limit), 500)),
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return [
+            item for item in response.json().get("Items", [])
+            if isinstance(item, dict) and str(item.get("Id") or "")
+        ]
+    except (requests.RequestException, ValueError, TypeError):
+        return []
+
+
+def emby_library_item(
+    destination: str,
+    item_id: str,
+) -> dict[str, Any]:
+    base_url, api_key = emby_credentials(destination)
+    if not base_url or not api_key or not item_id:
+        return {}
+    try:
+        response = requests.get(
+            emby_api_url(base_url, f"/Items/{quote(item_id, safe='')}"),
+            headers={"X-Emby-Token": api_key, "Accept": "application/json"},
+            params={
+                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear"
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {}
+    except (requests.RequestException, ValueError, TypeError):
+        return {}
+
+
+def emby_episode_range(items: list[dict[str, Any]]) -> str:
+    seasons: dict[int, set[int]] = {}
+    for item in items:
+        season = integer_value(item.get("ParentIndexNumber"))
+        episode = integer_value(item.get("IndexNumber"))
+        if season > 0 and episode > 0:
+            seasons.setdefault(season, set()).add(episode)
+    labels = []
+    for season, values in sorted(seasons.items()):
+        numbers = sorted(values)
+        ranges: list[tuple[int, int]] = []
+        for number in numbers:
+            if not ranges or number > ranges[-1][1] + 1:
+                ranges.append((number, number))
+            else:
+                ranges[-1] = (ranges[-1][0], number)
+        episode_text = "、".join(
+            f"E{start:02d}" if start == end else f"E{start:02d}-E{end:02d}"
+            for start, end in ranges
+        )
+        labels.append(f"S{season:02d} {episode_text}")
+    return " / ".join(labels)
+
+
+def tmdb_library_metadata(media_type: str, tmdb_id: int) -> dict[str, Any]:
+    if media_type not in ("movie", "tv") or tmdb_id <= 0:
+        return {}
+    try:
+        return tmdb_get(f"/{media_type}/{tmdb_id}", {"language": "zh-CN"})
+    except (HTTPException, requests.RequestException, ValueError, TypeError):
+        return {}
+
+
+def mp_library_notification(
+    item: dict[str, Any],
+    media_type: str,
+    season_episode: str = "",
+) -> tuple[str, str]:
+    tmdb_id = emby_item_tmdb_id(item)
+    metadata = tmdb_library_metadata(media_type, tmdb_id)
+    title = (
+        metadata.get("title") or metadata.get("name")
+        or item.get("SeriesName") or item.get("Name") or "未命名"
+    )
+    release_date = metadata.get("release_date") or metadata.get("first_air_date") or ""
+    year = str(release_date)[:4] or str(
+        metadata.get("production_year") or item.get("ProductionYear") or ""
+    )[:4]
+    rating_value = metadata.get("vote_average")
+    if rating_value in (None, ""):
+        rating_value = item.get("CommunityRating")
+    try:
+        rating = f"{float(rating_value):.1f}"
+    except (TypeError, ValueError):
+        rating = "暂无"
+
+    type_name = "电影" if media_type == "movie" else "电视剧"
+    countries = {str(value) for value in (metadata.get("origin_country") or [])}
+    country_labels = {
+        "movie": (
+            ({"CN", "HK", "TW"}, "华语电影"),
+            ({"JP", "KR"}, "日韩电影"),
+            ({"US", "GB", "CA", "AU", "FR", "DE"}, "欧美电影"),
+        ),
+        "tv": (
+            ({"CN"}, "国产剧"),
+            ({"HK", "TW"}, "港台剧"),
+            ({"JP", "KR"}, "日韩剧"),
+            ({"US", "GB", "CA", "AU", "FR", "DE"}, "欧美剧"),
+            ({"TH"}, "泰剧"),
+        ),
+    }
+    category = next(
+        (label for codes, label in country_labels[media_type] if countries & codes),
+        "",
+    )
+    content_type = " · ".join(value for value in (type_name, category) if value)
+    overview = str(metadata.get("overview") or item.get("Overview") or "暂无简介").strip()
+    overview = overview[:520] + ("…" if len(overview) > 520 else "")
+    heading = f"📥 入库完成 | {title}"
+    if year:
+        heading += f" ({year})"
+    if season_episode:
+        heading += f" {season_episode}"
+    caption = (
+        f"{heading}\n"
+        f"⭐ 综合评分 | {rating}\n"
+        f"🎭 内容类型 | {content_type}\n"
+        f"📜 内容描述 | {overview}"
+    )
+    image_path = metadata.get("backdrop_path") or metadata.get("poster_path") or ""
+    image_url = (
+        f"https://image.tmdb.org/t/p/w780/{str(image_path).lstrip('/')}"
+        if image_path else ""
+    )
+    return caption[:1024], image_url
+
+
+def send_mp_library_notification(
+    item: dict[str, Any],
+    media_type: str,
+    season_episode: str = "",
+) -> None:
+    caption, image_url = mp_library_notification(item, media_type, season_episode)
+    send_telegram_photo(caption, image_url)
+    send_wecom_article(caption, image_url)
+
+
+def sync_emby_library_notifications(
+    destination: Optional[str] = None,
+) -> dict[str, set[int]]:
+    """Notify for newly observed Emby movies and episodes, independent of requests."""
+
+    destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
+    notified: dict[str, set[int]] = {current: set() for current in destinations}
+    for current in destinations:
+        items = emby_recent_library_items(current)
+        if not items:
+            continue
+        item_by_id = {str(item.get("Id")): item for item in items}
+        item_ids = list(item_by_id)
+        placeholders = ",".join("?" for _ in item_ids)
+        timestamp = now_iso()
+        with db() as connection:
+            state = connection.execute(
+                "SELECT initialized_at FROM emby_library_monitor_state WHERE destination = ?",
+                (current,),
+            ).fetchone()
+            known = {
+                str(row["item_id"])
+                for row in connection.execute(
+                    f"SELECT item_id FROM emby_library_snapshot "
+                    f"WHERE destination = ? AND item_id IN ({placeholders})",
+                    (current, *item_ids),
+                ).fetchall()
+            }
+            new_items = [item for item_id, item in item_by_id.items() if item_id not in known]
+            connection.executemany(
+                "INSERT OR IGNORE INTO emby_library_snapshot("
+                "destination, item_id, item_type, series_id, tmdb_id, season_number, "
+                "episode_number, observed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        current,
+                        str(item.get("Id")),
+                        str(item.get("Type") or ""),
+                        str(item.get("SeriesId") or ""),
+                        emby_item_tmdb_id(item),
+                        integer_value(item.get("ParentIndexNumber")),
+                        integer_value(item.get("IndexNumber")),
+                        timestamp,
+                    )
+                    for item in items
+                ],
+            )
+            connection.execute(
+                "INSERT INTO emby_library_monitor_state(destination, initialized_at, last_checked_at) "
+                "VALUES(?, ?, ?) ON CONFLICT(destination) DO UPDATE SET "
+                "last_checked_at = excluded.last_checked_at",
+                (current, timestamp, timestamp),
+            )
+        if state is None:
+            continue
+
+        for item in new_items:
+            if str(item.get("Type") or "") != "Movie":
+                continue
+            tmdb_id = emby_item_tmdb_id(item)
+            send_mp_library_notification(item, "movie")
+            if tmdb_id > 0:
+                notified[current].add(tmdb_id)
+
+        episodes_by_series: dict[str, list[dict[str, Any]]] = {}
+        for item in new_items:
+            if str(item.get("Type") or "") == "Episode" and item.get("SeriesId"):
+                episodes_by_series.setdefault(str(item["SeriesId"]), []).append(item)
+        for series_id, episodes in episodes_by_series.items():
+            series = item_by_id.get(series_id) or emby_library_item(current, series_id)
+            if not series:
+                series = dict(episodes[0])
+            series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
+            tmdb_id = emby_item_tmdb_id(series)
+            send_mp_library_notification(series, "tv", emby_episode_range(episodes))
+            if tmdb_id > 0:
+                notified[current].add(tmdb_id)
+    return notified
+
+
 def sync_emby_requests(
     force: bool = False,
     destination: Optional[str] = None,
+    suppress_notifications: Optional[dict[str, set[int]]] = None,
 ) -> int:
     destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
     removed = 0
@@ -3032,7 +3309,7 @@ def sync_emby_requests(
         placeholders = ",".join("?" for _ in tmdb_ids)
         with db() as connection:
             rows = connection.execute(
-                f"SELECT r.id, r.title, r.year, u.display_name "
+                f"SELECT r.id, r.tmdb_id, r.title, r.year, u.display_name "
                 f"FROM movie_requests r JOIN users u ON u.id = r.user_id "
                 f"WHERE r.tmdb_id IN ({placeholders}) "
                 f"AND u.storage_destination = ?",
@@ -3045,7 +3322,10 @@ def sync_emby_requests(
                     f"DELETE FROM movie_requests WHERE id IN ({marks})",
                     ids,
                 )
+        suppressed = (suppress_notifications or {}).get(current, set())
         for row in rows:
+            if int(row["tmdb_id"]) in suppressed:
+                continue
             send_notifications(
                 f"✅ 已入库并清除求片 · {'123' if current == 'p123' else '115'} Emby\n\n"
                 f"{row['title']} ({row['year']})\n申请人：{row['display_name']}"
@@ -3546,6 +3826,25 @@ def send_telegram(text: str) -> None:
     telegram_request("sendMessage", payload)
 
 
+def send_telegram_photo(caption: str, image_url: str) -> None:
+    with db() as connection:
+        chat_id = setting(connection, "telegram_chat_id")
+    if not chat_id:
+        return
+    if image_url:
+        result = telegram_request(
+            "sendPhoto",
+            {
+                "chat_id": chat_id,
+                "photo": image_url,
+                "caption": str(caption)[:1024],
+            },
+        )
+        if result:
+            return
+    send_telegram(caption)
+
+
 def wecom_api_url(base_url: str, path: str) -> str:
     return f"{base_url.strip().rstrip('/')}/{path.lstrip('/')}"
 
@@ -3633,6 +3932,42 @@ def send_wecom(text: str, to_user: str = "") -> bool:
         },
     )
     return int(result.get("errcode", -1)) == 0
+
+
+def send_wecom_article(text: str, image_url: str, to_user: str = "") -> bool:
+    """Send the same image-first MP-style card to WeCom, with text fallback."""
+
+    with db() as connection:
+        agent_id = setting(connection, "wecom_agent_id")
+        recipient = to_user or setting(connection, "wecom_to_user") or "@all"
+        site_url = setting(connection, "site_public_url") or "https://qp.weige1999.xin"
+    if not agent_id:
+        return False
+    if not image_url:
+        return send_wecom(text, to_user)
+    title, _, description = str(text).partition("\n")
+    result = wecom_request(
+        "/cgi-bin/message/send",
+        {
+            "touser": recipient,
+            "msgtype": "news",
+            "agentid": int(agent_id),
+            "news": {
+                "articles": [
+                    {
+                        "title": title[:128],
+                        "description": description[:512],
+                        "url": site_url,
+                        "picurl": image_url,
+                    }
+                ]
+            },
+            "safe": 0,
+        },
+    )
+    if int(result.get("errcode", -1)) == 0:
+        return True
+    return send_wecom(text, to_user)
 
 
 def send_notifications(text: str) -> None:
@@ -3980,7 +4315,8 @@ def telegram_poll_loop() -> None:
 def emby_sync_loop() -> None:
     while True:
         try:
-            sync_emby_requests()
+            notified = sync_emby_library_notifications()
+            sync_emby_requests(suppress_notifications=notified)
         except Exception:
             pass
         time.sleep(300)

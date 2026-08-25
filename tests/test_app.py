@@ -2076,6 +2076,115 @@ class MovieRequestTests(unittest.TestCase):
         telegram.assert_called_once_with("测试通知")
         wecom.assert_called_once_with("测试通知")
 
+    def test_emby_library_monitor_baselines_then_notifies_new_media(self):
+        baseline = [
+            {
+                "Id": "old-movie",
+                "Type": "Movie",
+                "Name": "旧电影",
+                "ProviderIds": {"Tmdb": "1"},
+            }
+        ]
+        updated = baseline + [
+            {
+                "Id": "new-movie",
+                "Type": "Movie",
+                "Name": "新电影",
+                "ProviderIds": {"Tmdb": "2"},
+            },
+            {
+                "Id": "series-3",
+                "Type": "Series",
+                "Name": "新剧",
+                "ProviderIds": {"Tmdb": "3"},
+            },
+            {
+                "Id": "episode-1",
+                "Type": "Episode",
+                "SeriesId": "series-3",
+                "SeriesName": "新剧",
+                "ParentIndexNumber": 1,
+                "IndexNumber": 1,
+            },
+            {
+                "Id": "episode-2",
+                "Type": "Episode",
+                "SeriesId": "series-3",
+                "SeriesName": "新剧",
+                "ParentIndexNumber": 1,
+                "IndexNumber": 2,
+            },
+        ]
+        with patch.object(
+            app,
+            "emby_recent_library_items",
+            side_effect=[baseline, updated],
+        ):
+            with patch.object(app, "send_mp_library_notification") as notify:
+                first = app.sync_emby_library_notifications("p115")
+                second = app.sync_emby_library_notifications("p115")
+        self.assertEqual(first, {"p115": set()})
+        self.assertEqual(second, {"p115": {2, 3}})
+        self.assertEqual(notify.call_count, 2)
+        notify.assert_any_call(updated[1], "movie")
+        notify.assert_any_call(updated[2], "tv", "S01 E01-E02")
+
+    def test_rich_emby_notification_still_auto_removes_matching_request(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            connection.execute(
+                "INSERT INTO movie_requests("
+                "user_id, tmdb_id, media_type, title, created_at, updated_at"
+                ") VALUES(1, 303, 'movie', '待入库电影', ?, ?)",
+                (timestamp, timestamp),
+            )
+        with patch.object(app, "emby_library_tmdb_ids", return_value={303}):
+            with patch.object(app, "send_notifications") as duplicate_notice:
+                removed = app.sync_emby_requests(
+                    destination="p115",
+                    suppress_notifications={"p115": {303}},
+                )
+        self.assertEqual(removed, 1)
+        duplicate_notice.assert_not_called()
+        with app.db() as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests WHERE tmdb_id = 303"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_mp_library_notification_matches_resource_added_template(self):
+        details = {
+            "id": 3,
+            "name": "弥留之国的爱丽丝",
+            "first_air_date": "2020-12-10",
+            "vote_average": 8.1,
+            "genres": [{"name": "悬疑"}],
+            "origin_country": ["JP"],
+            "overview": "一位漫无目标的游戏玩家和两位好友身处平行世界。",
+            "backdrop_path": "/backdrop.jpg",
+        }
+        item = {
+            "Name": "Alice in Borderland",
+            "ProviderIds": {"Tmdb": "3"},
+        }
+        with patch.object(app, "tmdb_get", return_value=details):
+            caption, image_url = app.mp_library_notification(
+                item,
+                "tv",
+                "S01 E01-E08",
+            )
+        self.assertIn(
+            "📥 入库完成 | 弥留之国的爱丽丝 (2020) S01 E01-E08",
+            caption,
+        )
+        self.assertIn("⭐ 综合评分 | 8.1", caption)
+        self.assertIn("🎭 内容类型 | 电视剧 · 日韩剧", caption)
+        self.assertIn("📜 内容描述 | 一位漫无目标", caption)
+        self.assertEqual(
+            image_url,
+            "https://image.tmdb.org/t/p/w780/backdrop.jpg",
+        )
+
     def test_wecom_send_accepts_success_errcode_zero(self):
         with app.db() as connection:
             app.set_setting(connection, "wecom_agent_id", "1000005")
@@ -2085,6 +2194,28 @@ class MovieRequestTests(unittest.TestCase):
         payload = request.call_args.args[1]
         self.assertEqual(payload["touser"], "@all")
         self.assertEqual(payload["agentid"], 1000005)
+
+    def test_wecom_mp_notification_uses_image_news_card(self):
+        with app.db() as connection:
+            app.set_setting(connection, "wecom_agent_id", "1000005")
+            app.set_setting(connection, "wecom_to_user", "@all")
+            app.set_setting(connection, "site_public_url", "https://movies.example.com")
+        with patch.object(app, "wecom_request", return_value={"errcode": 0}) as request:
+            self.assertTrue(
+                app.send_wecom_article(
+                    "📥 入库完成 | 测试电影 (2026)\n⭐ 综合评分 | 8.0",
+                    "https://image.tmdb.org/t/p/w780/image.jpg",
+                )
+            )
+        payload = request.call_args.args[1]
+        self.assertEqual(payload["msgtype"], "news")
+        article = payload["news"]["articles"][0]
+        self.assertEqual(article["title"], "📥 入库完成 | 测试电影 (2026)")
+        self.assertEqual(article["url"], "https://movies.example.com")
+        self.assertEqual(
+            article["picurl"],
+            "https://image.tmdb.org/t/p/w780/image.jpg",
+        )
 
     def test_wecom_signature_is_stable_and_secrets_are_visible_to_admin(self):
         self.assertEqual(
