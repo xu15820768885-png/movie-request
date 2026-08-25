@@ -639,7 +639,7 @@
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
                 <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
               </div>
-              <div class="transfer-note">Webhook 请在对应 Emby 的“通知 → Webhooks”中添加，事件选择“新媒体已添加”；实时联动会等待约20秒再读取元数据，5分钟轮询继续负责补漏。</div>
+              <div class="transfer-note">Webhook 请在对应 Emby 的“通知 → Webhooks”中添加，事件选择“新媒体已添加”；实时联动会按媒体 ID 读取并去重，剧集按季分别通知，5分钟轮询继续负责补漏。</div>
               <div class="transfer-note">115账号查询115 Emby并直接转存；123账号查询123 Emby，网站负责把资源链接发给123机器人。</div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存媒体设置</button></div>
             </section>

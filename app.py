@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,10 +16,12 @@ import copy
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 import uvicorn
@@ -91,6 +94,9 @@ WECOM_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires": 0.0}
 WECOM_TOKEN_LOCK = Lock()
 EMBY_WEBHOOK_LOCK = Lock()
 EMBY_WEBHOOK_PENDING: set[str] = set()
+EMBY_WEBHOOK_ITEMS: dict[str, dict[str, str]] = {}
+EMBY_WEBHOOK_GENERATIONS: dict[str, int] = {}
+LOGGER = logging.getLogger("uvicorn.error")
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 P115_APPS = {
@@ -429,6 +435,13 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS emby_library_snapshot_series_idx
                 ON emby_library_snapshot(destination, series_id);
+            CREATE TABLE IF NOT EXISTS emby_webhook_notifications (
+                destination TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                item_type TEXT NOT NULL DEFAULT '',
+                notified_at TEXT NOT NULL,
+                PRIMARY KEY(destination, item_id)
+            );
             CREATE TABLE IF NOT EXISTS tv_follow_resources (
                 follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
                 source TEXT NOT NULL,
@@ -3219,7 +3232,10 @@ def emby_library_item(
             emby_api_url(base_url, f"/Items/{quote(item_id, safe='')}"),
             headers={"X-Emby-Token": api_key, "Accept": "application/json"},
             params={
-                "Fields": "ProviderIds,Overview,Genres,CommunityRating,ProductionYear"
+                "Fields": (
+                    "ProviderIds,Overview,Genres,CommunityRating,ProductionYear,"
+                    "SeriesId,SeriesName,ParentIndexNumber,IndexNumber,DateCreated"
+                )
             },
             timeout=20,
         )
@@ -3252,6 +3268,15 @@ def emby_episode_range(items: list[dict[str, Any]]) -> str:
         )
         labels.append(f"S{season:02d} {episode_text}")
     return " / ".join(labels)
+
+
+def emby_episode_season_groups(
+    items: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    seasons: dict[int, list[dict[str, Any]]] = {}
+    for item in items:
+        seasons.setdefault(integer_value(item.get("ParentIndexNumber")), []).append(item)
+    return [seasons[number] for number in sorted(seasons)]
 
 
 def tmdb_library_metadata(media_type: str, tmdb_id: int) -> dict[str, Any]:
@@ -3493,15 +3518,215 @@ def sync_emby_library_notifications(
                 series = dict(episodes[0])
             series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
             tmdb_id = emby_item_tmdb_id(series)
-            send_mp_library_notification(
-                series,
-                "tv",
-                emby_episode_range(episodes),
-                destination=current,
-            )
+            for season_episodes in emby_episode_season_groups(episodes):
+                send_mp_library_notification(
+                    series,
+                    "tv",
+                    emby_episode_range(season_episodes),
+                    destination=current,
+                )
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
     return notified
+
+
+def emby_webhook_item(payload: dict[str, Any]) -> tuple[str, str]:
+    item = payload.get("Item") or payload.get("item") or {}
+    if not isinstance(item, dict):
+        item = {}
+    item_id = str(
+        item.get("Id") or item.get("id")
+        or payload.get("ItemId") or payload.get("itemId") or ""
+    ).strip()
+    item_type = str(
+        item.get("Type") or item.get("type")
+        or payload.get("ItemType") or payload.get("itemType") or ""
+    ).strip()
+    return item_id, item_type
+
+
+def parse_emby_webhook_payload(raw_body: bytes, content_type: str) -> dict[str, Any]:
+    """Accept Emby's JSON and legacy form-data webhook formats."""
+
+    if not raw_body:
+        return {}
+    content_type = str(content_type or "")
+    content_type_lower = content_type.lower()
+    candidates: list[str] = []
+    if "multipart/form-data" in content_type_lower:
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(
+                f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+                + raw_body
+            )
+            for part in message.iter_parts():
+                if part.get_param("name", header="content-disposition") == "data":
+                    value = part.get_content()
+                    candidates.append(
+                        value.decode(errors="replace")
+                        if isinstance(value, bytes) else str(value)
+                    )
+        except (AttributeError, TypeError, ValueError):
+            pass
+    elif "application/x-www-form-urlencoded" in content_type_lower:
+        candidates.extend(parse_qs(raw_body.decode(errors="replace")).get("data", []))
+    else:
+        candidates.append(raw_body.decode(errors="replace"))
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def record_emby_webhook_notifications(
+    destination: str,
+    items: list[dict[str, Any]],
+) -> None:
+    if not items:
+        return
+    current = storage_destination(destination)
+    timestamp = now_iso()
+    with db() as connection:
+        connection.executemany(
+            "INSERT OR IGNORE INTO emby_webhook_notifications("
+            "destination, item_id, item_type, notified_at) VALUES(?, ?, ?, ?)",
+            [
+                (
+                    current,
+                    str(item.get("Id") or ""),
+                    str(item.get("Type") or ""),
+                    timestamp,
+                )
+                for item in items
+                if str(item.get("Id") or "")
+            ],
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO emby_library_snapshot("
+            "destination, item_id, item_type, series_id, tmdb_id, season_number, "
+            "episode_number, observed_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    current,
+                    str(item.get("Id") or ""),
+                    str(item.get("Type") or ""),
+                    str(item.get("SeriesId") or ""),
+                    emby_item_tmdb_id(item),
+                    integer_value(item.get("ParentIndexNumber")),
+                    integer_value(item.get("IndexNumber")),
+                    timestamp,
+                )
+                for item in items
+                if str(item.get("Id") or "")
+            ],
+        )
+
+
+def sync_emby_webhook_notifications(
+    destination: str,
+    webhook_items: dict[str, str],
+) -> tuple[set[int], int]:
+    """Notify exact Emby items from webhook data, even if polling saw them first."""
+
+    current = storage_destination(destination)
+    if not webhook_items or not emby_library_notification_enabled(current):
+        return set(), 0
+    item_ids = list(webhook_items)
+    placeholders = ",".join("?" for _ in item_ids)
+    with db() as connection:
+        already_notified = {
+            str(row["item_id"])
+            for row in connection.execute(
+                f"SELECT item_id FROM emby_webhook_notifications "
+                f"WHERE destination = ? AND item_id IN ({placeholders})",
+                (current, *item_ids),
+            ).fetchall()
+        }
+
+    items: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for item_id in item_ids:
+        if item_id in already_notified:
+            continue
+        item = emby_library_item(current, item_id)
+        if item:
+            items.append(item)
+        else:
+            missing.append(item_id)
+    if missing:
+        LOGGER.warning(
+            "Emby webhook items unavailable destination=%s count=%d",
+            current,
+            len(missing),
+        )
+
+    notified_tmdb_ids: set[int] = set()
+    notification_count = 0
+    movies = [item for item in items if str(item.get("Type") or "") == "Movie"]
+    episodes_by_series: dict[str, list[dict[str, Any]]] = {}
+    series_items: dict[str, dict[str, Any]] = {}
+    for item in items:
+        item_type = str(item.get("Type") or "")
+        if item_type == "Episode" and item.get("SeriesId"):
+            episodes_by_series.setdefault(str(item["SeriesId"]), []).append(item)
+        elif item_type == "Series":
+            series_items[str(item.get("Id") or "")] = item
+        elif item_type == "Season" and item.get("SeriesId"):
+            series_id = str(item["SeriesId"])
+            series = emby_library_item(current, series_id)
+            if series:
+                series_items[series_id] = series
+
+    for item in movies:
+        send_mp_library_notification(item, "movie", destination=current)
+        notification_count += 1
+        tmdb_id = emby_item_tmdb_id(item)
+        if tmdb_id > 0:
+            notified_tmdb_ids.add(tmdb_id)
+        record_emby_webhook_notifications(current, [item])
+
+    processed_series: set[str] = set()
+    for series_id, episodes in episodes_by_series.items():
+        series = series_items.get(series_id) or emby_library_item(current, series_id)
+        if not series:
+            series = dict(episodes[0])
+        series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
+        for season_episodes in emby_episode_season_groups(episodes):
+            send_mp_library_notification(
+                series,
+                "tv",
+                emby_episode_range(season_episodes),
+                destination=current,
+            )
+            notification_count += 1
+        tmdb_id = emby_item_tmdb_id(series)
+        if tmdb_id > 0:
+            notified_tmdb_ids.add(tmdb_id)
+        recorded_items = list(episodes)
+        if series_id in series_items:
+            recorded_items.append(series_items[series_id])
+        record_emby_webhook_notifications(current, recorded_items)
+        processed_series.add(series_id)
+
+    record_emby_webhook_notifications(
+        current,
+        [
+            series for series_id, series in series_items.items()
+            if series_id not in processed_series
+        ],
+    )
+
+    unsupported = [
+        item for item in items
+        if str(item.get("Type") or "") not in ("Movie", "Episode", "Series")
+    ]
+    record_emby_webhook_notifications(current, unsupported)
+    return notified_tmdb_ids, notification_count
 
 
 def process_emby_webhook(destination: str, delay_seconds: float = 20) -> None:
@@ -3509,19 +3734,48 @@ def process_emby_webhook(destination: str, delay_seconds: float = 20) -> None:
     try:
         if delay_seconds > 0:
             time.sleep(delay_seconds)
-        notified = sync_emby_library_notifications(current)
-        sync_emby_requests(
-            destination=current,
-            suppress_notifications=notified,
-        )
-    finally:
+        while True:
+            with EMBY_WEBHOOK_LOCK:
+                generation = EMBY_WEBHOOK_GENERATIONS.get(current, 0)
+                webhook_items = dict(EMBY_WEBHOOK_ITEMS.get(current, {}))
+                EMBY_WEBHOOK_ITEMS[current] = {}
+            exact_ids, exact_count = sync_emby_webhook_notifications(
+                current,
+                webhook_items,
+            )
+            polled = sync_emby_library_notifications(current)
+            notified = set(polled.get(current, set())) | exact_ids
+            sync_emby_requests(
+                destination=current,
+                suppress_notifications={current: notified},
+            )
+            LOGGER.info(
+                "Emby webhook processed destination=%s items=%d notifications=%d",
+                current,
+                len(webhook_items),
+                exact_count,
+            )
+            with EMBY_WEBHOOK_LOCK:
+                if EMBY_WEBHOOK_GENERATIONS.get(current, 0) == generation:
+                    EMBY_WEBHOOK_PENDING.discard(current)
+                    EMBY_WEBHOOK_ITEMS.pop(current, None)
+                    break
+    except Exception:
+        LOGGER.exception("Emby webhook processing failed destination=%s", current)
         with EMBY_WEBHOOK_LOCK:
             EMBY_WEBHOOK_PENDING.discard(current)
 
 
-def queue_emby_webhook(destination: str) -> bool:
+def queue_emby_webhook(
+    destination: str,
+    item_id: str = "",
+    item_type: str = "",
+) -> bool:
     current = storage_destination(destination)
     with EMBY_WEBHOOK_LOCK:
+        EMBY_WEBHOOK_GENERATIONS[current] = EMBY_WEBHOOK_GENERATIONS.get(current, 0) + 1
+        if item_id:
+            EMBY_WEBHOOK_ITEMS.setdefault(current, {})[str(item_id)] = str(item_type or "")
         if current in EMBY_WEBHOOK_PENDING:
             return False
         EMBY_WEBHOOK_PENDING.add(current)
@@ -5531,7 +5785,11 @@ def library_notification_image(filename: str) -> FileResponse:
 
 
 @APP.post("/api/emby-webhook/{destination}/{token}")
-def receive_emby_webhook(destination: str, token: str) -> dict[str, Any]:
+async def receive_emby_webhook(
+    destination: str,
+    token: str,
+    request: Request,
+) -> dict[str, Any]:
     if destination not in ("p115", "p123"):
         raise HTTPException(404, "Webhook 不存在")
     expected = emby_webhook_token(destination)
@@ -5539,10 +5797,23 @@ def receive_emby_webhook(destination: str, token: str) -> dict[str, Any]:
         raise HTTPException(404, "Webhook 不存在")
     if not emby_webhook_enabled(destination):
         raise HTTPException(409, "该 Emby 的实时联动尚未开启")
-    queued = queue_emby_webhook(destination)
+    payload = parse_emby_webhook_payload(
+        await request.body(),
+        str(request.headers.get("content-type") or ""),
+    )
+    item_id, item_type = emby_webhook_item(payload)
+    queued = queue_emby_webhook(destination, item_id, item_type)
+    LOGGER.info(
+        "Emby webhook accepted destination=%s item_type=%s has_item_id=%s queued=%s",
+        destination,
+        item_type or "unknown",
+        bool(item_id),
+        queued,
+    )
     return {
         "ok": True,
         "queued": queued,
+        "item_received": bool(item_id),
         "message": "已接收入库事件" if queued else "已合并重复入库事件",
     }
 

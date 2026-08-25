@@ -18,6 +18,17 @@ class FakeRequest:
         return self.payload
 
 
+class FakeWebhookRequest:
+    def __init__(self, payload, content_type="application/json"):
+        self.payload = payload
+        self.headers = {"content-type": content_type}
+
+    async def body(self):
+        if isinstance(self.payload, bytes):
+            return self.payload
+        return json.dumps(self.payload).encode()
+
+
 class MovieRequestTests(unittest.TestCase):
     def setUp(self):
         with app.CACHE_LOCK:
@@ -32,6 +43,8 @@ class MovieRequestTests(unittest.TestCase):
             app.EMBY_EPISODE_CACHE.clear()
         with app.EMBY_WEBHOOK_LOCK:
             app.EMBY_WEBHOOK_PENDING.clear()
+            app.EMBY_WEBHOOK_ITEMS.clear()
+            app.EMBY_WEBHOOK_GENERATIONS.clear()
         self.temporary = tempfile.TemporaryDirectory()
         self.db_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.db_patch.start()
@@ -2118,6 +2131,14 @@ class MovieRequestTests(unittest.TestCase):
                 "ParentIndexNumber": 1,
                 "IndexNumber": 2,
             },
+            {
+                "Id": "episode-3",
+                "Type": "Episode",
+                "SeriesId": "series-3",
+                "SeriesName": "新剧",
+                "ParentIndexNumber": 2,
+                "IndexNumber": 1,
+            },
         ]
         with patch.object(
             app,
@@ -2129,12 +2150,18 @@ class MovieRequestTests(unittest.TestCase):
                 second = app.sync_emby_library_notifications("p115")
         self.assertEqual(first, {"p115": set()})
         self.assertEqual(second, {"p115": {2, 3}})
-        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(notify.call_count, 3)
         notify.assert_any_call(updated[1], "movie", destination="p115")
         notify.assert_any_call(
             updated[2],
             "tv",
             "S01 E01-E02",
+            destination="p115",
+        )
+        notify.assert_any_call(
+            updated[2],
+            "tv",
+            "S02 E01",
             destination="p115",
         )
 
@@ -2199,30 +2226,101 @@ class MovieRequestTests(unittest.TestCase):
             app.set_setting(connection, "emby_webhook_enabled", "1")
         token = app.emby_webhook_token("p115")
         with self.assertRaises(app.HTTPException) as invalid:
-            app.receive_emby_webhook("p115", "wrong-token")
+            asyncio.run(
+                app.receive_emby_webhook(
+                    "p115",
+                    "wrong-token",
+                    FakeWebhookRequest({}),
+                )
+            )
         self.assertEqual(invalid.exception.status_code, 404)
         with patch.object(app, "Thread") as thread:
-            first = app.receive_emby_webhook("p115", token)
-            second = app.receive_emby_webhook("p115", token)
+            first = asyncio.run(
+                app.receive_emby_webhook(
+                    "p115",
+                    token,
+                    FakeWebhookRequest({"Item": {"Id": "movie-1", "Type": "Movie"}}),
+                )
+            )
+            second = asyncio.run(
+                app.receive_emby_webhook(
+                    "p115",
+                    token,
+                    FakeWebhookRequest({"Item": {"Id": "movie-2", "Type": "Movie"}}),
+                )
+            )
         self.assertTrue(first["queued"])
+        self.assertTrue(first["item_received"])
         self.assertFalse(second["queued"])
+        self.assertEqual(
+            app.EMBY_WEBHOOK_ITEMS["p115"],
+            {"movie-1": "Movie", "movie-2": "Movie"},
+        )
         thread.assert_called_once()
         self.assertEqual(thread.call_args.kwargs["name"], "emby-webhook-p115")
+
+    def test_emby_webhook_payload_supports_json_and_form_data(self):
+        payload = {"Item": {"Id": "episode-7", "Type": "Episode"}}
+        encoded = json.dumps(payload)
+        self.assertEqual(
+            app.parse_emby_webhook_payload(encoded.encode(), "application/json"),
+            payload,
+        )
+        form_body = "data=" + encoded.replace(" ", "+").replace('"', "%22")
+        self.assertEqual(
+            app.parse_emby_webhook_payload(
+                form_body.encode(),
+                "application/x-www-form-urlencoded",
+            ),
+            payload,
+        )
+
+    def test_exact_webhook_notifies_even_when_polling_snapshot_already_saw_item(self):
+        item = {
+            "Id": "known-movie",
+            "Type": "Movie",
+            "Name": "已被轮询看见的电影",
+            "ProviderIds": {"Tmdb": "707"},
+        }
+        with app.db() as connection:
+            connection.execute(
+                "INSERT INTO emby_library_snapshot("
+                "destination, item_id, item_type, observed_at) "
+                "VALUES('p115', 'known-movie', 'Movie', ?)",
+                (app.now_iso(),),
+            )
+        with patch.object(app, "emby_library_item", return_value=item):
+            with patch.object(app, "send_mp_library_notification") as notify:
+                first = app.sync_emby_webhook_notifications(
+                    "p115", {"known-movie": "Movie"}
+                )
+                second = app.sync_emby_webhook_notifications(
+                    "p115", {"known-movie": "Movie"}
+                )
+        self.assertEqual(first, ({707}, 1))
+        self.assertEqual(second, (set(), 0))
+        notify.assert_called_once_with(item, "movie", destination="p115")
 
     def test_emby_webhook_runs_immediate_sync_and_clears_pending_state(self):
         with app.EMBY_WEBHOOK_LOCK:
             app.EMBY_WEBHOOK_PENDING.add("p123")
         with patch.object(
             app,
-            "sync_emby_library_notifications",
-            return_value={"p123": {505}},
-        ) as notification_sync:
-            with patch.object(app, "sync_emby_requests") as request_sync:
-                app.process_emby_webhook("p123", delay_seconds=0)
+            "sync_emby_webhook_notifications",
+            return_value=({606}, 1),
+        ) as exact_sync:
+            with patch.object(
+                app,
+                "sync_emby_library_notifications",
+                return_value={"p123": {505}},
+            ) as notification_sync:
+                with patch.object(app, "sync_emby_requests") as request_sync:
+                    app.process_emby_webhook("p123", delay_seconds=0)
+        exact_sync.assert_called_once_with("p123", {})
         notification_sync.assert_called_once_with("p123")
         request_sync.assert_called_once_with(
             destination="p123",
-            suppress_notifications={"p123": {505}},
+            suppress_notifications={"p123": {505, 606}},
         )
         self.assertNotIn("p123", app.EMBY_WEBHOOK_PENDING)
 
