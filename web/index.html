@@ -304,6 +304,12 @@
     .resource-tools { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 11px; }
     .resource-tool { padding:7px 10px; border:1px solid var(--line); border-radius:9px; color:var(--muted); background:transparent; font-size:10px; font-weight:800; }
     .resource-tool.active { color:var(--orange-2); border-color:var(--orange); background:rgba(255,119,69,.1); }
+    .resource-expand-tool {
+      padding: 8px 14px; border-color: var(--orange); color: #251309;
+      background: var(--orange-2); box-shadow: 0 6px 18px rgba(255,119,69,.2);
+      font-size: 11px; font-weight: 950;
+    }
+    .resource-expand-tool:hover { transform: translateY(-1px); filter: brightness(1.06); }
     .source-priority { padding: 4px 7px; border-radius: 999px; color: #251309; background: var(--orange-2); font-size: 9px; font-weight: 900; }
     .follow-grid { display: grid; gap: 12px; }
     .follow-card { display: grid; grid-template-columns: 64px minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
@@ -683,6 +689,7 @@
     let activeResourceProvider = 'hdhive';
     let hdhiveResourceFilter = 'all';
     let hdhiveResourcesExpanded = false;
+    let dianResourcesExpanded = false;
     let searchController = null;
     let searchSequence = 0;
     let requestsLoadPromise = null;
@@ -813,6 +820,7 @@
       activeResourceProvider='hdhive';
       hdhiveResourceFilter='all';
       hdhiveResourcesExpanded=false;
+      dianResourcesExpanded=false;
       currentDetail={...item,genres:[],directors:[],cast:[],recommendations:[],hdhive_resources:[],dian_resources:[],hdhive_loading:true,dian_loading:true,details_loading:true,details_error:''};
       $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
       renderDetails(currentDetail);
@@ -969,9 +977,15 @@
           if(hdhiveResourceFilter==='4k')visible=resources.filter(resource=>/4k|2160|uhd/i.test(`${resource.res||''} ${resource.title||''}`));
           if(hdhiveResourceFilter==='sub')visible=resources.filter(resource=>resource.chn_sub||/中|chs|cht/i.test(resource.subtitle_label||''));
           const buttons=Object.entries(filters).map(([key,text])=>`<button class="resource-tool ${hdhiveResourceFilter===key?'active':''}" data-hdhive-filter="${key}">${text}</button>`).join('');
-          const hiddenCount=Math.max(0,visible.length-5);
-          tools=`<div class="resource-tools">${buttons}${hiddenCount?`<button class="resource-tool" data-hdhive-expand>${hdhiveResourcesExpanded?'收起':`展开其余${hiddenCount}个`}</button>`:''}<span class="dian-source">推荐按集数完整度、集数和文件大小排序</span></div>`;
-          if(!hdhiveResourcesExpanded)visible=visible.slice(0,5);
+          tools=`<div class="resource-tools">${buttons}<span class="dian-source">推荐按集数完整度、集数和文件大小排序</span></div>`;
+        }
+        if(!loading){
+          const expanded=provider==='hdhive'?hdhiveResourcesExpanded:dianResourcesExpanded;
+          const hiddenCount=Math.max(0,visible.length-8);
+          if(hiddenCount||expanded){
+            tools+=`<div class="resource-tools"><button class="resource-tool resource-expand-tool" data-resource-expand="${provider}">${expanded?'↑ 收起多余资源':`↓ 展开其余 ${hiddenCount} 个资源`}</button></div>`;
+          }
+          if(!expanded)visible=visible.slice(0,8);
         }
         return `<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${tools}${loading?'<div class="dian-source">后台独立读取中，不会等待另一个资源源。</div>':visible.length?`<div class="resource-list">${resourceCards(visible,provider)}</div>`:error?`<div class="load-error"><span>${escapeHtml(error)}</span><button class="btn btn-small" type="button" data-retry-resource="${provider}">单独重试${label}</button></div>`:`<div class="empty">${label}暂时没有匹配资源</div>`}</section>`;
       };
@@ -1003,8 +1017,9 @@
         hdhiveResourcesExpanded=false;
         renderDetails(currentDetail);
       });
-      $('detailCard').querySelectorAll('[data-hdhive-expand]').forEach(button=>button.onclick=()=>{
-        hdhiveResourcesExpanded=!hdhiveResourcesExpanded;
+      $('detailCard').querySelectorAll('[data-resource-expand]').forEach(button=>button.onclick=()=>{
+        if(button.dataset.resourceExpand==='hdhive')hdhiveResourcesExpanded=!hdhiveResourcesExpanded;
+        else dianResourcesExpanded=!dianResourcesExpanded;
         renderDetails(currentDetail);
       });
       const request=$('detailRequest'); if(request&&currentDetail)request.onclick=()=>submitRequest(currentDetail,request);
@@ -1024,7 +1039,7 @@
           ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
           : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})});
         button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已完成转存';
-        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已转存到115所选目录';}
+        if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已转存';}
         markInitialTransferComplete();
         toast(destination==='p123'?(result.message||'资源链接已发送给123'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
       } catch(error) {

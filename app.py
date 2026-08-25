@@ -1620,12 +1620,34 @@ def parse_episode_spec(text: Any) -> dict[str, Any]:
     value = str(text or "").strip()
     seasons: set[int] = set()
     episodes: set[int] = set()
-    complete_words = bool(re.search(r"(全集|合集|全\d+\s*集|完结)", value, re.I))
+    complete_words = bool(
+        re.search(
+            r"(全集|合集|全\s*\d+\s*集|(?<!第)\d+\s*集\s*(?:全|完结)|完结)",
+            value,
+            re.I,
+        )
+    )
 
     for match in re.finditer(r"全\s*(\d{1,4})\s*集", value, re.I):
         total = int(match.group(1))
         if 0 < total <= 10000:
             episodes.update(range(1, total + 1))
+
+    for match in re.finditer(r"(\d{1,4})\s*集\s*(?:全|完结)", value, re.I):
+        if re.search(r"第\s*$", value[:match.start(1)]):
+            continue
+        total = int(match.group(1))
+        if 0 < total <= 10000:
+            episodes.update(range(1, total + 1))
+
+    for pattern in (
+        r"共\s*(\d{1,4})\s*集",
+        r"更新至\s*(?:第\s*)?(\d{1,4})\s*集",
+    ):
+        for match in re.finditer(pattern, value, re.I):
+            total = int(match.group(1))
+            if 0 < total <= 10000:
+                episodes.update(range(1, total + 1))
 
     for match in re.finditer(
         r"(?i)\bS(\d{1,3})\s*E(\d{1,4})"
@@ -2062,12 +2084,18 @@ def canonical_resource(
         for number in item.get("episode_numbers") or []
         if str(number).isdigit() and int(number) > 0
     ]
-    if not existing_numbers and parsed["episode_numbers"]:
+    parsed_numbers = parsed["episode_numbers"]
+    provided_parsed = parse_episode_spec(provided_episode_label)
+    if parsed_numbers and len(parsed_numbers) > len(existing_numbers):
         item["episode_numbers"] = parsed["episode_numbers"]
         item["episode_start"] = parsed["episode_start"]
         item["episode_end"] = parsed["episode_end"]
         item["season_number"] = parsed["season_number"]
-        item["episode_label"] = provided_episode_label or parsed["episode_label"]
+        item["episode_label"] = (
+            provided_episode_label
+            if len(provided_parsed["episode_numbers"]) >= len(parsed_numbers)
+            else parsed["episode_label"]
+        )
         item["is_pack"] = parsed["is_pack"]
         item["safe_single_episode"] = parsed["safe_single_episode"]
         sources["episodes"] = "title"
@@ -7094,7 +7122,7 @@ async def hdhive_transfer(
                 "115接口没有把文件写入目标目录；返回：" + response_summary(received),
             )
         mode = "share"
-        message = "已转存到115所选目录"
+        message = "已转存"
 
     record_transfer(
         user_id=int(user["id"]),
@@ -7260,7 +7288,8 @@ async def dian_transfer(
             "115接口没有把文件写入目标目录；返回：" + response_summary(received),
         )
     send_notifications_async(
-        f"☁️ 115转存已提交\n\n{payload.get('title') or '影片'} · {user['display_name']}"
+        f"☁️ 癫影资源转存成功\n\n"
+        f"{payload.get('title') or '影片'} · {user['display_name']}\n已转存"
     )
     record_transfer(
         user_id=int(user["id"]),
@@ -7269,14 +7298,14 @@ async def dian_transfer(
         tmdb_id=tmdb_id,
         transfer_scope=transfer_scope,
         status="success",
-        detail="已手动转存所选资源",
+        detail="已转存",
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
     return {
         "ok": True,
         "mode": "share",
-        "message": "已转存到115所选目录",
+        "message": "已转存",
     }
 
 

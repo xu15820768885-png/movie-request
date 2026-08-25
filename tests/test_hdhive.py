@@ -80,6 +80,38 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(parsed["episode_numbers"], [233])
         self.assertEqual(parsed["episode_label"], "第233集")
 
+    def test_episode_parser_expands_common_complete_pack_wording(self):
+        for title in (
+            "示例剧 33集全",
+            "示例剧 共33集",
+            "示例剧 33集完结",
+            "示例剧 更新至33集",
+            "示例剧 更新至第33集",
+        ):
+            with self.subTest(title=title):
+                parsed = app.parse_episode_spec(title)
+                self.assertEqual(parsed["episode_numbers"], list(range(1, 34)))
+                self.assertEqual(parsed["episode_label"], "第1–33集")
+                self.assertTrue(parsed["is_pack"])
+
+        final_episode = app.parse_episode_spec("示例剧 第33集完结")
+        self.assertEqual(final_episode["episode_numbers"], [33])
+        self.assertEqual(final_episode["episode_label"], "第33集")
+
+    def test_complete_pack_title_overrides_misleading_single_episode_label(self):
+        for provider in ("hdhive", "dian"):
+            with self.subTest(provider=provider):
+                resource = app.canonical_resource(
+                    {
+                        "title": "示例剧 33集全",
+                        "episode_label": "第33集",
+                        "episode_numbers": [33],
+                    },
+                    provider,
+                )
+                self.assertEqual(resource["episode_numbers"], list(range(1, 34)))
+                self.assertEqual(resource["episode_label"], "第1–33集")
+
     def test_missing_episode_selection_only_returns_new_explicit_files(self):
         items = [
             {"_share_name": "S01E231.mkv", "_share_id": "231", "_share_is_dir": False},

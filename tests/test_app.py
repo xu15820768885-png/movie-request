@@ -1479,6 +1479,7 @@ class MovieRequestTests(unittest.TestCase):
                     )
         self.assertTrue(result["ok"])
         self.assertEqual(result["mode"], "share")
+        self.assertEqual(result["message"], "已转存")
         dian.assert_called_once_with("unlock", {"share_id": 11, "resource_id": 22})
         self.assertEqual(
             client.share_url,
@@ -1953,10 +1954,11 @@ class MovieRequestTests(unittest.TestCase):
                         )
 
         self.assertEqual(result["mode"], "share")
-        self.assertEqual(result["message"], "已转存到115所选目录")
+        self.assertEqual(result["message"], "已转存")
         self.assertEqual(client.received["file_id"], "101")
         wait.assert_called_once()
         notify.assert_called_once()
+        self.assertIn("\n已转存", notify.call_args.args[0])
 
     def test_pansave_send_link_uses_saved_user_session(self):
         with app.db() as connection:
