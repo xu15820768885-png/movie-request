@@ -204,6 +204,23 @@
     .badge-rejected { color: #ffc4c4; background: rgba(228,123,123,.14); }
     .admin-grid { display: grid; grid-template-columns: minmax(0,1.65fr) minmax(300px,.8fr); gap: 18px; }
     .panel { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(155deg,rgba(255,255,255,.018),transparent 52%),var(--panel); box-shadow: 0 14px 34px rgba(0,0,0,.12); }
+    .follow-log-summary { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin-bottom: 16px; }
+    .follow-log-stat { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .follow-log-stat span { display: block; color: var(--muted); font-size: 11px; }
+    .follow-log-stat strong { display: block; margin-top: 6px; font-size: 24px; }
+    .follow-log-toolbar { display: flex; gap: 10px; align-items: end; margin-bottom: 14px; }
+    .follow-log-toolbar label { min-width: 160px; }
+    .follow-event-list { display: grid; gap: 9px; }
+    .follow-event { display: grid; grid-template-columns: 150px minmax(0,1fr) auto; gap: 16px; align-items: start; padding: 15px 16px; border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 13px; background: rgba(255,255,255,.018); }
+    .follow-event.success { border-left-color: var(--green); }
+    .follow-event.failed { border-left-color: var(--red); }
+    .follow-event.skipped { border-left-color: var(--yellow); }
+    .follow-event.running { border-left-color: var(--blue); }
+    .follow-event-time { color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .follow-event-title { font-weight: 800; font-size: 13px; }
+    .follow-event-message { margin-top: 5px; color: #d6d1ca; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+    .follow-event-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
+    .follow-event-stage { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 10px; white-space: nowrap; }
     .panel h3 { margin: 0 0 14px; font-size: 15px; }
     .admin-request { padding: 14px 0; border-bottom: 1px solid var(--line); }
     .admin-request:first-child { padding-top: 0; }
@@ -451,6 +468,11 @@
       .user-editor .btn { min-height: 42px; }
       .member-create-grid { grid-template-columns: 1fr; }
       .inline { grid-template-columns: 1fr; }
+      .follow-log-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .follow-log-toolbar { display: grid; grid-template-columns: 1fr; }
+      .follow-log-toolbar label { min-width: 0; }
+      .follow-event { grid-template-columns: 1fr auto; gap: 8px; }
+      .follow-event-time { grid-column: 1 / -1; }
     }
     @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
   </style>
@@ -501,6 +523,7 @@
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
         <button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button>
+        <button id="followLogTab" class="tab hidden" data-view="followLog">追更日志</button>
         <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
         <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
         <button id="storageTab" class="tab hidden" data-view="storage">资源和网盘</button>
@@ -513,6 +536,22 @@
         <div id="movieResults" class="empty">输入片名后，会显示准确匹配的海报、年份和类型。<br>这样就不会找错版本。</div>
       </section>
       <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看影巢原生追更、115自动洗版窗口和 Emby 入库进度</span></div></div><div id="followList" class="follow-grid"></div></section>
+      <section id="followLogView" class="view hidden">
+        <div class="section-head"><div><h2>追更日志</h2><span>查看影巢消息、资源识别、解锁、115转存及等待入库的完整过程</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新日志</button></div>
+        <div class="follow-log-summary">
+          <div class="follow-log-stat"><span>最近24小时成功记录</span><strong id="followLogSuccess">0</strong></div>
+          <div class="follow-log-stat"><span>失败记录</span><strong id="followLogFailed">0</strong></div>
+          <div class="follow-log-stat"><span>无需处理记录</span><strong id="followLogSkipped">0</strong></div>
+          <div class="follow-log-stat"><span>开始执行记录</span><strong id="followLogRunning">0</strong></div>
+        </div>
+        <div class="panel">
+          <div class="follow-log-toolbar">
+            <label>处理步骤<select id="followLogStage"><option value="">全部步骤</option><option value="messages">站内信</option><option value="scan">资源扫描</option><option value="file_list">文件识别</option><option value="unlock">资源解锁</option><option value="transfer">115转存</option><option value="library">Emby入库</option><option value="complete">处理结果</option><option value="poll">后台轮询</option><option value="subscription">订阅绑定</option></select></label>
+            <label>处理状态<select id="followLogStatus"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">无需处理</option><option value="running">开始执行</option></select></label>
+          </div>
+          <div id="followEventList" class="follow-event-list"><div class="empty">正在读取追更日志…</div></div>
+        </div>
+      </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>资源进入对应 Emby 后会自动清除需求</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，系统会自动清除这条需求。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
@@ -552,7 +591,7 @@
               <label>云服务器固定出口代理<input id="hdhiveProxyUrl" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <div class="section-head" style="margin:8px 0 0"><span>原生追更与 PanSave 洗版</span><span id="hdhiveFollowPermission" class="badge badge-approved">等待追加权限</span></div>
               <div class="inline"><label>订阅检查间隔<select id="hdhivePollInterval"><option value="300">每5分钟</option><option value="900">每15分钟</option><option value="1800">每30分钟</option><option value="3600">每1小时</option></select></label><label>单集洗版窗口<select id="hdhiveWashWindow"><option value="12">12小时</option><option value="24">24小时</option><option value="48">48小时</option><option value="72">72小时</option></select></label></div>
-              <div class="inline"><label>单集最多处理次数<select id="hdhiveMaxTransfers"><option value="1">1次</option><option value="2">2次</option><option value="3">3次</option><option value="4">4次</option><option value="6">6次</option><option value="10">10次</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">接收影巢订阅更新</label></div>
+              <div class="inline"><label>单集最多处理次数<select id="hdhiveMaxTransfers"><option value="1">1次</option><option value="2">2次</option><option value="3">3次</option><option value="4">4次</option><option value="6">6次</option><option value="10">10次</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">定时检查影巢订阅更新</label></div>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveAutoTransfer" type="checkbox" style="width:auto">自动把新的115候选送入 PanSave 洗版</label>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveWashAfterEmby" type="checkbox" style="width:auto">入库后在窗口内继续接受更大版本</label>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveReprocessChanged" type="checkbox" style="width:auto">同一资源内容或大小变化后允许重新处理</label>
@@ -639,7 +678,7 @@
                 <div id="p123EmbyState" class="muted" style="font-size:12px"></div>
                 <button id="p123EmbyTest" class="btn" type="button">测试 123 Emby</button>
               </div>
-              <div class="transfer-note">Webhook 请在对应 Emby 的“通知 → Webhooks”中添加，事件选择“新媒体已添加”；实时联动会按媒体 ID 读取并去重，剧集按季分别通知，5分钟轮询继续负责补漏。</div>
+              <div class="transfer-note">Webhook 请在对应 Emby 的“通知 → Webhooks”中添加，事件选择“新媒体已添加”；映单收到后约1秒开始读取媒体，尚未可查询时会连续重试，剧集按季分别通知，5分钟轮询只负责补漏。</div>
               <div class="transfer-note">115账号查询115 Emby并直接转存；123账号查询123 Emby，网站负责把资源链接发给123机器人。</div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存媒体设置</button></div>
             </section>
@@ -712,6 +751,12 @@
     const demoFollows = [
       {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'影巢原生订阅已开启，等待第233集资源',active:true,hdhive_subscribed:true,hdhive_subscription_id:9001}
     ];
+    const demoFollowEvents = [
+      {id:4,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',created_at:new Date().toISOString()},
+      {id:3,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',message:'资源解锁成功，正在检查115分享中的第233集',created_at:new Date(Date.now()-30000).toISOString()},
+      {id:2,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'scan',status:'success',message:'影巢资源读取完成，共找到 8 个115候选',created_at:new Date(Date.now()-60000).toISOString()},
+      {id:1,title:'',display_name:'',tmdb_id:0,stage:'messages',status:'success',message:'读取到 1 条新订阅消息',created_at:new Date(Date.now()-90000).toISOString()}
+    ];
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
     function toast(message, error=false) {
@@ -764,7 +809,7 @@
     function showApp() {
       $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
-      const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      const admin=currentUser.role==='admin'; ['adminTab','followLogTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
       $('followTab').classList.remove('hidden');
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
@@ -775,7 +820,7 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage') loadIntegrations();
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog') loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage') loadIntegrations();
     }
     function isWatchableMedia(item) {
       return ['movie','tv'].includes(String(item?.media_type||''));
@@ -1092,6 +1137,27 @@
       $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.baseline_episode)>0,emby_latest_episode_number:Number(item.baseline_episode||0),emby_episode_label:item.baseline_episode?`已入库至第${item.baseline_episode}集`:'尚未入库'});});
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(Number(button.dataset.followDelete),button));
       refreshFollowEmbyProgress(follows);
+    }
+    async function loadFollowEvents() {
+      const root=$('followEventList');root.innerHTML='<div class="empty">正在读取追更日志…</div>';
+      const stage=$('followLogStage').value;const status=$('followLogStatus').value;
+      try {
+        const data=preview
+          ? {events:demoFollowEvents,summary:{success:3,failed:0,skipped:0,running:0}}
+          : await api(`/api/admin/hdhive/follow-events?limit=300&stage=${encodeURIComponent(stage)}&status=${encodeURIComponent(status)}`);
+        const summary=data.summary||{};
+        $('followLogSuccess').textContent=summary.success||0;$('followLogFailed').textContent=summary.failed||0;$('followLogSkipped').textContent=summary.skipped||0;$('followLogRunning').textContent=summary.running||0;
+        const stageLabels={subscription:'订阅绑定',poll:'后台轮询',messages:'站内信',scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
+        const statusLabels={running:'开始执行',success:'成功',skipped:'无需处理',failed:'失败',info:'信息'};
+        const events=(data.events||[]).filter(event=>(!stage||event.stage===stage)&&(!status||event.status===status));
+        root.innerHTML=events.length?events.map(event=>{
+          const time=new Date(event.created_at);const timeLabel=Number.isNaN(time.getTime())?event.created_at:time.toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'});
+          const owner=event.display_name?` · ${escapeHtml(event.display_name)}`:'';
+          const media=event.title?`${escapeHtml(event.title)}${owner}`:'系统后台';
+          const meta=event.tmdb_id?`TMDB ${event.tmdb_id}`:event.cycle_id?`检查批次 ${escapeHtml(event.cycle_id)}`:'';
+          return `<article class="follow-event ${escapeHtml(event.status)}"><div class="follow-event-time">${escapeHtml(timeLabel)}<br>${escapeHtml(statusLabels[event.status]||event.status)}</div><div><div class="follow-event-title">${media}</div><div class="follow-event-message">${escapeHtml(event.message)}</div>${meta?`<div class="follow-event-meta">${meta}</div>`:''}</div><span class="follow-event-stage">${escapeHtml(stageLabels[event.stage]||event.stage)}</span></article>`;
+        }).join(''):'<div class="empty">当前筛选条件下还没有追更日志</div>';
+      } catch(error) {root.innerHTML=`<div class="empty">追更日志读取失败：${escapeHtml(error.message)}</div>`;}
     }
     function refreshFollowEmbyProgress(follows) {
       if(preview)return;
@@ -1434,6 +1500,9 @@
       }
     };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
+    $('followLogRefresh').onclick=loadFollowEvents;
+    $('followLogStage').onchange=loadFollowEvents;
+    $('followLogStatus').onchange=loadFollowEvents;
     document.querySelectorAll('[data-settings-panel]').forEach(button=>button.onclick=()=>{
       document.querySelectorAll('[data-settings-panel]').forEach(item=>item.classList.toggle('active',item===button));
       document.querySelectorAll('[data-settings-content]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.settingsContent!==button.dataset.settingsPanel));

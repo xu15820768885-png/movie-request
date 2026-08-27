@@ -11,6 +11,11 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn('id="followTab" class="tab hidden"', html)
         self.assertIn("$('followTab').classList.remove('hidden')", html)
         self.assertIn("我的追更", html)
+        self.assertIn('id="followLogTab"', html)
+        self.assertIn('id="followLogView"', html)
+        self.assertIn("/api/admin/hdhive/follow-events", html)
+        self.assertIn("定时检查影巢订阅更新", html)
+        self.assertIn("timeZone:'Asia/Shanghai'", html)
         self.assertIn("115自动洗版窗口", html)
         self.assertNotIn('data-follow-index="${index}"', html)
 

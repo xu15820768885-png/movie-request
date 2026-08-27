@@ -413,6 +413,23 @@ def init_db() -> None:
                 payload_json TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS hdhive_follow_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cycle_id TEXT NOT NULL DEFAULT '',
+                follow_id INTEGER REFERENCES tv_follows(id) ON DELETE SET NULL,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL DEFAULT '',
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS hdhive_follow_event_time_idx
+                ON hdhive_follow_events(created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS hdhive_follow_event_follow_idx
+                ON hdhive_follow_events(follow_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS wecom_message_log (
                 message_key TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL
@@ -1512,6 +1529,91 @@ def record_transfer(
                     now_iso(),
                 ),
             )
+
+
+def log_hdhive_follow_event(
+    stage: str,
+    status: str,
+    message: str,
+    *,
+    follow: Optional[sqlite3.Row] = None,
+    follow_id: Optional[int] = None,
+    cycle_id: str = "",
+    detail: Optional[dict[str, Any]] = None,
+) -> None:
+    """Persist a user-facing follow event without affecting the worker."""
+    try:
+        user_id: Optional[int] = None
+        tmdb_id = 0
+        title = ""
+        if follow is not None:
+            follow_id = int(follow["id"])
+            user_id = int(follow["user_id"])
+            tmdb_id = int(follow["tmdb_id"] or 0)
+            title = str(follow["title"] or "")
+        elif follow_id:
+            with db() as connection:
+                row = connection.execute(
+                    "SELECT id, user_id, tmdb_id, title FROM tv_follows WHERE id = ?",
+                    (int(follow_id),),
+                ).fetchone()
+            if row:
+                user_id = int(row["user_id"])
+                tmdb_id = int(row["tmdb_id"] or 0)
+                title = str(row["title"] or "")
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO hdhive_follow_events("
+                "cycle_id, follow_id, user_id, tmdb_id, title, stage, status, "
+                "message, detail_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(cycle_id or ""),
+                    follow_id,
+                    user_id,
+                    tmdb_id,
+                    title,
+                    str(stage or "info")[:40],
+                    str(status or "info")[:20],
+                    str(message or "")[:500],
+                    json.dumps(detail or {}, ensure_ascii=False),
+                    now_iso(),
+                ),
+            )
+    except Exception:
+        LOGGER.exception("failed to persist HDHive follow event")
+
+
+def cleanup_hdhive_follow_events(keep: int = 5000) -> None:
+    try:
+        with db() as connection:
+            connection.execute(
+                "DELETE FROM hdhive_follow_events WHERE id NOT IN ("
+                "SELECT id FROM hdhive_follow_events ORDER BY id DESC LIMIT ?)",
+                (max(500, int(keep)),),
+            )
+    except Exception:
+        LOGGER.exception("failed to prune HDHive follow events")
+
+
+def log_follow_library_event(
+    destination: str,
+    tmdb_id: int,
+    message: str,
+    *,
+    detail: Optional[dict[str, Any]] = None,
+) -> None:
+    if int(tmdb_id or 0) <= 0:
+        return
+    with db() as connection:
+        follows = connection.execute(
+            "SELECT f.* FROM tv_follows f JOIN users u ON u.id = f.user_id "
+            "WHERE f.active = 1 AND f.tmdb_id = ? AND u.storage_destination = ?",
+            (int(tmdb_id), storage_destination(destination)),
+        ).fetchall()
+    for follow in follows:
+        log_hdhive_follow_event(
+            "library", "success", message, follow=follow, detail=detail
+        )
 
 
 def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
@@ -3505,6 +3607,10 @@ def sync_emby_library_notifications(
                 continue
             tmdb_id = emby_item_tmdb_id(item)
             send_mp_library_notification(item, "movie", destination=current)
+            log_follow_library_event(
+                current, tmdb_id, "Emby 已确认电影入库",
+                detail={"destination": current, "item_id": str(item.get("Id") or "")},
+            )
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
 
@@ -3519,11 +3625,23 @@ def sync_emby_library_notifications(
             series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
             tmdb_id = emby_item_tmdb_id(series)
             for season_episodes in emby_episode_season_groups(episodes):
+                episode_label = emby_episode_range(season_episodes)
                 send_mp_library_notification(
                     series,
                     "tv",
-                    emby_episode_range(season_episodes),
+                    episode_label,
                     destination=current,
+                )
+                log_follow_library_event(
+                    current, tmdb_id, f"Emby 已确认入库：{episode_label}",
+                    detail={
+                        "destination": current,
+                        "episode_numbers": sorted(
+                            integer_value(item.get("IndexNumber"))
+                            for item in season_episodes
+                            if integer_value(item.get("IndexNumber")) > 0
+                        ),
+                    },
                 )
             if tmdb_id > 0:
                 notified[current].add(tmdb_id)
@@ -3630,6 +3748,8 @@ def record_emby_webhook_notifications(
 def sync_emby_webhook_notifications(
     destination: str,
     webhook_items: dict[str, str],
+    lookup_attempts: int = 8,
+    retry_delay_seconds: float = 2,
 ) -> tuple[set[int], int]:
     """Notify exact Emby items from webhook data, even if polling saw them first."""
 
@@ -3648,16 +3768,21 @@ def sync_emby_webhook_notifications(
             ).fetchall()
         }
 
-    items: list[dict[str, Any]] = []
-    missing: list[str] = []
-    for item_id in item_ids:
-        if item_id in already_notified:
-            continue
-        item = emby_library_item(current, item_id)
-        if item:
-            items.append(item)
-        else:
-            missing.append(item_id)
+    pending = [item_id for item_id in item_ids if item_id not in already_notified]
+    resolved: dict[str, dict[str, Any]] = {}
+    attempts = max(1, min(10, int(lookup_attempts or 1)))
+    for attempt in range(attempts):
+        for item_id in list(pending):
+            item = emby_library_item(current, item_id)
+            if item:
+                resolved[item_id] = item
+                pending.remove(item_id)
+        if not pending or attempt >= attempts - 1:
+            break
+        if retry_delay_seconds > 0:
+            time.sleep(float(retry_delay_seconds))
+    items = list(resolved.values())
+    missing = list(pending)
     if missing:
         LOGGER.warning(
             "Emby webhook items unavailable destination=%s count=%d",
@@ -3686,6 +3811,10 @@ def sync_emby_webhook_notifications(
         send_mp_library_notification(item, "movie", destination=current)
         notification_count += 1
         tmdb_id = emby_item_tmdb_id(item)
+        log_follow_library_event(
+            current, tmdb_id, "Emby Webhook 已确认电影入库",
+            detail={"destination": current, "item_id": str(item.get("Id") or "")},
+        )
         if tmdb_id > 0:
             notified_tmdb_ids.add(tmdb_id)
         record_emby_webhook_notifications(current, [item])
@@ -3696,15 +3825,27 @@ def sync_emby_webhook_notifications(
         if not series:
             series = dict(episodes[0])
         series.setdefault("SeriesName", episodes[0].get("SeriesName") or "")
+        tmdb_id = emby_item_tmdb_id(series)
         for season_episodes in emby_episode_season_groups(episodes):
+            episode_label = emby_episode_range(season_episodes)
             send_mp_library_notification(
                 series,
                 "tv",
-                emby_episode_range(season_episodes),
+                episode_label,
                 destination=current,
             )
             notification_count += 1
-        tmdb_id = emby_item_tmdb_id(series)
+            log_follow_library_event(
+                current, tmdb_id, f"Emby Webhook 已确认入库：{episode_label}",
+                detail={
+                    "destination": current,
+                    "episode_numbers": sorted(
+                        integer_value(item.get("IndexNumber"))
+                        for item in season_episodes
+                        if integer_value(item.get("IndexNumber")) > 0
+                    ),
+                },
+            )
         if tmdb_id > 0:
             notified_tmdb_ids.add(tmdb_id)
         recorded_items = list(episodes)
@@ -3729,7 +3870,7 @@ def sync_emby_webhook_notifications(
     return notified_tmdb_ids, notification_count
 
 
-def process_emby_webhook(destination: str, delay_seconds: float = 5) -> None:
+def process_emby_webhook(destination: str, delay_seconds: float = 1) -> None:
     current = storage_destination(destination)
     try:
         if delay_seconds > 0:
@@ -5080,6 +5221,7 @@ def hdhive_wash_candidate_allowed(
 def auto_wash_hdhive_follow(
     follow_id: int,
     resources: list[dict[str, Any]],
+    cycle_id: str = "",
 ) -> dict[str, Any]:
     config = hdhive_wash_config()
     if not config["enabled"]:
@@ -5092,6 +5234,11 @@ def auto_wash_hdhive_follow(
         ).fetchone()
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not follow or follow["storage_destination"] != "p115":
+        if follow:
+            log_hdhive_follow_event(
+                "transfer", "skipped", "当前追更不是115目标，已跳过自动转存",
+                follow=follow, cycle_id=cycle_id,
+            )
         return {"transferred": [], "message": "自动洗版仅处理115对应的追更"}
 
     progress = destination_episode_progress(
@@ -5114,9 +5261,20 @@ def auto_wash_hdhive_follow(
         slug = str(resource.get("slug") or "").strip()
         if not slug or not hdhive_resource_is_supported(resource):
             continue
+        resource_title = str(resource.get("title") or slug)
+        log_hdhive_follow_event(
+            "file_list", "running", f"正在读取资源文件列表：{resource_title}",
+            follow=follow, cycle_id=cycle_id, detail={"resource_slug": slug},
+        )
         try:
             file_result = hdhive_call("resource_file_list", slug)
-        except HTTPException:
+        except HTTPException as error:
+            log_hdhive_follow_event(
+                "file_list", "failed",
+                f"资源文件列表读取失败：{resource_title} · {error.detail}",
+                follow=follow, cycle_id=cycle_id,
+                detail={"resource_slug": slug},
+            )
             continue
         candidates = hdhive_file_episode_candidates(slug, file_result, fallback_season)
         allowed = {
@@ -5126,6 +5284,19 @@ def auto_wash_hdhive_follow(
                 follow, candidate, config, emby_present
             )
         }
+        log_hdhive_follow_event(
+            "file_list", "success",
+            (
+                f"资源文件列表读取完成：识别 {len(candidates)} 集，"
+                f"其中 {len(allowed)} 集需要处理"
+            ),
+            follow=follow, cycle_id=cycle_id,
+            detail={
+                "resource_slug": slug,
+                "identified_count": len(candidates),
+                "candidate_count": len(allowed),
+            },
+        )
         if allowed:
             prepared.append((resource, allowed))
 
@@ -5171,7 +5342,15 @@ def auto_wash_hdhive_follow(
     summaries: list[str] = []
     for resource, candidates in prepared:
         slug = str(resource.get("slug") or "")
+        resource_title = str(resource.get("title") or slug)
         target_episodes = {episode for _season, episode in candidates}
+        episode_label = compact_episode_numbers(target_episodes)
+        log_hdhive_follow_event(
+            "unlock", "running",
+            f"正在解锁资源：{resource_title} · 目标第{episode_label}集",
+            follow=follow, cycle_id=cycle_id,
+            detail={"resource_slug": slug, "episodes": sorted(target_episodes)},
+        )
         try:
             unlocked = hdhive_call("unlock", slug)
             data = hdhive_response_data(unlocked)
@@ -5181,7 +5360,18 @@ def auto_wash_hdhive_follow(
                 else ""
             )
             if not is_115_share_url(share_url):
+                log_hdhive_follow_event(
+                    "unlock", "failed", "资源已解锁，但没有返回有效的115链接",
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"resource_slug": slug},
+                )
                 continue
+            log_hdhive_follow_event(
+                "unlock", "success",
+                f"资源解锁成功，正在检查115分享中的第{episode_label}集",
+                follow=follow, cycle_id=cycle_id,
+                detail={"resource_slug": slug},
+            )
             tree = p115_share_tree(client, share_url)
             selected, selected_episodes = select_largest_missing_episode_files(
                 tree, target_episodes
@@ -5192,7 +5382,19 @@ def auto_wash_hdhive_follow(
                 if item.get("_share_id")
             ]
             if not selected_ids or not selected_episodes:
+                log_hdhive_follow_event(
+                    "transfer", "skipped", "115分享中没有找到可安全转存的缺失集文件",
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"resource_slug": slug},
+                )
                 continue
+            selected_label = compact_episode_numbers(selected_episodes)
+            log_hdhive_follow_event(
+                "transfer", "running",
+                f"正在转存第{selected_label}集到115目标目录",
+                follow=follow, cycle_id=cycle_id,
+                detail={"resource_slug": slug, "episodes": sorted(selected_episodes)},
+            )
             before_files = p115_folder_snapshot(client, target_cid)
             received = p115_call(
                 "接收115分享失败",
@@ -5200,12 +5402,37 @@ def auto_wash_hdhive_follow(
                 {"file_id": ",".join(selected_ids), "cid": target_cid},
                 share_url=share_url,
             )
-            if not response_ok(received) or not wait_for_p115_change(
+            if not response_ok(received):
+                log_hdhive_follow_event(
+                    "transfer", "failed", f"115拒绝接收第{selected_label}集",
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"resource_slug": slug},
+                )
+                continue
+            if not wait_for_p115_change(
                 lambda: p115_folder_snapshot(client, target_cid), before_files
             ):
+                log_hdhive_follow_event(
+                    "transfer", "failed",
+                    f"115已受理第{selected_label}集，但未确认目标目录发生变化",
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"resource_slug": slug},
+                )
                 continue
-        except HTTPException:
+        except HTTPException as error:
+            log_hdhive_follow_event(
+                "transfer", "failed", f"资源处理失败：{error.detail}",
+                follow=follow, cycle_id=cycle_id,
+                detail={"resource_slug": slug},
+            )
             continue
+
+        log_hdhive_follow_event(
+            "transfer", "success",
+            f"第{selected_label}集已确认转存到115，等待 PanSave 整理与 Emby 入库",
+            follow=follow, cycle_id=cycle_id,
+            detail={"resource_slug": slug, "episodes": sorted(selected_episodes)},
+        )
 
         checked_at = now_iso()
         for (season, episode), candidate in candidates.items():
@@ -5499,7 +5726,10 @@ def auto_replenish_hdhive_follow(
     }
 
 
-def refresh_hdhive_subscribed_follows(include_unsubscribed: bool = False) -> int:
+def refresh_hdhive_subscribed_follows(
+    include_unsubscribed: bool = False,
+    cycle_id: str = "",
+) -> int:
     with db() as connection:
         query = "SELECT * FROM tv_follows WHERE active = 1"
         if not include_unsubscribed:
@@ -5508,9 +5738,25 @@ def refresh_hdhive_subscribed_follows(include_unsubscribed: bool = False) -> int
     changed = 0
     for follow in follows:
         media_type = str(follow["media_type"] or "tv")
-        result = hdhive_call("resources", media_type, int(follow["tmdb_id"]))
+        log_hdhive_follow_event(
+            "scan", "running", "开始读取影巢追更资源",
+            follow=follow, cycle_id=cycle_id,
+        )
+        try:
+            result = hdhive_call("resources", media_type, int(follow["tmdb_id"]))
+        except HTTPException as error:
+            log_hdhive_follow_event(
+                "scan", "failed", f"影巢追更资源读取失败：{error.detail}",
+                follow=follow, cycle_id=cycle_id,
+            )
+            continue
         resources = normalize_supported_hdhive_resources(
             extract_share_items(result)
+        )
+        log_hdhive_follow_event(
+            "scan", "success", f"影巢资源读取完成，共找到 {len(resources)} 个115候选",
+            follow=follow, cycle_id=cycle_id,
+            detail={"resource_count": len(resources)},
         )
         if media_type == "movie":
             resources = [
@@ -5537,11 +5783,22 @@ def refresh_hdhive_subscribed_follows(include_unsubscribed: bool = False) -> int
         cache_follow_resources(int(follow["id"]), "hdhive", resources)
         wash_config = hdhive_wash_config()
         if wash_config["enabled"]:
-            wash_result = auto_wash_hdhive_follow(int(follow["id"]), resources)
+            wash_result = auto_wash_hdhive_follow(
+                int(follow["id"]), resources, cycle_id=cycle_id
+            )
             transferred = wash_result.get("transferred") or []
             if transferred:
                 changed += len(transferred)
+                log_hdhive_follow_event(
+                    "complete", "success", str(wash_result.get("message") or "追更处理完成"),
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"transferred": transferred},
+                )
             else:
+                log_hdhive_follow_event(
+                    "complete", "skipped", str(wash_result.get("message") or "本次没有需要转存的资源"),
+                    follow=follow, cycle_id=cycle_id,
+                )
                 checked_at = now_iso()
                 with db() as connection:
                     connection.execute(
@@ -5600,7 +5857,10 @@ def refresh_hdhive_subscribed_follows(include_unsubscribed: bool = False) -> int
     return changed
 
 
-def poll_hdhive_follow_messages() -> int:
+def poll_hdhive_follow_messages(
+    refresh_follows: bool = True,
+    cycle_id: str = "",
+) -> int:
     with db() as connection:
         active_count = int(
             connection.execute(
@@ -5609,7 +5869,15 @@ def poll_hdhive_follow_messages() -> int:
             ).fetchone()[0]
         )
     if not active_count:
+        log_hdhive_follow_event(
+            "messages", "skipped", "当前没有已开启的影巢原生追更",
+            cycle_id=cycle_id,
+        )
         return 0
+    log_hdhive_follow_event(
+        "messages", "running", "正在读取影巢未读订阅消息",
+        cycle_id=cycle_id,
+    )
     unread_result = hdhive_call(
         "unread_message_count",
         subscription_only=True,
@@ -5621,6 +5889,10 @@ def poll_hdhive_follow_messages() -> int:
         else 0
     )
     if unread_count <= 0:
+        log_hdhive_follow_event(
+            "messages", "success", "影巢订阅消息读取完成，没有新消息",
+            cycle_id=cycle_id, detail={"unread_count": 0},
+        )
         return 0
     result = hdhive_call(
         "messages",
@@ -5654,7 +5926,13 @@ def poll_hdhive_follow_messages() -> int:
         if message_id > 0:
             message_ids.append(message_id)
     if pending:
-        refresh_hdhive_subscribed_follows()
+        log_hdhive_follow_event(
+            "messages", "success", f"读取到 {len(pending)} 条新订阅消息",
+            cycle_id=cycle_id,
+            detail={"unread_count": unread_count, "new_count": len(pending)},
+        )
+        if refresh_follows:
+            refresh_hdhive_subscribed_follows(cycle_id=cycle_id)
         stored_at = now_iso()
         with db() as connection:
             for message_key, event_type, item in pending:
@@ -5679,6 +5957,47 @@ def poll_hdhive_follow_messages() -> int:
     if message_ids:
         hdhive_call("mark_messages_read", sorted(set(message_ids)))
     return len(pending)
+
+
+def run_hdhive_follow_cycle(
+    *,
+    authorized_scopes: set[str],
+    include_unsubscribed: bool,
+    interval: int,
+) -> dict[str, Any]:
+    cycle_id = secrets.token_hex(8)
+    log_hdhive_follow_event(
+        "poll", "running", "后台追更检查开始",
+        cycle_id=cycle_id,
+        detail={"interval_seconds": interval},
+    )
+    message_count = 0
+    if {"subscription", "messages"}.issubset(authorized_scopes):
+        message_count = poll_hdhive_follow_messages(
+            refresh_follows=False, cycle_id=cycle_id
+        )
+        changed = refresh_hdhive_subscribed_follows(
+            include_unsubscribed=include_unsubscribed,
+            cycle_id=cycle_id,
+        )
+    else:
+        changed = refresh_hdhive_subscribed_follows(
+            include_unsubscribed=True, cycle_id=cycle_id
+        )
+    with db() as connection:
+        set_setting(connection, "hdhive_last_poll_at", now_iso())
+        set_setting(connection, "hdhive_last_poll_error", "")
+    log_hdhive_follow_event(
+        "poll", "success", "后台追更检查完成",
+        cycle_id=cycle_id,
+        detail={"message_count": message_count, "changed_count": changed},
+    )
+    cleanup_hdhive_follow_events()
+    return {
+        "cycle_id": cycle_id,
+        "message_count": message_count,
+        "changed_count": changed,
+    }
 
 
 def hdhive_follow_loop() -> None:
@@ -5723,20 +6042,18 @@ def hdhive_follow_loop() -> None:
                 and configured
                 and time.time() - last_time >= interval
             ):
-                if {"subscription", "messages"}.issubset(authorized_scopes):
-                    poll_hdhive_follow_messages()
-                    if unsubscribed_count:
-                        refresh_hdhive_subscribed_follows(include_unsubscribed=True)
-                else:
-                    # Existing query scope remains a safe fallback while the
-                    # administrator is adding subscription/messages scopes.
-                    refresh_hdhive_subscribed_follows(include_unsubscribed=True)
-                with db() as connection:
-                    set_setting(connection, "hdhive_last_poll_at", now_iso())
-                    set_setting(connection, "hdhive_last_poll_error", "")
+                run_hdhive_follow_cycle(
+                    authorized_scopes=authorized_scopes,
+                    include_unsubscribed=bool(unsubscribed_count),
+                    interval=interval,
+                )
         except Exception as error:
             with db() as connection:
                 set_setting(connection, "hdhive_last_poll_error", str(error)[:240])
+            log_hdhive_follow_event(
+                "poll", "failed", f"后台追更检查异常：{error}",
+                cycle_id=locals().get("cycle_id", ""),
+            )
         time.sleep(60)
 
 
@@ -6506,6 +6823,77 @@ def hdhive_admin_status(
     return hdhive_public_status()
 
 
+@APP.get("/api/admin/hdhive/follow-events")
+def hdhive_follow_events(
+    status: str = "",
+    stage: str = "",
+    follow_id: int = 0,
+    limit: int = 200,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    status = str(status or "").strip().lower()
+    stage = str(stage or "").strip().lower()
+    allowed_statuses = {"running", "success", "skipped", "failed", "info"}
+    allowed_stages = {
+        "subscription", "poll", "messages", "scan", "file_list", "unlock",
+        "transfer", "complete", "library"
+    }
+    if status and status not in allowed_statuses:
+        raise HTTPException(400, "追更日志状态筛选无效")
+    if stage and stage not in allowed_stages:
+        raise HTTPException(400, "追更日志步骤筛选无效")
+    conditions: list[str] = []
+    values: list[Any] = []
+    if status:
+        conditions.append("e.status = ?")
+        values.append(status)
+    if stage:
+        conditions.append("e.stage = ?")
+        values.append(stage)
+    if follow_id > 0:
+        conditions.append("e.follow_id = ?")
+        values.append(int(follow_id))
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    safe_limit = max(20, min(500, int(limit or 200)))
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT e.*, u.display_name FROM hdhive_follow_events e "
+            "LEFT JOIN users u ON u.id = e.user_id "
+            f"{where} ORDER BY e.id DESC LIMIT ?",
+            (*values, safe_limit),
+        ).fetchall()
+        summary_rows = connection.execute(
+            "SELECT status, COUNT(*) AS count FROM hdhive_follow_events "
+            "WHERE created_at >= ? GROUP BY status",
+            ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),),
+        ).fetchall()
+    events = []
+    for row in rows:
+        try:
+            detail = json.loads(str(row["detail_json"] or "{}"))
+        except json.JSONDecodeError:
+            detail = {}
+        events.append(
+            {
+                "id": int(row["id"]),
+                "cycle_id": row["cycle_id"],
+                "follow_id": row["follow_id"],
+                "display_name": row["display_name"] or "",
+                "tmdb_id": int(row["tmdb_id"] or 0),
+                "title": row["title"],
+                "stage": row["stage"],
+                "status": row["status"],
+                "message": row["message"],
+                "detail": detail,
+                "created_at": row["created_at"],
+            }
+        )
+    summary = {key: 0 for key in allowed_statuses}
+    summary.update({str(row["status"]): int(row["count"]) for row in summary_rows})
+    return {"events": events, "summary": summary, "window_hours": 24}
+
+
 @APP.patch("/api/admin/hdhive/config")
 async def update_hdhive_config(
     request: Request,
@@ -7116,6 +7504,10 @@ def bind_hdhive_follow_subscription(
             "JOIN users u ON u.id = f.user_id WHERE f.id = ?",
             (follow_id,),
         ).fetchone()
+    log_hdhive_follow_event(
+        "subscription", "success", message, follow=row,
+        detail={"subscription_id": subscription_id, "target_key": target["target_key"]},
+    )
     return row
 
 

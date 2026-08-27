@@ -1109,6 +1109,79 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         read_call = next(call for call in calls if call[0] == "mark_messages_read")
         self.assertEqual(read_call[1][0], [9001])
 
+    def test_follow_event_log_is_visible_to_admin(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+        app.log_hdhive_follow_event(
+            "scan", "success", "影巢资源读取完成，共找到 8 个115候选",
+            follow_id=follow_id, cycle_id="cycle-test",
+            detail={"resource_count": 8},
+        )
+
+        result = app.hdhive_follow_events(movie_session=self.admin_token)
+
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(result["events"][0]["title"], "仙逆")
+        self.assertEqual(result["events"][0]["detail"]["resource_count"], 8)
+        self.assertEqual(result["summary"]["success"], 1)
+        with self.assertRaises(app.HTTPException) as denied:
+            app.hdhive_follow_events(movie_session=self.token)
+        self.assertEqual(denied.exception.status_code, 403)
+
+    def test_follow_cycle_scans_resources_even_without_new_message(self):
+        with patch.object(
+            app, "poll_hdhive_follow_messages", return_value=0
+        ) as messages:
+            with patch.object(
+                app, "refresh_hdhive_subscribed_follows", return_value=3
+            ) as refresh:
+                result = app.run_hdhive_follow_cycle(
+                    authorized_scopes={"subscription", "messages"},
+                    include_unsubscribed=False,
+                    interval=1800,
+                )
+
+        self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["changed_count"], 3)
+        messages.assert_called_once_with(
+            refresh_follows=False, cycle_id=result["cycle_id"]
+        )
+        refresh.assert_called_once_with(
+            include_unsubscribed=False, cycle_id=result["cycle_id"]
+        )
+
+    def test_emby_library_confirmation_is_added_to_follow_log(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+
+        app.log_follow_library_event(
+            "p115", 223911, "Emby Webhook 已确认入库：S01E155",
+            detail={"episode_numbers": [155]},
+        )
+
+        result = app.hdhive_follow_events(
+            stage="library", movie_session=self.admin_token
+        )
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(result["events"][0]["status"], "success")
+        self.assertIn("S01E155", result["events"][0]["message"])
+
     def test_auto_wash_processes_changed_candidate_once_per_fingerprint(self):
         with app.db() as connection:
             user_id = connection.execute(

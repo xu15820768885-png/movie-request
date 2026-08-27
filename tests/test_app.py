@@ -2301,6 +2301,44 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(second, (set(), 0))
         notify.assert_called_once_with(item, "movie", destination="p115")
 
+    def test_exact_webhook_retries_until_new_item_is_queryable(self):
+        item = {
+            "Id": "delayed-episode",
+            "Type": "Episode",
+            "SeriesId": "series-1",
+            "SeriesName": "仙逆",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 155,
+        }
+        series = {
+            "Id": "series-1",
+            "Type": "Series",
+            "Name": "仙逆",
+            "ProviderIds": {"Tmdb": "223911"},
+        }
+
+        def lookup(_destination, item_id):
+            if item_id == "series-1":
+                return series
+            lookup.calls += 1
+            return None if lookup.calls == 1 else item
+
+        lookup.calls = 0
+        with patch.object(app, "emby_library_item", side_effect=lookup):
+            with patch.object(app.time, "sleep") as sleep:
+                with patch.object(app, "send_mp_library_notification") as notify:
+                    result = app.sync_emby_webhook_notifications(
+                        "p115",
+                        {"delayed-episode": "Episode"},
+                        lookup_attempts=3,
+                        retry_delay_seconds=0.1,
+                    )
+
+        self.assertEqual(result, ({223911}, 1))
+        self.assertEqual(lookup.calls, 2)
+        sleep.assert_called_once_with(0.1)
+        notify.assert_called_once_with(series, "tv", "S01 E155", destination="p115")
+
     def test_emby_webhook_runs_immediate_sync_and_clears_pending_state(self):
         with app.EMBY_WEBHOOK_LOCK:
             app.EMBY_WEBHOOK_PENDING.add("p123")
