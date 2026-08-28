@@ -544,7 +544,7 @@
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
         <button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button>
-        <button id="followLogTab" class="tab hidden" data-view="followLog">追更日志</button>
+        <button id="followLogTab" class="tab hidden" data-view="followLog">管理日志</button>
         <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
         <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
         <button id="storageTab" class="tab hidden" data-view="storage">资源和网盘</button>
@@ -558,7 +558,7 @@
       </section>
       <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看影巢原生追更、115自动洗版窗口和 Emby 入库进度</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="followLogView" class="view hidden">
-        <div class="section-head"><div><h2>追更日志</h2><span>查看影巢消息、资源识别、解锁、115转存及等待入库的完整过程</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新日志</button></div>
+        <div class="section-head"><div><h2>管理日志</h2><span>查看追更及完结资源的识别、解锁、转存和等待入库过程</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新日志</button></div>
         <div class="follow-log-summary">
           <div class="follow-log-stat"><span>最近24小时成功记录</span><strong id="followLogSuccess">0</strong></div>
           <div class="follow-log-stat"><span>失败记录</span><strong id="followLogFailed">0</strong></div>
@@ -569,8 +569,9 @@
           <div class="follow-log-toolbar">
             <label>处理步骤<select id="followLogStage"><option value="">全部步骤</option><option value="messages">站内信</option><option value="scan">资源扫描</option><option value="file_list">文件识别</option><option value="unlock">资源解锁</option><option value="transfer">115转存</option><option value="library">Emby入库</option><option value="complete">处理结果</option><option value="poll">后台轮询</option><option value="subscription">订阅绑定</option></select></label>
             <label>处理状态<select id="followLogStatus"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">无需处理</option><option value="running">开始执行</option></select></label>
+            <label>资源状态<select id="followLogResourceStatus"><option value="">全部资源</option><option value="ongoing">未完结（追更中）</option><option value="completed">已完结</option></select></label>
           </div>
-          <div id="followEventList" class="follow-event-list"><div class="empty">正在读取追更日志…</div></div>
+          <div id="followEventList" class="follow-event-list"><div class="empty">正在读取管理日志…</div></div>
         </div>
       </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
@@ -775,9 +776,10 @@
       {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'影巢原生订阅已开启，等待第233集资源',active:true,hdhive_subscribed:true,hdhive_subscription_id:9001}
     ];
     const demoFollowEvents = [
-      {id:4,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',created_at:new Date().toISOString()},
-      {id:3,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',message:'资源解锁成功，正在检查115分享中的第233集',created_at:new Date(Date.now()-30000).toISOString()},
-      {id:2,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'scan',status:'success',message:'影巢资源读取完成，共找到 8 个115候选',created_at:new Date(Date.now()-60000).toISOString()},
+      {id:5,title:'繁花',display_name:'妈妈',tmdb_id:119543,stage:'unlock',status:'success',resource_status:'completed',message:'影巢资源解锁成功，正在提交到网盘',created_at:new Date().toISOString()},
+      {id:4,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',resource_status:'ongoing',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',created_at:new Date().toISOString()},
+      {id:3,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第233集',created_at:new Date(Date.now()-30000).toISOString()},
+      {id:2,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'scan',status:'success',resource_status:'ongoing',message:'影巢资源读取完成，共找到 8 个115候选',created_at:new Date(Date.now()-60000).toISOString()},
       {id:1,title:'',display_name:'',tmdb_id:0,stage:'messages',status:'success',message:'读取到 1 条新订阅消息',created_at:new Date(Date.now()-90000).toISOString()}
     ];
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1126,8 +1128,8 @@
       if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'123':'115'}…`;}
       try {
         const result=provider==='hdhive'
-          ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
-          : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})});
+          ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,resource_status:currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?'ongoing':'completed',transfer_scope:scope})})
+          : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,resource_status:currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?'ongoing':'completed',transfer_scope:scope})});
         button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已完成转存';
         if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已转存';}
         markInitialTransferComplete();
@@ -1185,25 +1187,26 @@
       refreshFollowEmbyProgress(follows);
     }
     async function loadFollowEvents() {
-      const root=$('followEventList');root.innerHTML='<div class="empty">正在读取追更日志…</div>';
-      const stage=$('followLogStage').value;const status=$('followLogStatus').value;
+      const root=$('followEventList');root.innerHTML='<div class="empty">正在读取管理日志…</div>';
+      const stage=$('followLogStage').value;const status=$('followLogStatus').value;const resourceStatus=$('followLogResourceStatus').value;
       try {
         const data=preview
           ? {events:demoFollowEvents,summary:{success:3,failed:0,skipped:0,running:0}}
-          : await api(`/api/admin/hdhive/follow-events?limit=300&stage=${encodeURIComponent(stage)}&status=${encodeURIComponent(status)}`);
+          : await api(`/api/admin/hdhive/follow-events?limit=300&stage=${encodeURIComponent(stage)}&status=${encodeURIComponent(status)}&resource_status=${encodeURIComponent(resourceStatus)}`);
         const summary=data.summary||{};
         $('followLogSuccess').textContent=summary.success||0;$('followLogFailed').textContent=summary.failed||0;$('followLogSkipped').textContent=summary.skipped||0;$('followLogRunning').textContent=summary.running||0;
         const stageLabels={subscription:'订阅绑定',poll:'后台轮询',messages:'站内信',scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
         const statusLabels={running:'开始执行',success:'成功',skipped:'无需处理',failed:'失败',info:'信息'};
-        const events=(data.events||[]).filter(event=>(!stage||event.stage===stage)&&(!status||event.status===status));
+        const events=(data.events||[]).filter(event=>(!stage||event.stage===stage)&&(!status||event.status===status)&&(!resourceStatus||event.resource_status===resourceStatus));
         root.innerHTML=events.length?events.map(event=>{
           const time=new Date(event.created_at);const timeLabel=Number.isNaN(time.getTime())?event.created_at:time.toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'});
           const owner=event.display_name?` · ${escapeHtml(event.display_name)}`:'';
           const media=event.title?`${escapeHtml(event.title)}${owner}`:'系统后台';
-          const meta=event.tmdb_id?`TMDB ${event.tmdb_id}`:event.cycle_id?`检查批次 ${escapeHtml(event.cycle_id)}`:'';
+          const resourceStatusLabel=event.resource_status==='ongoing'?'未完结（追更中）':event.resource_status==='completed'?'已完结':'';
+          const metaParts=[];if(event.tmdb_id)metaParts.push(`TMDB ${event.tmdb_id}`);else if(event.cycle_id)metaParts.push(`检查批次 ${escapeHtml(event.cycle_id)}`);if(resourceStatusLabel)metaParts.push(resourceStatusLabel);const meta=metaParts.join(' · ');
           return `<article class="follow-event ${escapeHtml(event.status)}"><div class="follow-event-time">${escapeHtml(timeLabel)}<br>${escapeHtml(statusLabels[event.status]||event.status)}</div><div><div class="follow-event-title">${media}</div><div class="follow-event-message">${escapeHtml(event.message)}</div>${meta?`<div class="follow-event-meta">${meta}</div>`:''}</div><span class="follow-event-stage">${escapeHtml(stageLabels[event.stage]||event.stage)}</span></article>`;
-        }).join(''):'<div class="empty">当前筛选条件下还没有追更日志</div>';
-      } catch(error) {root.innerHTML=`<div class="empty">追更日志读取失败：${escapeHtml(error.message)}</div>`;}
+        }).join(''):'<div class="empty">当前筛选条件下还没有管理日志</div>';
+      } catch(error) {root.innerHTML=`<div class="empty">管理日志读取失败：${escapeHtml(error.message)}</div>`;}
     }
     async function refreshFollowEmbyProgress(follows) {
       if(preview)return;
@@ -1261,6 +1264,7 @@
           media_type:mediaType,
           title:follow.title,
           resource_title:resource.title,
+          resource_status:'ongoing',
           transfer_scope:scope
         })});
         button.textContent=result.mode==='offline'?'离线下载中':'已完成转存';
@@ -1567,6 +1571,7 @@
     $('refreshHealth').onclick=loadHealth;
     $('followLogStage').onchange=loadFollowEvents;
     $('followLogStatus').onchange=loadFollowEvents;
+    $('followLogResourceStatus').onchange=loadFollowEvents;
     document.querySelectorAll('[data-settings-panel]').forEach(button=>button.onclick=()=>{
       document.querySelectorAll('[data-settings-panel]').forEach(item=>item.classList.toggle('active',item===button));
       document.querySelectorAll('[data-settings-content]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.settingsContent!==button.dataset.settingsPanel));

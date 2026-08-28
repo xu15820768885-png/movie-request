@@ -1447,11 +1447,35 @@ class HDHiveFollowRouteTests(unittest.TestCase):
 
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(result["events"][0]["title"], "仙逆")
+        self.assertEqual(result["events"][0]["resource_status"], "ongoing")
         self.assertEqual(result["events"][0]["detail"]["resource_count"], 8)
         self.assertEqual(result["summary"]["success"], 1)
         with self.assertRaises(app.HTTPException) as denied:
             app.hdhive_follow_events(movie_session=self.token)
         self.assertEqual(denied.exception.status_code, 403)
+
+    def test_management_log_includes_and_filters_completed_manual_unlocks(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+        app.log_hdhive_follow_event(
+            "unlock", "success", "影巢资源解锁成功，正在提交到网盘",
+            user_id=user_id, tmdb_id=119543, title="繁花",
+            detail={"source": "hdhive", "resource_status": "completed"},
+        )
+
+        completed = app.hdhive_follow_events(
+            resource_status="completed", movie_session=self.admin_token
+        )
+        ongoing = app.hdhive_follow_events(
+            resource_status="ongoing", movie_session=self.admin_token
+        )
+
+        self.assertEqual(len(completed["events"]), 1)
+        self.assertEqual(completed["events"][0]["title"], "繁花")
+        self.assertEqual(completed["events"][0]["resource_status"], "completed")
+        self.assertEqual(ongoing["events"], [])
 
     def test_follow_cycle_runs_daily_reconciliation_without_new_message(self):
         with patch.object(

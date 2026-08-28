@@ -1988,14 +1988,14 @@ def log_hdhive_follow_event(
     *,
     follow: Optional[sqlite3.Row] = None,
     follow_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    tmdb_id: int = 0,
+    title: str = "",
     cycle_id: str = "",
     detail: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Persist a user-facing follow event without affecting the worker."""
+    """Persist a user-facing resource-management event without affecting work."""
     try:
-        user_id: Optional[int] = None
-        tmdb_id = 0
-        title = ""
         if follow is not None:
             follow_id = int(follow["id"])
             user_id = int(follow["user_id"])
@@ -2043,6 +2043,16 @@ def cleanup_hdhive_follow_events(keep: int = 5000) -> None:
             )
     except Exception:
         LOGGER.exception("failed to prune HDHive follow events")
+
+
+def management_resource_status(payload: dict[str, Any], has_follow: bool = False) -> str:
+    """Normalize the completed/ongoing label stored with management events."""
+    if has_follow:
+        return "ongoing"
+    value = str(payload.get("resource_status") or "").strip().lower()
+    if value in {"ongoing", "completed"}:
+        return value
+    return "completed" if str(payload.get("media_type") or "") == "movie" else ""
 
 
 def log_follow_library_event(
@@ -8031,6 +8041,7 @@ def hdhive_admin_status(
 def hdhive_follow_events(
     status: str = "",
     stage: str = "",
+    resource_status: str = "",
     follow_id: int = 0,
     limit: int = 200,
     movie_session: Optional[str] = Cookie(default=None),
@@ -8038,15 +8049,18 @@ def hdhive_follow_events(
     require_admin(movie_session)
     status = str(status or "").strip().lower()
     stage = str(stage or "").strip().lower()
+    resource_status = str(resource_status or "").strip().lower()
     allowed_statuses = {"running", "success", "skipped", "failed", "info"}
     allowed_stages = {
         "subscription", "poll", "messages", "scan", "file_list", "unlock",
         "transfer", "complete", "library"
     }
     if status and status not in allowed_statuses:
-        raise HTTPException(400, "追更日志状态筛选无效")
+        raise HTTPException(400, "管理日志状态筛选无效")
     if stage and stage not in allowed_stages:
-        raise HTTPException(400, "追更日志步骤筛选无效")
+        raise HTTPException(400, "管理日志步骤筛选无效")
+    if resource_status and resource_status not in {"ongoing", "completed"}:
+        raise HTTPException(400, "管理日志资源状态筛选无效")
     conditions: list[str] = []
     values: list[Any] = []
     if status:
@@ -8058,6 +8072,13 @@ def hdhive_follow_events(
     if follow_id > 0:
         conditions.append("e.follow_id = ?")
         values.append(int(follow_id))
+    if resource_status:
+        conditions.append(
+            "CASE WHEN e.follow_id IS NOT NULL THEN 'ongoing' "
+            "ELSE COALESCE(json_extract(e.detail_json, '$.resource_status'), '') "
+            "END = ?"
+        )
+        values.append(resource_status)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     safe_limit = max(20, min(500, int(limit or 200)))
     with db() as connection:
@@ -8089,6 +8110,10 @@ def hdhive_follow_events(
                 "stage": row["stage"],
                 "status": row["status"],
                 "message": row["message"],
+                "resource_status": str(
+                    detail.get("resource_status")
+                    or ("ongoing" if row["follow_id"] else "")
+                ),
                 "detail": detail,
                 "created_at": row["created_at"],
             }
@@ -9055,6 +9080,14 @@ async def hdhive_transfer(
             "AND active = 1",
             (int(user["id"]), tmdb_id),
         ).fetchone()
+    event_follow_id = int(follow_row["id"]) if follow_row else None
+    resource_status = management_resource_status(payload, bool(follow_row))
+    event_detail = {
+        "source": "hdhive",
+        "resource_slug": slug,
+        "media_type": media_type,
+        "resource_status": resource_status,
+    }
     job = begin_workflow_job(
         user_id=int(user["id"]),
         destination=str(user["storage_destination"]),
@@ -9065,17 +9098,50 @@ async def hdhive_transfer(
         title=str(payload.get("title") or payload.get("resource_title") or ""),
         season_number=int(title_spec["season_number"]),
         episode_numbers=selected_episode_numbers,
-        follow_id=int(follow_row["id"]) if follow_row else None,
+        follow_id=event_follow_id,
         scope=transfer_scope,
     )
     attach_workflow_job_to_request(request, int(job["id"]))
-    unlocked = await asyncio.to_thread(hdhive_call, "unlock", slug)
+    log_hdhive_follow_event(
+        "unlock", "running", "正在解锁影巢资源",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
+    )
+    try:
+        unlocked = await asyncio.to_thread(hdhive_call, "unlock", slug)
+    except Exception as error:
+        log_hdhive_follow_event(
+            "unlock", "failed", f"影巢资源解锁失败：{error}",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
+        )
+        raise
     data = unlocked.get("data", unlocked)
     if not isinstance(data, dict):
+        log_hdhive_follow_event(
+            "unlock", "failed", "影巢解锁结果格式无效",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
+        )
         raise HTTPException(502, "影巢解锁结果格式无效")
     share_url = str(data.get("full_url") or data.get("url") or "").strip()
     if not share_url:
+        log_hdhive_follow_event(
+            "unlock", "failed", "影巢解锁后没有返回资源链接",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
+        )
         raise HTTPException(502, "影巢解锁后没有返回资源链接")
+    log_hdhive_follow_event(
+        "unlock", "success", "影巢资源解锁成功，正在提交到网盘",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
+    )
 
     if user.get("storage_destination") == "p123":
         result = await deliver_to_pansave(
@@ -9090,6 +9156,12 @@ async def hdhive_transfer(
         )
         update_workflow_job(
             int(job["id"]), "waiting_library", "链接已发送123，等待整理与入库"
+        )
+        log_hdhive_follow_event(
+            "transfer", "success", "影巢资源链接已发送123，等待整理与入库",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
         )
         return {**result, "job_id": int(job["id"]), "workflow_state": "waiting_library"}
 
@@ -9181,6 +9253,12 @@ async def hdhive_transfer(
         f"{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
     update_workflow_job(int(job["id"]), workflow_state, message)
+    log_hdhive_follow_event(
+        "transfer", "success", f"影巢资源{message}",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
+    )
     return {
         "ok": True,
         "mode": mode,
@@ -9214,6 +9292,14 @@ async def dian_transfer(
             "AND active = 1",
             (int(user["id"]), tmdb_id),
         ).fetchone()
+    event_follow_id = int(follow_row["id"]) if follow_row else None
+    resource_status = management_resource_status(payload, bool(follow_row))
+    event_detail = {
+        "source": "dian",
+        "resource_key": resource_key,
+        "media_type": media_type,
+        "resource_status": resource_status,
+    }
     job = begin_workflow_job(
         user_id=int(user["id"]),
         destination=str(user["storage_destination"]),
@@ -9224,15 +9310,30 @@ async def dian_transfer(
         title=str(payload.get("title") or payload.get("resource_title") or ""),
         season_number=int(title_spec["season_number"]),
         episode_numbers=selected_episode_numbers,
-        follow_id=int(follow_row["id"]) if follow_row else None,
+        follow_id=event_follow_id,
         scope=transfer_scope,
     )
     attach_workflow_job_to_request(request, int(job["id"]))
-    unlocked = await asyncio.to_thread(
-        dian_call,
-        "unlock",
-        {"share_id": share_id, "resource_id": resource_id},
+    log_hdhive_follow_event(
+        "unlock", "running", "正在解锁癫影资源",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
     )
+    try:
+        unlocked = await asyncio.to_thread(
+            dian_call,
+            "unlock",
+            {"share_id": share_id, "resource_id": resource_id},
+        )
+    except Exception as error:
+        log_hdhive_follow_event(
+            "unlock", "failed", f"癫影资源解锁失败：{error}",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
+        )
+        raise
     unlocked_data = unlocked.get("data", unlocked)
     data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
     unlock_payload = data.get("payload") if "payload" in data else data
@@ -9244,12 +9345,24 @@ async def dian_transfer(
             if isinstance(unlock_payload, dict)
             else "非对象"
         )
+        log_hdhive_follow_event(
+            "unlock", "failed", "癫影解锁后没有返回可用链接",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
+        )
         raise HTTPException(
             502,
             "癫影 unlock 返回的 payload 中没有可用链接；"
             f"payload 类型：{payload_type}；payload 字段：{payload_fields}",
         )
     share_url = links[0]
+    log_hdhive_follow_event(
+        "unlock", "success", "癫影资源解锁成功，正在提交到网盘",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
+    )
     if user.get("storage_destination") == "p123":
         result = await deliver_to_pansave(
             user=user,
@@ -9263,6 +9376,12 @@ async def dian_transfer(
         )
         update_workflow_job(
             int(job["id"]), "waiting_library", "链接已发送123，等待整理与入库"
+        )
+        log_hdhive_follow_event(
+            "transfer", "success", "癫影资源链接已发送123，等待整理与入库",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
         )
         return {**result, "job_id": int(job["id"]), "workflow_state": "waiting_library"}
 
@@ -9318,6 +9437,12 @@ async def dian_transfer(
         )
         update_workflow_job(
             int(job["id"]), "submitted", f"已创建{len(links)}个115离线任务"
+        )
+        log_hdhive_follow_event(
+            "transfer", "success", f"癫影资源已创建{len(links)}个115离线任务",
+            follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            detail=event_detail,
         )
         return {
             "ok": True,
@@ -9380,6 +9505,12 @@ async def dian_transfer(
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
     update_workflow_job(int(job["id"]), "waiting_library", "已确认115转存，等待入库")
+    log_hdhive_follow_event(
+        "transfer", "success", "癫影资源已确认115转存，等待入库",
+        follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        detail=event_detail,
+    )
     return {
         "ok": True,
         "mode": "share",

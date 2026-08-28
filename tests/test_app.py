@@ -1909,6 +1909,7 @@ class MovieRequestTests(unittest.TestCase):
             "media_type": "movie",
             "title": "测试电影",
             "resource_title": "测试电影 4K",
+            "resource_status": "completed",
             "destination": "p115",
         }
         with patch.object(
@@ -1932,6 +1933,11 @@ class MovieRequestTests(unittest.TestCase):
             delivered.await_args.kwargs["share_url"],
             "https://115.com/s/example",
         )
+        events = app.hdhive_follow_events(
+            resource_status="completed", movie_session=self.token
+        )["events"]
+        self.assertEqual([event["stage"] for event in events], ["transfer", "unlock", "unlock"])
+        self.assertTrue(all(event["resource_status"] == "completed" for event in events))
 
     def test_hdhive_115_transfer_waits_until_target_folder_changes(self):
         class FakeP115:
