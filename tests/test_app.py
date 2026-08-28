@@ -440,7 +440,7 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(request["title"], "仙逆")
         self.assertEqual(request["media_type"], "tv")
 
-    def test_emby_sync_removes_movie_and_tv_requests_after_ingest(self):
+    def test_emby_sync_completes_movie_and_tv_requests_after_ingest(self):
         timestamp = app.now_iso()
         with app.db() as connection:
             user_id = connection.execute(
@@ -467,12 +467,12 @@ class MovieRequestTests(unittest.TestCase):
             removed = app.sync_emby_requests(force=True)
 
         with app.db() as connection:
-            remaining = connection.execute(
-                "SELECT COUNT(*) FROM movie_requests "
-                "WHERE tmdb_id IN (1001, 1002)"
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests WHERE tmdb_id IN (1001, 1002) "
+                "AND status = 'available' AND completed_at != ''"
             ).fetchone()[0]
         self.assertEqual(removed, 2)
-        self.assertEqual(remaining, 0)
+        self.assertEqual(completed, 2)
 
     def test_details_include_story_cast_and_recommendations(self):
         details = {
@@ -2081,10 +2081,11 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(removed, 2)
         self.assertEqual(notify.call_count, 2)
         with app.db() as connection:
-            remaining = connection.execute(
-                "SELECT COUNT(*) FROM movie_requests"
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests WHERE status = 'available' "
+                "AND completed_at != ''"
             ).fetchone()[0]
-        self.assertEqual(remaining, 0)
+        self.assertEqual(completed, 2)
 
     def test_notification_fanout_sends_telegram_and_wecom(self):
         with patch.object(app, "send_telegram") as telegram:
@@ -2092,6 +2093,143 @@ class MovieRequestTests(unittest.TestCase):
                 app.send_notifications("测试通知")
         telegram.assert_called_once_with("测试通知")
         wecom.assert_called_once_with("测试通知")
+
+    def test_notification_outbox_retries_and_deduplicates(self):
+        with app.db() as connection:
+            app.set_setting(connection, "telegram_token", "bot-token")
+            app.set_setting(connection, "telegram_chat_id", "123")
+        self.assertEqual(app.enqueue_notifications("入库成功", "event-1"), 1)
+        self.assertEqual(app.enqueue_notifications("入库成功", "event-1"), 0)
+
+        with patch.object(app, "telegram_request", return_value={}):
+            result = app.process_notification_outbox()
+        self.assertEqual(result, {"sent": 0, "failed": 1})
+        with app.db() as connection:
+            failed = connection.execute(
+                "SELECT * FROM notification_outbox"
+            ).fetchone()
+            connection.execute(
+                "UPDATE notification_outbox SET next_retry_at = '' WHERE id = ?",
+                (failed["id"],),
+            )
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["attempt_count"], 1)
+
+        with patch.object(app, "telegram_request", return_value={"ok": True}) as send:
+            result = app.process_notification_outbox()
+        self.assertEqual(result, {"sent": 1, "failed": 0})
+        send.assert_called_once()
+        with app.db() as connection:
+            sent = connection.execute("SELECT * FROM notification_outbox").fetchone()
+        self.assertEqual(sent["status"], "sent")
+
+    def test_workflow_job_is_idempotent_and_retryable_after_failure(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-1",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆 S01E156",
+            season_number=1,
+            episode_numbers=[156],
+        )
+        self.assertEqual(job["state"], "unlocking")
+        with self.assertRaises(app.HTTPException) as duplicate:
+            app.begin_workflow_job(
+                user_id=1,
+                destination="p115",
+                source="hdhive",
+                resource_key="share-1",
+                tmdb_id=223911,
+                media_type="tv",
+                title="仙逆 S01E156",
+                season_number=1,
+                episode_numbers=[156],
+            )
+        self.assertEqual(duplicate.exception.status_code, 409)
+
+        app.fail_workflow_job(int(job["id"]), "网络失败", retry_seconds=0)
+        retried = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-1",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆 S01E156",
+            season_number=1,
+            episode_numbers=[156],
+        )
+        self.assertEqual(retried["id"], job["id"])
+        self.assertEqual(retried["attempt_count"], 2)
+
+    def test_transfer_and_workflow_evidence_are_isolated_by_destination(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="destination-test",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆",
+            season_number=1,
+            episode_numbers=[156],
+        )
+        app.update_workflow_job(int(job["id"]), "waiting_library")
+        self.assertTrue(app.has_initial_media_submission(223911, 1, "p115"))
+        self.assertFalse(app.has_initial_media_submission(223911, 1, "p123"))
+
+        app.record_transfer(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="destination-test",
+            tmdb_id=223911,
+            transfer_scope="manual",
+            status="success",
+            detail="已转存",
+        )
+        self.assertTrue(app.has_manual_transfer(223911, 1, "p115"))
+        self.assertFalse(app.has_manual_transfer(223911, 1, "p123"))
+
+    def test_tv_workflow_completes_only_after_exact_episode_is_in_emby(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-156",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆 S01E156",
+            season_number=1,
+            episode_numbers=[156],
+        )
+        app.update_workflow_job(int(job["id"]), "waiting_library", "等待入库")
+        with patch.object(
+            app,
+            "destination_episode_progress",
+            return_value={"emby_episode_numbers": {"1": list(range(1, 156))}},
+        ):
+            self.assertEqual(
+                app.complete_workflow_jobs_from_library("p115", {223911}), 0
+            )
+        with patch.object(
+            app,
+            "destination_episode_progress",
+            return_value={"emby_episode_numbers": {"1": list(range(1, 157))}},
+        ):
+            self.assertEqual(
+                app.complete_workflow_jobs_from_library("p115", {223911}), 1
+            )
+        with app.db() as connection:
+            completed = connection.execute(
+                "SELECT state, completed_at FROM media_workflow_jobs WHERE id = ?",
+                (job["id"],),
+            ).fetchone()
+        self.assertEqual(completed["state"], "ingested")
+        self.assertTrue(completed["completed_at"])
 
     def test_emby_library_monitor_baselines_then_notifies_new_media(self):
         baseline = [
@@ -2395,7 +2533,7 @@ class MovieRequestTests(unittest.TestCase):
                 app.sync_emby_library_notifications("p115")
         notify.assert_not_called()
 
-    def test_rich_emby_notification_still_auto_removes_matching_request(self):
+    def test_rich_emby_notification_still_completes_matching_request(self):
         timestamp = app.now_iso()
         with app.db() as connection:
             connection.execute(
@@ -2413,10 +2551,11 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(removed, 1)
         duplicate_notice.assert_not_called()
         with app.db() as connection:
-            remaining = connection.execute(
-                "SELECT COUNT(*) FROM movie_requests WHERE tmdb_id = 303"
+            completed = connection.execute(
+                "SELECT COUNT(*) FROM movie_requests WHERE tmdb_id = 303 "
+                "AND status = 'available' AND completed_at != ''"
             ).fetchone()[0]
-        self.assertEqual(remaining, 0)
+        self.assertEqual(completed, 1)
 
     def test_mp_library_notification_matches_resource_added_template(self):
         details = {

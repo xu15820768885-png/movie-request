@@ -221,6 +221,18 @@
     .follow-event-message { margin-top: 5px; color: #d6d1ca; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
     .follow-event-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
     .follow-event-stage { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 10px; white-space: nowrap; }
+    .activity-overview { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:16px 0 24px; }
+    .activity-card { padding:13px 14px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+    .activity-card span { display:block; color:var(--muted); font-size:10px; }
+    .activity-card strong { display:block; margin-top:5px; font-size:20px; }
+    .timeline-list { display:grid; gap:7px; margin-top:10px; }
+    .timeline-item { padding:10px 12px; border-left:3px solid var(--blue); border-radius:9px; background:rgba(255,255,255,.025); font-size:11px; line-height:1.55; }
+    .timeline-item.failed { border-left-color:var(--red); }
+    .timeline-item.success, .timeline-item.ingested { border-left-color:var(--green); }
+    .history-block { margin-top:16px; }
+    .history-block summary { cursor:pointer; color:var(--muted); font-weight:800; }
+    .health-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }
+    .health-item { padding:12px; border:1px solid var(--line); border-radius:11px; background:rgba(255,255,255,.02); font-size:11px; line-height:1.55; }
     .panel h3 { margin: 0 0 14px; font-size: 15px; }
     .admin-request { padding: 14px 0; border-bottom: 1px solid var(--line); }
     .admin-request:first-child { padding-top: 0; }
@@ -469,6 +481,7 @@
       .member-create-grid { grid-template-columns: 1fr; }
       .inline { grid-template-columns: 1fr; }
       .follow-log-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .activity-overview, .health-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .follow-log-toolbar { display: grid; grid-template-columns: 1fr; }
       .follow-log-toolbar label { min-width: 0; }
       .follow-event { grid-template-columns: 1fr auto; gap: 8px; }
@@ -519,6 +532,13 @@
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
       <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。</div>
+      <section id="activityOverview" class="activity-overview" aria-label="映单处理概览">
+        <div class="activity-card"><span>处理中需求</span><strong id="activityRequests">0</strong></div>
+        <div class="activity-card"><span>活跃追更</span><strong id="activityFollows">0</strong></div>
+        <div class="activity-card"><span>处理中任务</span><strong id="activityJobs">0</strong></div>
+        <div class="activity-card"><span>失败待重试</span><strong id="activityFailed">0</strong></div>
+        <div class="activity-card"><span>历史已入库</span><strong id="activityCompleted">0</strong></div>
+      </section>
 
       <nav class="tabs">
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
@@ -553,7 +573,7 @@
         </div>
       </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
-      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>资源进入对应 Emby 后会自动清除需求</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，系统会自动清除这条需求。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
+      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>入库后保留为历史记录，不再直接删除</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，会自动标记“已入库”并保留记录。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
         <div class="section-head"><div><h2>资源和网盘</h2><span>按服务分类配置，状态和测速集中查看</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
         <div class="integration-status">
@@ -580,6 +600,8 @@
                 <div class="diagnostic-card"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
                 <div class="diagnostic-card"><strong>癫影 · OpenAPI</strong><div id="diagnosticDian" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="dian">单独重试</button></div>
               </div>
+              <div class="section-head" style="margin-top:18px"><div><h3>后台运行健康</h3><span>查看轮询、通知和入库任务是否真正持续运行</span></div><button id="refreshHealth" class="btn btn-small" type="button">刷新状态</button></div>
+              <div id="workerHealth" class="health-grid"><div class="health-item">正在读取后台状态…</div></div>
             </section>
             <form id="hdhiveForm" class="panel stack storage-panel hidden" data-storage-content="hdhive">
               <div class="storage-panel-head"><h3>影巢 OAuth 与固定出口</h3><p id="hdhiveState">未填写凭证时保持关闭，不影响现有网站</p></div>
@@ -590,8 +612,8 @@
               <label>App Secret<input id="hdhiveAppSecret" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <label>云服务器固定出口代理<input id="hdhiveProxyUrl" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <div class="section-head" style="margin:8px 0 0"><span>原生追更与 PanSave 洗版</span><span id="hdhiveFollowPermission" class="badge badge-approved">等待追加权限</span></div>
-              <div class="inline"><label>订阅检查间隔<select id="hdhivePollInterval"><option value="300">每5分钟</option><option value="900">每15分钟</option><option value="1800">每30分钟</option><option value="3600">每1小时</option></select></label><label>单集洗版窗口<select id="hdhiveWashWindow"><option value="12">12小时</option><option value="24">24小时</option><option value="48">48小时</option><option value="72">72小时</option></select></label></div>
-              <div class="inline"><label>单集最多处理次数<select id="hdhiveMaxTransfers"><option value="1">1次</option><option value="2">2次</option><option value="3">3次</option><option value="4">4次</option><option value="6">6次</option><option value="10">10次</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">定时检查影巢订阅更新</label></div>
+              <div class="inline"><label>站内信检查间隔<select id="hdhivePollInterval"><option value="300">每5分钟</option><option value="900">每15分钟</option><option value="1800">每30分钟</option><option value="3600">每1小时</option></select></label><label>单集洗版窗口<select id="hdhiveWashWindow"><option value="12">12小时</option><option value="24">24小时</option><option value="48">48小时</option><option value="72">72小时</option></select></label></div>
+              <div class="inline"><label>单集最多处理次数<select id="hdhiveMaxTransfers"><option value="1">1次</option><option value="2">2次</option><option value="3">3次</option><option value="4">4次</option><option value="6">6次</option><option value="10">10次</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">定时检查影巢站内信</label></div>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveAutoTransfer" type="checkbox" style="width:auto">自动把新的115候选送入 PanSave 洗版</label>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveWashAfterEmby" type="checkbox" style="width:auto">入库后在窗口内继续接受更大版本</label>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveReprocessChanged" type="checkbox" style="width:auto">同一资源内容或大小变化后允许重新处理</label>
@@ -816,11 +838,33 @@
       $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
       $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
       $('editNoticeButton').onclick=editSiteNotice; $('cancelNoticeButton').onclick=closeNoticeEditor; $('noticeForm').onsubmit=saveSiteNotice;
+      loadActivity();
     }
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog') loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage') loadIntegrations();
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog') loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
+    }
+    async function loadActivity() {
+      if(!currentUser)return;
+      try {
+        const data=preview?{requests_active:2,follows_active:3,jobs_active:1,jobs_failed:0,requests_completed:12}:await api('/api/activity');
+        $('activityRequests').textContent=data.requests_active||0;
+        $('activityFollows').textContent=data.follows_active||0;
+        $('activityJobs').textContent=data.jobs_active||0;
+        $('activityFailed').textContent=data.jobs_failed||0;
+        $('activityCompleted').textContent=data.requests_completed||0;
+      } catch {}
+    }
+    async function loadHealth() {
+      if(currentUser?.role!=='admin')return;
+      const root=$('workerHealth');
+      try {
+        const data=preview?{pending_messages:0,pending_notifications:1,active_jobs:2,workers:[{worker:'hdhive_follow',status:'ok',last_success_at:new Date().toISOString(),last_error:''},{worker:'emby_sync',status:'ok',last_success_at:new Date().toISOString(),last_error:''},{worker:'notifications',status:'ok',last_success_at:new Date().toISOString(),last_error:''}]}:await api('/api/admin/health');
+        const names={hdhive_follow:'影巢追更',emby_sync:'Emby同步',notifications:'通知队列',telegram:'Telegram轮询',dian_signin:'癫影签到',workflow_recovery:'任务恢复'};
+        const workers=(data.workers||[]).map(worker=>`<div class="health-item"><strong>${escapeHtml(names[worker.worker]||worker.worker)} · ${worker.status==='ok'?'正常':worker.status==='error'?'异常':worker.status==='stale'?'已停止更新':worker.status==='idle'?'未配置':'运行中'}</strong><div class="muted">最近成功：${escapeHtml(worker.last_success_at?new Date(worker.last_success_at).toLocaleString('zh-CN',{hour12:false}):'尚无')}</div>${worker.last_error?`<div style="color:#ffc4c4">${escapeHtml(worker.last_error)}</div>`:''}</div>`).join('');
+        root.innerHTML=`<div class="health-item"><strong>待处理汇总</strong><div class="muted">站内信 ${data.pending_messages||0} · 通知 ${data.pending_notifications||0} · 工作流 ${data.active_jobs||0}</div></div>${workers}`;
+      } catch(error){root.innerHTML=`<div class="health-item">后台健康状态读取失败：${escapeHtml(error.message)}</div>`;}
     }
     function isWatchableMedia(item) {
       return ['movie','tv'].includes(String(item?.media_type||''));
@@ -1132,9 +1176,10 @@
     async function loadFollows() {
       const follows=preview?demoFollows:(await api('/api/follows')).follows;
       $('followCount').textContent=follows.filter(item=>item.active).length?`· ${follows.filter(item=>item.active).length}`:'';
-      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const wash=item.wash;const hours=wash?Math.ceil((wash.remaining_seconds||0)/3600):0;const washText=wash?`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')} · ${wash.locked?'洗版已锁定':`洗版中，剩余约${hours}小时`} · 当前 ${wash.last_file_size_label||'容量未知'} · 已处理 ${wash.process_count} 次`:'';const embyText=item.baseline_episode?`Emby 已有至${Number(item.baseline_season)>1?`第${item.baseline_season}季`:''}第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口';return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(embyText)}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'当前使用低频资源查询兜底，等待原生订阅权限'}</div>${washText?`<div class="request-meta">${escapeHtml(washText)}</div>`:''}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
+      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const wash=item.wash;const hours=wash?Math.ceil((wash.remaining_seconds||0)/3600):0;const washText=wash?`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')} · ${wash.locked?'洗版已锁定':`洗版中，剩余约${hours}小时`} · 当前 ${wash.last_file_size_label||'容量未知'} · 已处理 ${wash.process_count} 次`:'';const currentSeason=Number(item.current_emby_season||1);const currentEpisode=Number(item.current_emby_episode||0);const embyText=currentEpisode?`Emby 已入库至${currentSeason>1?`第${currentSeason}季`:''}第${currentEpisode}集；追更起点为 ${item.baseline_label||'尚未识别'}`:`Emby 尚未识别到剧集；追更起点为 ${item.baseline_label||'第1季第0集'}`;return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(embyText)}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'当前使用低频资源查询兜底，等待原生订阅权限'}</div>${washText?`<div class="request-meta">${escapeHtml(washText)}</div>`:''}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-timeline="${item.id}">处理时间线</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
       $('followList').querySelectorAll('[data-follow-search]').forEach(button=>button.onclick=()=>searchFollowResources(follows.find(item=>Number(item.id)===Number(button.dataset.followSearch)),button));
-      $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.baseline_episode)>0,emby_latest_episode_number:Number(item.baseline_episode||0),emby_episode_label:item.baseline_episode?`已入库至第${item.baseline_episode}集`:'尚未入库'});});
+      $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.current_emby_episode)>0,emby_latest_episode_number:Number(item.current_emby_episode||0),emby_episode_label:item.current_emby_episode?`已入库至第${item.current_emby_episode}集`:'尚未入库'});});
+      $('followList').querySelectorAll('[data-follow-timeline]').forEach(button=>button.onclick=()=>loadFollowTimeline(Number(button.dataset.followTimeline),button));
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(Number(button.dataset.followDelete),button));
       refreshFollowEmbyProgress(follows);
     }
@@ -1167,14 +1212,23 @@
         follows.filter(item=>item.media_type!=='movie').forEach(item=>{
           const progress=progressById.get(Number(item.id));
           if(!progress)return;
-          item.baseline_season=Number(progress.baseline_season||1);
-          item.baseline_episode=Number(progress.baseline_episode||0);
+          item.current_emby_season=Number(progress.current_emby_season||1);
+          item.current_emby_episode=Number(progress.current_emby_episode||0);
           const note=$('followList').querySelector(`[data-follow-progress="${item.id}"]`);
-          if(note)note.textContent=item.baseline_episode?`Emby 已有至${item.baseline_season>1?`第${item.baseline_season}季`:''}第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口';
+          if(note)note.textContent=item.current_emby_episode?`Emby 已入库至${item.current_emby_season>1?`第${item.current_emby_season}季`:''}第${item.current_emby_episode}集；追更起点为 ${item.baseline_label||'尚未识别'}`:`Emby 尚未识别到剧集；追更起点为 ${item.baseline_label||'第1季第0集'}`;
         });
       } catch(error) {
         // Keep the saved progress visible when Emby is temporarily unavailable.
       }
+    }
+    async function loadFollowTimeline(followId,button) {
+      const root=$('followList').querySelector(`[data-follow-results="${followId}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在读取完整处理时间线…</div>';button.disabled=true;
+      try {
+        const data=await api(`/api/follows/${followId}/timeline`);
+        const jobs=(data.jobs||[]).map(job=>`<div class="timeline-item ${escapeHtml(job.state)}"><strong>${escapeHtml(job.state_label)}</strong> · ${escapeHtml(job.title||job.resource_key)}<div class="muted">${escapeHtml(job.detail||job.last_error||'等待下一步')} · ${escapeHtml(new Date(job.updated_at).toLocaleString('zh-CN',{hour12:false}))}</div></div>`);
+        const events=(data.events||[]).slice(0,30).map(event=>`<div class="timeline-item ${escapeHtml(event.status)}"><strong>${escapeHtml(event.message)}</strong><div class="muted">${escapeHtml(new Date(event.created_at).toLocaleString('zh-CN',{hour12:false}))}</div></div>`);
+        root.innerHTML=`<div class="timeline-list">${[...jobs,...events].join('')||'<div class="empty">尚无处理记录</div>'}</div>`;
+      } catch(error){root.innerHTML=`<div class="empty">时间线读取失败：${escapeHtml(error.message)}</div>`;} finally {button.disabled=false;}
     }
     async function searchFollowResources(follow,button) {
       const root=$('followList').querySelector(`[data-follow-results="${follow.id}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在同时查询影巢和癫影…</div>';button.disabled=true;
@@ -1236,8 +1290,9 @@
         const items=preview?demoRequests:(await api('/api/requests')).requests; requestsCache=items;
         $('adminCount').textContent=currentUser.role==='admin'&&items.filter(x=>x.status==='pending').length?`· ${items.filter(x=>x.status==='pending').length}`:'';
         const mine=currentUser.role==='admin'?items:items.filter(x=>Number(x.user_id)===Number(currentUser.id)||!x.user_id);
-        $('mineCount').textContent=mine.length?`· ${mine.length}`:'';
-        $('mineRequests').innerHTML=mine.length?mine.map(requestRow).join(''):'<div class="empty">还没有提交过需求。</div>';
+        const mineActive=mine.filter(item=>item.status!=='available');const mineHistory=mine.filter(item=>item.status==='available');
+        $('mineCount').textContent=mineActive.length?`· ${mineActive.length}`:'';
+        $('mineRequests').innerHTML=(mineActive.length?mineActive.map(requestRow).join(''):'<div class="empty">当前没有处理中需求。</div>')+(mineHistory.length?`<details class="history-block"><summary>已入库历史 · ${mineHistory.length}</summary><div class="request-list" style="margin-top:10px">${mineHistory.map(requestRow).join('')}</div></details>`:'');
         $('mineRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
         if(currentUser.role==='admin') { updateMemberFilter(items); renderAdminRequests(items); }
       })();
@@ -1251,7 +1306,9 @@
     }
     function renderAdminRequests(items) {
       const selected=$('requestUserFilter').value; const visible=selected?items.filter(item=>String(item.user_id||item.username||item.display_name||'')===selected):items;
-      $('adminRequests').innerHTML=visible.length?visible.map(item=>`<div class="admin-request"><div class="requester"><span class="requester-avatar">${escapeHtml((item.display_name||'成').slice(0,1))}</span>${escapeHtml(item.display_name||'成员')}${item.username?` · @${escapeHtml(item.username)}`:''} 提交</div><div class="admin-request-head"><div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}</div></div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></div><div class="admin-request-actions"><select data-status="${item.id}">${Object.entries(statusOptions).map(([key,label])=>`<option value="${key}" ${key===item.status?'selected':''}>${label}</option>`).join('')}</select><input data-note="${item.id}" value="${escapeHtml(item.admin_note||'')}" placeholder="给成员的回复"><button class="btn btn-primary btn-small" data-save="${item.id}">保存</button><button class="btn btn-danger btn-small" data-delete="${item.id}">删除</button></div></div>`).join(''):'<div class="empty">这个成员还没有求片请求。</div>';
+      const row=item=>`<div class="admin-request"><div class="requester"><span class="requester-avatar">${escapeHtml((item.display_name||'成').slice(0,1))}</span>${escapeHtml(item.display_name||'成员')}${item.username?` · @${escapeHtml(item.username)}`:''} 提交</div><div class="admin-request-head"><div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}${item.completed_at?` · ${escapeHtml(new Date(item.completed_at).toLocaleString('zh-CN',{hour12:false}))}`:''}</div></div><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span></div><div class="admin-request-actions"><select data-status="${item.id}">${Object.entries(statusOptions).map(([key,label])=>`<option value="${key}" ${key===item.status?'selected':''}>${label}</option>`).join('')}</select><input data-note="${item.id}" value="${escapeHtml(item.admin_note||'')}" placeholder="给成员的回复"><button class="btn btn-primary btn-small" data-save="${item.id}">保存</button><button class="btn btn-danger btn-small" data-delete="${item.id}">删除</button></div></div>`;
+      const active=visible.filter(item=>item.status!=='available');const history=visible.filter(item=>item.status==='available');
+      $('adminRequests').innerHTML=(active.length?active.map(row).join(''):'<div class="empty">当前没有处理中需求。</div>')+(history.length?`<details class="history-block"><summary>已入库历史 · ${history.length}</summary>${history.map(row).join('')}</details>`:'');
       $('adminRequests').querySelectorAll('[data-save]').forEach(button=>button.onclick=()=>saveRequest(Number(button.dataset.save),button));
       $('adminRequests').querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>deleteRequest(Number(button.dataset.delete),button));
     }
@@ -1504,6 +1561,7 @@
     };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
     $('followLogRefresh').onclick=loadFollowEvents;
+    $('refreshHealth').onclick=loadHealth;
     $('followLogStage').onchange=loadFollowEvents;
     $('followLogStatus').onchange=loadFollowEvents;
     document.querySelectorAll('[data-settings-panel]').forEach(button=>button.onclick=()=>{
@@ -1525,7 +1583,7 @@
     $('wecomMenu').onclick=async()=>{if(preview)return toast('预览模式：企业微信菜单已刷新');try{await api('/api/admin/wecom-menu',{method:'POST'});toast('企业微信菜单已创建/刷新');}catch(error){toast(error.message,true);}};
     $('p123EmbyTest').onclick=async()=>{if(preview)return toast('预览模式：123 Emby 连接正常');try{const data=await api('/api/admin/emby-test?destination=p123',{method:'POST'});toast(`${data.server_name}：${data.library_tmdb_count} 个 TMDB 条目`);}catch(error){toast(error.message,true);}};
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
-    $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，已自动清除1条入库需求');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，已自动清除${result.removed}条入库需求`);loadRequests();}catch(error){toast(error.message,true);}};
+    $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，已标记1条需求为已入库');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，已标记${result.completed}条需求为已入库`);loadRequests();loadActivity();}catch(error){toast(error.message,true);}};
     $('testAllIntegrations').onclick=testAllIntegrations;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,p115_app:$('p115App').value})});toast('配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
@@ -1556,7 +1614,7 @@
     }
     init();
     setInterval(() => {
-      if (currentUser && !preview && document.visibilityState==='visible') loadRequests().catch(() => {});
+      if (currentUser && !preview && document.visibilityState==='visible') {loadRequests().catch(() => {});loadActivity();}
     }, 120000);
     setInterval(() => {
       if (currentUser && !preview && document.visibilityState==='visible') loadSiteNotice();

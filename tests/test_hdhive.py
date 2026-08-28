@@ -1289,6 +1289,143 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         read_call = next(call for call in calls if call[0] == "mark_messages_read")
         self.assertEqual(read_call[1][0], [9001])
 
+    def test_subscription_message_targets_only_matching_native_follow(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            first = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 101172, '吞噬星空', 77, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+
+        calls = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            calls.append(method)
+            if method == "unread_message_count":
+                return {"data": {"unread_count": 1}}
+            if method == "messages":
+                return {"data": [{"id": 9010, "subscription_id": 55}]}
+            if method == "mark_messages_read":
+                return {"success": True}
+            raise AssertionError(method)
+
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(
+                app, "refresh_hdhive_subscribed_follows", return_value=0
+            ) as refresh:
+                self.assertEqual(app.poll_hdhive_follow_messages(), 1)
+
+        refresh.assert_called_once_with(
+            cycle_id="", force_file_lists=True, follow_ids={first}, strict=True
+        )
+        self.assertLess(calls.index("messages"), calls.index("mark_messages_read"))
+        with app.db() as connection:
+            row = connection.execute(
+                "SELECT status, subscription_id FROM hdhive_message_log "
+                "WHERE message_key = '9010'"
+            ).fetchone()
+        self.assertEqual(row["status"], "acknowledged")
+        self.assertEqual(row["subscription_id"], 55)
+
+    def test_subscription_message_stays_unread_until_failed_scan_retries(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+
+        marked = []
+
+        def fake_hdhive_call(method, *args, **kwargs):
+            if method == "unread_message_count":
+                return {"data": {"unread_count": 1}}
+            if method == "messages":
+                return {"data": [{"id": 9011, "subscription_id": 55}]}
+            if method == "mark_messages_read":
+                marked.extend(args[0])
+                return {"success": True}
+            raise AssertionError(method)
+
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(
+                app,
+                "refresh_hdhive_subscribed_follows",
+                side_effect=app.HTTPException(502, "影巢暂时失败"),
+            ):
+                with self.assertRaises(app.HTTPException):
+                    app.poll_hdhive_follow_messages()
+        self.assertEqual(marked, [])
+        with app.db() as connection:
+            failed = connection.execute(
+                "SELECT status, attempt_count FROM hdhive_message_log "
+                "WHERE message_key = '9011'"
+            ).fetchone()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["attempt_count"], 1)
+
+        # A restart must preserve the failed item instead of treating it as an
+        # old acknowledged row.
+        app.init_db()
+        with patch.object(app, "hdhive_call", side_effect=fake_hdhive_call):
+            with patch.object(
+                app, "refresh_hdhive_subscribed_follows", return_value=0
+            ):
+                self.assertEqual(app.poll_hdhive_follow_messages(), 1)
+        self.assertEqual(marked, [9011])
+        with app.db() as connection:
+            acknowledged = connection.execute(
+                "SELECT status, attempt_count FROM hdhive_message_log "
+                "WHERE message_key = '9011'"
+            ).fetchone()
+        self.assertEqual(acknowledged["status"], "acknowledged")
+        self.assertEqual(acknowledged["attempt_count"], 2)
+
+    def test_processed_message_is_reconciled_when_remote_unread_count_is_zero(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+            connection.execute(
+                "INSERT INTO hdhive_message_log(message_key, status, "
+                "attempt_count, processed_at, created_at) "
+                "VALUES('9012', 'processed', 1, ?, ?)",
+                (app.now_iso(), app.now_iso()),
+            )
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"unread_count": 0}},
+        ):
+            self.assertEqual(app.poll_hdhive_follow_messages(), 0)
+        with app.db() as connection:
+            row = connection.execute(
+                "SELECT status, acknowledged_at FROM hdhive_message_log "
+                "WHERE message_key = '9012'"
+            ).fetchone()
+        self.assertEqual(row["status"], "acknowledged")
+        self.assertTrue(row["acknowledged_at"])
+
     def test_follow_event_log_is_visible_to_admin(self):
         with app.db() as connection:
             user_id = connection.execute(
@@ -1316,7 +1453,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             app.hdhive_follow_events(movie_session=self.token)
         self.assertEqual(denied.exception.status_code, 403)
 
-    def test_follow_cycle_runs_six_hour_reconciliation_without_new_message(self):
+    def test_follow_cycle_runs_daily_reconciliation_without_new_message(self):
         with patch.object(
             app, "poll_hdhive_follow_messages", return_value=0
         ) as messages:
@@ -1332,7 +1469,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(result["message_count"], 0)
         self.assertEqual(result["changed_count"], 3)
         messages.assert_called_once_with(
-            refresh_follows=False, cycle_id=result["cycle_id"]
+            refresh_follows=True, cycle_id=result["cycle_id"]
         )
         refresh.assert_called_once_with(
             cycle_id=result["cycle_id"], force_file_lists=False
@@ -1566,7 +1703,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             {"file_id": "101,202", "cid": "0"},
         )
 
-    def test_follow_baseline_is_cleared_after_series_is_removed_from_emby(self):
+    def test_follow_baseline_is_preserved_when_series_is_removed_from_emby(self):
         with app.db() as connection:
             user_id = connection.execute(
                 "SELECT id FROM users WHERE username = 'member'"
@@ -1584,7 +1721,8 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         with patch.object(app, "emby_library_tmdb_ids", return_value=set()) as library:
             row = app.refresh_follow_emby_baseline(follow_id)
 
-        self.assertEqual(row["baseline_episode"], 0)
+        self.assertEqual(row["baseline_episode"], 132)
+        self.assertEqual(row["current_emby_episode"], 0)
         library.assert_called_once_with(force=True)
 
     def test_follow_progress_endpoint_refreshes_stale_emby_episode(self):
@@ -1615,11 +1753,10 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             ) as progress:
                 result = app.follow_emby_progress(follow_id, self.token)
 
-        self.assertEqual(result["baseline_episode"], 152)
-        self.assertEqual(
-            app.list_follows(self.token)["follows"][0]["baseline_episode"],
-            152,
-        )
+        self.assertEqual(result["current_emby_episode"], 152)
+        follow = app.list_follows(self.token)["follows"][0]
+        self.assertEqual(follow["baseline_episode"], 151)
+        self.assertEqual(follow["current_emby_episode"], 152)
         library.assert_called_once_with("p115", force=True)
         progress.assert_called_once_with(
             "p115", 223911, known_in_library=True, force=True
@@ -1655,8 +1792,9 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         library.assert_called_once_with("p115")
         self.assertEqual(progress.call_count, 2)
         values = {
-            item["follow_id"]: (item["baseline_season"], item["baseline_episode"])
-            for item in result["progress"]
+            item["follow_id"]: (
+                item["current_emby_season"], item["current_emby_episode"]
+            ) for item in result["progress"]
         }
         self.assertIn((2, 5), values.values())
         self.assertIn((1, 233), values.values())

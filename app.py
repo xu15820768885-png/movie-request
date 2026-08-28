@@ -20,7 +20,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import parse_qs, quote, urlparse
 
 import requests
@@ -34,6 +34,13 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from requests.adapters import HTTPAdapter
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
 from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
+from workflow import (
+    ACTIVE_JOB_STATES,
+    JOB_STATE_LABELS,
+    episode_numbers_from_json,
+    episode_numbers_json,
+    message_target_hints,
+)
 
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
@@ -88,7 +95,7 @@ RESOURCE_CACHE_MAX_ITEMS = 256
 HDHIVE_FILE_LIST_CACHE_SECONDS = 6 * 3600
 HDHIVE_INVALID_FILE_LIST_CACHE_SECONDS = 24 * 3600
 HDHIVE_TRANSIENT_FILE_LIST_CACHE_SECONDS = 15 * 60
-HDHIVE_FULL_RECONCILE_SECONDS = 6 * 3600
+HDHIVE_FULL_RECONCILE_SECONDS = 24 * 3600
 IMAGE_DOWNLOAD_LOCKS: dict[str, Lock] = {}
 IMAGE_CACHE_CLEANUP_LOCK = Lock()
 IMAGE_CACHE_LAST_CLEANUP = 0.0
@@ -123,6 +130,9 @@ async def movie_http_exception_handler(
     request: Request,
     error: HTTPException,
 ) -> JSONResponse:
+    workflow_job_id = int(getattr(getattr(request, "state", None), "workflow_job_id", 0) or 0)
+    if workflow_job_id:
+        fail_workflow_job(workflow_job_id, error.detail)
     if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
         user = session_user(request.cookies.get("movie_session"))
         if user:
@@ -330,6 +340,8 @@ def init_db() -> None:
                 overview TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'pending',
                 admin_note TEXT NOT NULL DEFAULT '',
+                completed_at TEXT NOT NULL DEFAULT '',
+                archived_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -368,6 +380,8 @@ def init_db() -> None:
                 source_preference TEXT NOT NULL DEFAULT 'hdhive_first',
                 baseline_season INTEGER NOT NULL DEFAULT 1,
                 baseline_episode INTEGER NOT NULL DEFAULT 0,
+                current_emby_season INTEGER NOT NULL DEFAULT 1,
+                current_emby_episode INTEGER NOT NULL DEFAULT 0,
                 last_seen_season INTEGER NOT NULL DEFAULT 1,
                 last_seen_episode INTEGER NOT NULL DEFAULT 0,
                 last_transferred_season INTEGER NOT NULL DEFAULT 0,
@@ -389,6 +403,7 @@ def init_db() -> None:
                 follow_id INTEGER REFERENCES tv_follows(id) ON DELETE SET NULL,
                 source TEXT NOT NULL,
                 resource_key TEXT NOT NULL,
+                destination TEXT NOT NULL DEFAULT 'p115',
                 tmdb_id INTEGER NOT NULL DEFAULT 0,
                 season_number INTEGER NOT NULL DEFAULT 0,
                 episode_number INTEGER NOT NULL DEFAULT 0,
@@ -415,6 +430,14 @@ def init_db() -> None:
                 message_key TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL DEFAULT '',
                 payload_json TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                subscription_id INTEGER,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                processed_at TEXT NOT NULL DEFAULT '',
+                acknowledged_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS hdhive_follow_events (
@@ -523,6 +546,61 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS hdhive_file_list_cache_expiry_idx
                 ON hdhive_file_list_cache(expires_at);
+            CREATE TABLE IF NOT EXISTS media_workflow_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                follow_id INTEGER REFERENCES tv_follows(id) ON DELETE SET NULL,
+                destination TEXT NOT NULL,
+                source TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                media_type TEXT NOT NULL DEFAULT '',
+                season_number INTEGER NOT NULL DEFAULT 0,
+                episode_numbers_json TEXT NOT NULL DEFAULT '[]',
+                title TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'discovered',
+                detail TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                completed_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS media_workflow_job_state_idx
+                ON media_workflow_jobs(state, next_retry_at, updated_at);
+            CREATE INDEX IF NOT EXISTS media_workflow_job_follow_idx
+                ON media_workflow_jobs(follow_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dedupe_key TEXT NOT NULL DEFAULT '',
+                channel TEXT NOT NULL,
+                recipient TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                sent_at TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS notification_outbox_dedupe_idx
+                ON notification_outbox(dedupe_key, channel)
+                WHERE dedupe_key != '';
+            CREATE INDEX IF NOT EXISTS notification_outbox_pending_idx
+                ON notification_outbox(status, next_retry_at, id);
+            CREATE TABLE IF NOT EXISTS worker_health (
+                worker TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'idle',
+                last_started_at TEXT NOT NULL DEFAULT '',
+                last_success_at TEXT NOT NULL DEFAULT '',
+                last_error_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                detail_json TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
             """
         )
         user_columns = {
@@ -548,6 +626,96 @@ def init_db() -> None:
             connection.execute(
                 "ALTER TABLE tv_follows "
                 "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'tv'"
+            )
+        added_current_emby_season = "current_emby_season" not in follow_columns
+        added_current_emby_episode = "current_emby_episode" not in follow_columns
+        if added_current_emby_season:
+            connection.execute(
+                "ALTER TABLE tv_follows ADD COLUMN current_emby_season "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
+        if added_current_emby_episode:
+            connection.execute(
+                "ALTER TABLE tv_follows ADD COLUMN current_emby_episode "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        if added_current_emby_season or added_current_emby_episode:
+            connection.execute(
+                "UPDATE tv_follows SET current_emby_season = baseline_season, "
+                "current_emby_episode = baseline_episode"
+            )
+        request_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(movie_requests)").fetchall()
+        }
+        if "completed_at" not in request_columns:
+            connection.execute(
+                "ALTER TABLE movie_requests ADD COLUMN completed_at "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        if "archived_at" not in request_columns:
+            connection.execute(
+                "ALTER TABLE movie_requests ADD COLUMN archived_at "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+        transfer_columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(resource_transfer_log)"
+            ).fetchall()
+        }
+        if "destination" not in transfer_columns:
+            connection.execute(
+                "ALTER TABLE resource_transfer_log ADD COLUMN destination "
+                "TEXT NOT NULL DEFAULT 'p115'"
+            )
+            connection.execute(
+                "UPDATE resource_transfer_log SET destination = COALESCE(("
+                "SELECT storage_destination FROM users "
+                "WHERE users.id = resource_transfer_log.user_id), 'p115')"
+            )
+        connection.execute("DROP INDEX IF EXISTS resource_transfer_success_idx")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS resource_transfer_success_idx "
+            "ON resource_transfer_log(user_id, destination, source, resource_key, "
+            "transfer_scope, season_number, episode_number) "
+            "WHERE status = 'success'"
+        )
+        connection.execute("DROP INDEX IF EXISTS resource_episode_success_idx")
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS resource_episode_success_idx "
+            "ON resource_transfer_log(user_id, destination, tmdb_id, "
+            "season_number, episode_number) WHERE status = 'success' "
+            "AND episode_number > 0 AND transfer_scope != 'auto_wash'"
+        )
+        message_columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(hdhive_message_log)"
+            ).fetchall()
+        }
+        added_message_status = "status" not in message_columns
+        message_column_sql = {
+            "status": "TEXT NOT NULL DEFAULT 'pending'",
+            "subscription_id": "INTEGER",
+            "tmdb_id": "INTEGER NOT NULL DEFAULT 0",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_error": "TEXT NOT NULL DEFAULT ''",
+            "next_retry_at": "TEXT NOT NULL DEFAULT ''",
+            "processed_at": "TEXT NOT NULL DEFAULT ''",
+            "acknowledged_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in message_column_sql.items():
+            if column not in message_columns:
+                connection.execute(
+                    f"ALTER TABLE hdhive_message_log ADD COLUMN {column} {definition}"
+                )
+        if added_message_status:
+            connection.execute(
+                "UPDATE hdhive_message_log SET status = 'acknowledged', "
+                "processed_at = CASE WHEN processed_at = '' THEN created_at ELSE processed_at END, "
+                "acknowledged_at = CASE WHEN acknowledged_at = '' THEN created_at ELSE acknowledged_at END "
+                "WHERE status = 'pending' AND attempt_count = 0"
             )
         oauth_columns = {
             str(row["name"])
@@ -1407,7 +1575,7 @@ async def deliver_to_pansave(
         resource_key=resource_key,
         tmdb_id=tmdb_id,
         transfer_scope="manual",
-        status="success",
+        status="submitted",
         detail=message,
         season_number=season_number,
         episode_numbers=episode_numbers or [],
@@ -1539,7 +1707,11 @@ def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> b
         )
 
 
-def has_manual_transfer(tmdb_id: int, user_id: Optional[int] = None) -> bool:
+def has_manual_transfer(
+    tmdb_id: int,
+    user_id: Optional[int] = None,
+    destination: str = "",
+) -> bool:
     if tmdb_id <= 0:
         return False
     with db() as connection:
@@ -1552,7 +1724,31 @@ def has_manual_transfer(tmdb_id: int, user_id: Optional[int] = None) -> bool:
         if user_id is not None:
             query += " AND user_id = ?"
             values.append(user_id)
+        if destination:
+            query += " AND destination = ?"
+            values.append(storage_destination(destination))
         return bool(connection.execute(query + " LIMIT 1", values).fetchone())
+
+
+def has_initial_media_submission(
+    tmdb_id: int,
+    user_id: int,
+    destination: str,
+) -> bool:
+    if tmdb_id <= 0 or user_id <= 0:
+        return False
+    with db() as connection:
+        return bool(
+            connection.execute(
+                "SELECT 1 FROM media_workflow_jobs WHERE user_id = ? "
+                "AND destination = ? AND tmdb_id = ? AND state IN ("
+                "'submitted', 'transferred', 'organizing', "
+                "'waiting_library', 'ingested') LIMIT 1",
+                (
+                    int(user_id), storage_destination(destination), int(tmdb_id)
+                ),
+            ).fetchone()
+        )
 
 
 def completed_episode_numbers(
@@ -1583,21 +1779,30 @@ def record_transfer(
     follow_id: Optional[int] = None,
     season_number: int = 0,
     episode_numbers: Optional[list[int]] = None,
+    destination: str = "",
 ) -> None:
     numbers = episode_numbers or [0]
     with db() as connection:
+        if not destination:
+            row = connection.execute(
+                "SELECT storage_destination FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            destination = storage_destination(
+                row["storage_destination"] if row else "p115"
+            )
         for episode_number in numbers:
             connection.execute(
                 "INSERT OR IGNORE INTO resource_transfer_log("
-                "user_id, follow_id, source, resource_key, tmdb_id, "
+                "user_id, follow_id, source, resource_key, destination, tmdb_id, "
                 "season_number, episode_number, transfer_scope, status, "
                 "detail, created_at, updated_at"
-                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     user_id,
                     follow_id,
                     source,
                     resource_key,
+                    storage_destination(destination),
                     tmdb_id,
                     season_number,
                     int(episode_number),
@@ -1608,6 +1813,172 @@ def record_transfer(
                     now_iso(),
                 ),
             )
+
+
+def workflow_job_key(
+    *,
+    user_id: int,
+    destination: str,
+    source: str,
+    resource_key: str,
+    tmdb_id: int,
+    season_number: int = 0,
+    episode_numbers: Optional[list[int]] = None,
+    scope: str = "manual",
+) -> str:
+    material = "\0".join(
+        (
+            str(int(user_id)),
+            storage_destination(destination),
+            str(source or ""),
+            str(resource_key or ""),
+            str(int(tmdb_id or 0)),
+            str(int(season_number or 0)),
+            episode_numbers_json(episode_numbers or []),
+            str(scope or "manual"),
+        )
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def begin_workflow_job(
+    *,
+    user_id: int,
+    destination: str,
+    source: str,
+    resource_key: str,
+    tmdb_id: int,
+    media_type: str,
+    title: str,
+    season_number: int = 0,
+    episode_numbers: Optional[list[int]] = None,
+    follow_id: Optional[int] = None,
+    scope: str = "manual",
+) -> sqlite3.Row:
+    key = workflow_job_key(
+        user_id=user_id,
+        destination=destination,
+        source=source,
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        season_number=season_number,
+        episode_numbers=episode_numbers,
+        scope=scope,
+    )
+    timestamp = now_iso()
+    with db() as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO media_workflow_jobs("
+            "idempotency_key, user_id, follow_id, destination, source, "
+            "resource_key, tmdb_id, media_type, season_number, "
+            "episode_numbers_json, title, state, created_at, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?)",
+            (
+                key, int(user_id), follow_id, storage_destination(destination),
+                str(source), str(resource_key), int(tmdb_id or 0), str(media_type),
+                int(season_number or 0), episode_numbers_json(episode_numbers or []),
+                str(title or "")[:200], timestamp, timestamp,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM media_workflow_jobs WHERE idempotency_key = ?", (key,)
+        ).fetchone()
+        if row and row["state"] in ("unlocking", "submitted", "transferred", "organizing", "waiting_library"):
+            raise HTTPException(409, f"这个资源正在处理：{JOB_STATE_LABELS.get(row['state'], row['state'])}")
+        if row and row["state"] == "ingested":
+            raise HTTPException(409, "这个资源已经完成入库")
+        if row and row["state"] == "failed" and row["next_retry_at"]:
+            try:
+                retry_at = datetime.fromisoformat(str(row["next_retry_at"]))
+            except (TypeError, ValueError):
+                retry_at = datetime.min.replace(tzinfo=timezone.utc)
+            if retry_at > datetime.now(timezone.utc):
+                raise HTTPException(409, f"这个资源等待重试：{row['last_error']}")
+        connection.execute(
+            "UPDATE media_workflow_jobs SET state = 'unlocking', last_error = '', "
+            "next_retry_at = '', attempt_count = attempt_count + 1, updated_at = ? "
+            "WHERE id = ?",
+            (timestamp, int(row["id"])),
+        )
+        return connection.execute(
+            "SELECT * FROM media_workflow_jobs WHERE id = ?", (int(row["id"]),)
+        ).fetchone()
+
+
+def update_workflow_job(
+    job_id: int,
+    state: str,
+    detail: str = "",
+    error: str = "",
+    retry_seconds: int = 0,
+) -> None:
+    if state not in JOB_STATE_LABELS:
+        raise ValueError("invalid workflow state")
+    timestamp = now_iso()
+    next_retry_at = (
+        (datetime.now(timezone.utc) + timedelta(seconds=max(0, retry_seconds))).isoformat()
+        if retry_seconds > 0 else ""
+    )
+    completed_at = timestamp if state == "ingested" else ""
+    with db() as connection:
+        connection.execute(
+            "UPDATE media_workflow_jobs SET state = ?, detail = ?, last_error = ?, "
+            "next_retry_at = ?, completed_at = CASE WHEN ? != '' THEN ? "
+            "ELSE completed_at END, updated_at = ? WHERE id = ?",
+            (
+                state, str(detail or "")[:1000], str(error or "")[:1000],
+                next_retry_at, completed_at, completed_at, timestamp, int(job_id),
+            ),
+        )
+
+
+def update_workflow_job_episodes(
+    job_id: int,
+    season_number: int,
+    episode_numbers: Iterable[int],
+) -> None:
+    with db() as connection:
+        connection.execute(
+            "UPDATE media_workflow_jobs SET season_number = ?, "
+            "episode_numbers_json = ?, updated_at = ? WHERE id = ?",
+            (
+                int(season_number or 0),
+                episode_numbers_json(episode_numbers),
+                now_iso(),
+                int(job_id),
+            ),
+        )
+
+
+def fail_workflow_job(job_id: int, error: Any, retry_seconds: int = 300) -> None:
+    update_workflow_job(
+        job_id,
+        "failed",
+        detail="处理失败，等待重试",
+        error=str(error),
+        retry_seconds=retry_seconds,
+    )
+
+
+def attach_workflow_job_to_request(request: Any, job_id: int) -> None:
+    """Attach failure tracking for ASGI requests without breaking direct callers."""
+    state = getattr(request, "state", None)
+    if state is not None:
+        state.workflow_job_id = int(job_id)
+
+
+def recover_stale_workflow_jobs() -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+    timestamp = now_iso()
+    with db() as connection:
+        cursor = connection.execute(
+            "UPDATE media_workflow_jobs SET state = 'failed', "
+            "last_error = '处理进程中断，已恢复为可重试状态', "
+            "next_retry_at = ?, updated_at = ? WHERE state = 'unlocking' "
+            "AND updated_at < ?",
+            (timestamp, timestamp, cutoff),
+        )
+        return int(cursor.rowcount or 0)
 
 
 def log_hdhive_follow_event(
@@ -4047,43 +4418,92 @@ def queue_emby_webhook(
     return True
 
 
+def complete_workflow_jobs_from_library(
+    destination: str,
+    library_tmdb_ids: set[int],
+) -> int:
+    current = storage_destination(destination)
+    if not library_tmdb_ids:
+        return 0
+    marks = ",".join("?" for _ in library_tmdb_ids)
+    with db() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM media_workflow_jobs WHERE destination = ? "
+            f"AND tmdb_id IN ({marks}) AND state IN ("
+            f"'submitted', 'transferred', 'organizing', 'waiting_library')",
+            (current, *sorted(library_tmdb_ids)),
+        ).fetchall()
+    completed = 0
+    progress_cache: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        episodes = episode_numbers_from_json(row["episode_numbers_json"])
+        if str(row["media_type"] or "") == "tv":
+            # A series-level TMDB match only proves that the show exists in
+            # Emby. It does not prove an unknown episode/package was ingested.
+            if not episodes:
+                continue
+            if int(row["season_number"] or 0) <= 0:
+                continue
+            tmdb_id = int(row["tmdb_id"])
+            if tmdb_id not in progress_cache:
+                progress_cache[tmdb_id] = destination_episode_progress(
+                    current,
+                    tmdb_id,
+                    known_in_library=True,
+                    force=True,
+                )
+            by_season = progress_cache[tmdb_id].get("emby_episode_numbers") or {}
+            present = {
+                int(value)
+                for value in by_season.get(str(int(row["season_number"] or 1)), [])
+                if int(value) > 0
+            }
+            if not set(episodes).issubset(present):
+                continue
+        update_workflow_job(int(row["id"]), "ingested", "Emby 已确认入库")
+        completed += 1
+    return completed
+
+
 def sync_emby_requests(
     force: bool = False,
     destination: Optional[str] = None,
     suppress_notifications: Optional[dict[str, set[int]]] = None,
 ) -> int:
     destinations = [storage_destination(destination)] if destination else ["p115", "p123"]
-    removed = 0
+    completed = 0
     for current in destinations:
         tmdb_ids = emby_library_tmdb_ids(force=force, destination=current)
         if not tmdb_ids:
             continue
+        complete_workflow_jobs_from_library(current, tmdb_ids)
         placeholders = ",".join("?" for _ in tmdb_ids)
         with db() as connection:
             rows = connection.execute(
                 f"SELECT r.id, r.tmdb_id, r.title, r.year, u.display_name "
                 f"FROM movie_requests r JOIN users u ON u.id = r.user_id "
                 f"WHERE r.tmdb_id IN ({placeholders}) "
-                f"AND u.storage_destination = ?",
+                f"AND u.storage_destination = ? AND r.status != 'available'",
                 (*tmdb_ids, current),
             ).fetchall()
             if rows:
                 ids = [int(row["id"]) for row in rows]
                 marks = ",".join("?" for _ in ids)
                 connection.execute(
-                    f"DELETE FROM movie_requests WHERE id IN ({marks})",
-                    ids,
+                    f"UPDATE movie_requests SET status = 'available', "
+                    f"completed_at = ?, updated_at = ? WHERE id IN ({marks})",
+                    (now_iso(), now_iso(), *ids),
                 )
         suppressed = (suppress_notifications or {}).get(current, set())
         for row in rows:
             if int(row["tmdb_id"]) in suppressed:
                 continue
             send_notifications(
-                f"✅ 已入库并清除求片 · {'123' if current == 'p123' else '115'} Emby\n\n"
+                f"✅ 求片已入库 · {'123' if current == 'p123' else '115'} Emby\n\n"
                 f"{row['title']} ({row['year']})\n申请人：{row['display_name']}"
             )
-        removed += len(rows)
-    return removed
+        completed += len(rows)
+    return completed
 
 
 def normalize_search_text(value: Any) -> str:
@@ -4172,6 +4592,12 @@ def search_db_context(
 ) -> tuple[list[dict[str, Any]], set[tuple[str, int]], set[int]]:
     normalized = normalize_search_text(query)
     with db() as connection:
+        user_row = connection.execute(
+            "SELECT storage_destination FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        destination = storage_destination(
+            user_row["storage_destination"] if user_row else "p115"
+        )
         catalog_rows = (
             connection.execute(
                 "SELECT payload_json FROM tmdb_search_catalog "
@@ -4195,7 +4621,8 @@ def search_db_context(
             for row in connection.execute(
                 "SELECT DISTINCT tmdb_id FROM resource_transfer_log "
                 "WHERE transfer_scope = 'manual' "
-                "AND status = 'success' AND tmdb_id > 0",
+                "AND status = 'success' AND tmdb_id > 0 AND destination = ?",
+                (destination,),
             ).fetchall()
         }
     catalog_items = []
@@ -4727,15 +5154,107 @@ def send_notifications(text: str) -> None:
     send_wecom(text)
 
 
-def send_notifications_async(text: str) -> None:
-    """Send optional notifications without extending a completed web request."""
-    def deliver() -> None:
-        try:
-            send_notifications(text)
-        except Exception:
-            pass
+def enqueue_notifications(text: str, dedupe_key: str = "") -> int:
+    """Persist optional notifications so container restarts cannot lose them."""
 
-    Thread(target=deliver, name="movie-request-notification", daemon=True).start()
+    timestamp = now_iso()
+    queued = 0
+    with db() as connection:
+        channels: list[tuple[str, str]] = []
+        if setting(connection, "telegram_token") and setting(
+            connection, "telegram_chat_id"
+        ):
+            channels.append(("telegram", setting(connection, "telegram_chat_id")))
+        if setting(connection, "wecom_agent_id"):
+            channels.append(
+                ("wecom", setting(connection, "wecom_to_user") or "@all")
+            )
+        for channel, recipient in channels:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO notification_outbox("
+                "dedupe_key, channel, recipient, payload, status, "
+                "created_at, updated_at) VALUES(?, ?, ?, ?, 'pending', ?, ?)",
+                (
+                    str(dedupe_key or ""), channel, recipient,
+                    str(text)[:4000], timestamp, timestamp,
+                ),
+            )
+            queued += int(cursor.rowcount or 0)
+    return queued
+
+
+def process_notification_outbox(limit: int = 20) -> dict[str, int]:
+    timestamp = now_iso()
+    with db() as connection:
+        stale_cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=10)
+        ).isoformat()
+        connection.execute(
+            "UPDATE notification_outbox SET status = 'failed', "
+            "last_error = CASE WHEN last_error = '' THEN "
+            "'发送进程中断，已恢复等待重试' ELSE last_error END, "
+            "next_retry_at = '', updated_at = ? "
+            "WHERE status = 'sending' AND updated_at < ?",
+            (timestamp, stale_cutoff),
+        )
+        rows = connection.execute(
+            "SELECT * FROM notification_outbox WHERE status IN ('pending', 'failed') "
+            "AND (next_retry_at = '' OR next_retry_at <= ?) "
+            "ORDER BY id LIMIT ?",
+            (timestamp, max(1, min(100, int(limit)))),
+        ).fetchall()
+        claimed: list[sqlite3.Row] = []
+        for row in rows:
+            cursor = connection.execute(
+                "UPDATE notification_outbox SET status = 'sending', updated_at = ? "
+                "WHERE id = ? AND status IN ('pending', 'failed')",
+                (timestamp, int(row["id"])),
+            )
+            if int(cursor.rowcount or 0):
+                claimed.append(row)
+    sent = failed = 0
+    for row in claimed:
+        try:
+            if row["channel"] == "telegram":
+                result = telegram_request(
+                    "sendMessage",
+                    {
+                        "chat_id": row["recipient"],
+                        "text": row["payload"],
+                        "reply_markup": {"remove_keyboard": True},
+                    },
+                )
+                if not result:
+                    raise RuntimeError("Telegram 未确认发送成功")
+            elif row["channel"] == "wecom":
+                if not send_wecom(str(row["payload"]), str(row["recipient"])):
+                    raise RuntimeError("企业微信未确认发送成功")
+            else:
+                raise RuntimeError("未知通知渠道")
+            with db() as connection:
+                connection.execute(
+                    "UPDATE notification_outbox SET status = 'sent', sent_at = ?, "
+                    "last_error = '', next_retry_at = '', updated_at = ? WHERE id = ?",
+                    (now_iso(), now_iso(), int(row["id"])),
+                )
+            sent += 1
+        except Exception as error:
+            attempts = int(row["attempt_count"] or 0) + 1
+            delay = min(6 * 3600, 60 * (2 ** min(attempts - 1, 8)))
+            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+            with db() as connection:
+                connection.execute(
+                    "UPDATE notification_outbox SET status = 'failed', "
+                    "attempt_count = ?, next_retry_at = ?, last_error = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (attempts, retry_at, str(error)[:500], now_iso(), int(row["id"])),
+                )
+            failed += 1
+    return {"sent": sent, "failed": failed}
+
+
+def send_notifications_async(text: str) -> None:
+    enqueue_notifications(text)
 
 
 def wecom_menu_payload() -> dict[str, Any]:
@@ -5039,6 +5558,38 @@ def handle_wecom_command(command: str, sender: str) -> bool:
     return True
 
 
+def update_worker_health(
+    worker: str,
+    status: str,
+    *,
+    error: str = "",
+    detail: Optional[dict[str, Any]] = None,
+) -> None:
+    timestamp = now_iso()
+    started = timestamp if status == "running" else ""
+    succeeded = timestamp if status == "ok" else ""
+    failed = timestamp if status == "error" else ""
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO worker_health(worker, status, last_started_at, "
+            "last_success_at, last_error_at, last_error, detail_json, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worker) DO UPDATE SET "
+            "status = excluded.status, "
+            "last_started_at = CASE WHEN excluded.last_started_at != '' "
+            "THEN excluded.last_started_at ELSE worker_health.last_started_at END, "
+            "last_success_at = CASE WHEN excluded.last_success_at != '' "
+            "THEN excluded.last_success_at ELSE worker_health.last_success_at END, "
+            "last_error_at = CASE WHEN excluded.last_error_at != '' "
+            "THEN excluded.last_error_at ELSE worker_health.last_error_at END, "
+            "last_error = excluded.last_error, detail_json = excluded.detail_json, "
+            "updated_at = excluded.updated_at",
+            (
+                worker, status, started, succeeded, failed, str(error)[:500],
+                json.dumps(detail or {}, ensure_ascii=False), timestamp,
+            ),
+        )
+
+
 def telegram_poll_loop() -> None:
     global TELEGRAM_OFFSET
     while True:
@@ -5046,32 +5597,55 @@ def telegram_poll_loop() -> None:
             token = setting(connection, "telegram_token")
             allowed_chat = setting(connection, "telegram_chat_id")
         if not token or not allowed_chat:
+            update_worker_health("telegram", "idle", detail={"configured": False})
             time.sleep(5)
             continue
-        data = telegram_request(
-            "getUpdates",
-            {"offset": TELEGRAM_OFFSET, "timeout": 20, "allowed_updates": ["message"]},
-        )
-        for update in data.get("result", []):
-            TELEGRAM_OFFSET = max(TELEGRAM_OFFSET, int(update.get("update_id", 0)) + 1)
-            message = update.get("message") or {}
-            chat_id = str((message.get("chat") or {}).get("id", ""))
-            text = str(message.get("text") or "").strip()
-            if chat_id != str(allowed_chat):
-                continue
-            handle_telegram_message(text)
-        if not data:
-            time.sleep(3)
+        try:
+            update_worker_health("telegram", "running")
+            data = telegram_request(
+                "getUpdates",
+                {"offset": TELEGRAM_OFFSET, "timeout": 20, "allowed_updates": ["message"]},
+            )
+            for update in data.get("result", []):
+                TELEGRAM_OFFSET = max(TELEGRAM_OFFSET, int(update.get("update_id", 0)) + 1)
+                message = update.get("message") or {}
+                chat_id = str((message.get("chat") or {}).get("id", ""))
+                text = str(message.get("text") or "").strip()
+                if chat_id != str(allowed_chat):
+                    continue
+                handle_telegram_message(text)
+            update_worker_health("telegram", "ok")
+            if not data:
+                time.sleep(3)
+        except Exception as error:
+            update_worker_health("telegram", "error", error=str(error))
+            LOGGER.exception("telegram polling failed")
+            time.sleep(5)
 
 
 def emby_sync_loop() -> None:
     while True:
         try:
+            update_worker_health("emby_sync", "running")
             notified = sync_emby_library_notifications()
             sync_emby_requests(suppress_notifications=notified)
-        except Exception:
-            pass
+            update_worker_health("emby_sync", "ok")
+        except Exception as error:
+            update_worker_health("emby_sync", "error", error=str(error))
+            LOGGER.exception("Emby background sync failed")
         time.sleep(300)
+
+
+def notification_outbox_loop() -> None:
+    while True:
+        try:
+            update_worker_health("notifications", "running")
+            result = process_notification_outbox()
+            update_worker_health("notifications", "ok", detail=result)
+        except Exception as error:
+            update_worker_health("notifications", "error", error=str(error))
+            LOGGER.exception("notification outbox failed")
+        time.sleep(10)
 
 
 def dian_signin_loop() -> None:
@@ -5094,8 +5668,10 @@ def dian_signin_loop() -> None:
                 and now.strftime("%H:%M") >= schedule
             ):
                 perform_dian_signin(mode, source="auto")
-        except Exception:
-            pass
+            update_worker_health("dian_signin", "ok")
+        except Exception as error:
+            update_worker_health("dian_signin", "error", error=str(error))
+            LOGGER.exception("Dian sign-in worker failed")
         time.sleep(30)
 
 
@@ -5571,6 +6147,28 @@ def auto_wash_hdhive_follow(
         target_keys = set(candidates)
         target_episodes = {episode for _season, episode in target_keys}
         episode_label = compact_episode_numbers(target_episodes)
+        try:
+            job = begin_workflow_job(
+                user_id=int(follow["user_id"]),
+                destination="p115",
+                source="hdhive",
+                resource_key=slug,
+                tmdb_id=int(follow["tmdb_id"]),
+                media_type="tv",
+                title=str(follow["title"] or resource_title),
+                season_number=min(season for season, _episode in target_keys),
+                episode_numbers=sorted(target_episodes),
+                follow_id=follow_id,
+                scope="auto_wash",
+            )
+        except HTTPException as error:
+            log_hdhive_follow_event(
+                "transfer", "skipped", str(error.detail),
+                follow=follow, cycle_id=cycle_id,
+                detail={"resource_slug": slug},
+            )
+            continue
+        job_id = int(job["id"])
         log_hdhive_follow_event(
             "unlock", "running",
             f"正在解锁资源：{resource_title} · 目标第{episode_label}集",
@@ -5586,6 +6184,7 @@ def auto_wash_hdhive_follow(
                 else ""
             )
             if not is_115_share_url(share_url):
+                fail_workflow_job(job_id, "资源未返回有效115链接", retry_seconds=21600)
                 log_hdhive_follow_event(
                     "unlock", "failed", "资源已解锁，但没有返回有效的115链接",
                     follow=follow, cycle_id=cycle_id,
@@ -5611,12 +6210,19 @@ def auto_wash_hdhive_follow(
                 if item.get("_share_id")
             ]
             if not selected_ids or not selected_episodes:
+                fail_workflow_job(job_id, "115分享中没有可安全转存的目标集", retry_seconds=21600)
                 log_hdhive_follow_event(
                     "transfer", "skipped", "115分享中没有找到可安全转存的缺失集文件",
                     follow=follow, cycle_id=cycle_id,
                     detail={"resource_slug": slug},
                 )
                 continue
+            selected_seasons = {season for season, _episode in selected_keys}
+            update_workflow_job_episodes(
+                job_id,
+                next(iter(selected_seasons)) if len(selected_seasons) == 1 else 0,
+                selected_episodes,
+            )
             selected_label = compact_episode_numbers(selected_episodes)
             log_hdhive_follow_event(
                 "transfer", "running",
@@ -5632,6 +6238,7 @@ def auto_wash_hdhive_follow(
                 share_url=share_url,
             )
             if not response_ok(received):
+                fail_workflow_job(job_id, "115拒绝接收", retry_seconds=900)
                 log_hdhive_follow_event(
                     "transfer", "failed", f"115拒绝接收第{selected_label}集",
                     follow=follow, cycle_id=cycle_id,
@@ -5641,6 +6248,7 @@ def auto_wash_hdhive_follow(
             if not wait_for_p115_change(
                 lambda: p115_folder_snapshot(client, target_cid), before_files
             ):
+                fail_workflow_job(job_id, "115目标目录未发生变化", retry_seconds=900)
                 log_hdhive_follow_event(
                     "transfer", "failed",
                     f"115已受理第{selected_label}集，但未确认目标目录发生变化",
@@ -5649,6 +6257,7 @@ def auto_wash_hdhive_follow(
                 )
                 continue
         except HTTPException as error:
+            fail_workflow_job(job_id, error.detail, retry_seconds=900)
             log_hdhive_follow_event(
                 "transfer", "failed", f"资源处理失败：{error.detail}",
                 follow=follow, cycle_id=cycle_id,
@@ -5661,6 +6270,11 @@ def auto_wash_hdhive_follow(
             f"第{selected_label}集已确认转存到115，等待 PanSave 整理与 Emby 入库",
             follow=follow, cycle_id=cycle_id,
             detail={"resource_slug": slug, "episodes": sorted(selected_episodes)},
+        )
+        update_workflow_job(
+            job_id,
+            "waiting_library",
+            f"第{selected_label}集已确认转存，等待PanSave整理与Emby入库",
         )
 
         checked_at = now_iso()
@@ -5961,6 +6575,8 @@ def refresh_hdhive_subscribed_follows(
     cycle_id: str = "",
     only_unsubscribed: bool = False,
     force_file_lists: bool = False,
+    follow_ids: Optional[set[int]] = None,
+    strict: bool = False,
 ) -> int:
     with db() as connection:
         query = "SELECT * FROM tv_follows WHERE active = 1"
@@ -5968,7 +6584,14 @@ def refresh_hdhive_subscribed_follows(
             query += " AND hdhive_subscription_id IS NULL"
         elif not include_unsubscribed:
             query += " AND hdhive_subscription_id IS NOT NULL"
-        follows = connection.execute(query).fetchall()
+        values: list[Any] = []
+        if follow_ids is not None:
+            if not follow_ids:
+                return 0
+            marks = ",".join("?" for _ in follow_ids)
+            query += f" AND id IN ({marks})"
+            values.extend(sorted(follow_ids))
+        follows = connection.execute(query, values).fetchall()
     changed = 0
     for follow in follows:
         media_type = str(follow["media_type"] or "tv")
@@ -5984,6 +6607,8 @@ def refresh_hdhive_subscribed_follows(
                 follow=follow, cycle_id=cycle_id,
             )
             if error.status_code == 429:
+                raise
+            if strict:
                 raise
             continue
         resources = normalize_supported_hdhive_resources(
@@ -6111,6 +6736,48 @@ def refresh_hdhive_subscribed_follows(
     return changed
 
 
+def hdhive_message_follow_ids(items: list[dict[str, Any]]) -> tuple[set[int], bool]:
+    subscription_ids: set[int] = set()
+    tmdb_ids: set[int] = set()
+    target_keys: set[str] = set()
+    for item in items:
+        hints = message_target_hints(item)
+        subscription_ids.update(int(value) for value in hints["subscription_ids"])
+        tmdb_ids.update(int(value) for value in hints["tmdb_ids"])
+        target_keys.update(str(value) for value in hints["target_keys"])
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT id, media_type, tmdb_id, hdhive_subscription_id "
+            "FROM tv_follows WHERE active = 1 "
+            "AND hdhive_subscription_id IS NOT NULL"
+        ).fetchall()
+        target_rows = (
+            connection.execute(
+                f"SELECT media_type, tmdb_id FROM hdhive_media_targets "
+                f"WHERE target_key IN ({','.join('?' for _ in target_keys)})",
+                sorted(target_keys),
+            ).fetchall()
+            if target_keys else []
+        )
+    target_pairs = {
+        (str(row["media_type"]), int(row["tmdb_id"])) for row in target_rows
+    }
+    matched = {
+        int(row["id"])
+        for row in rows
+        if (
+            int(row["hdhive_subscription_id"] or 0) in subscription_ids
+            or int(row["tmdb_id"] or 0) in tmdb_ids
+            or (str(row["media_type"] or "tv"), int(row["tmdb_id"] or 0))
+            in target_pairs
+        )
+    }
+    has_hints = bool(subscription_ids or tmdb_ids or target_keys)
+    if matched:
+        return matched, False
+    return {int(row["id"]) for row in rows}, not has_hints or not matched
+
+
 def poll_hdhive_follow_messages(
     refresh_follows: bool = True,
     cycle_id: str = "",
@@ -6143,6 +6810,14 @@ def poll_hdhive_follow_messages(
         else 0
     )
     if unread_count <= 0:
+        acknowledged_at = now_iso()
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_message_log SET status = 'acknowledged', "
+                "acknowledged_at = ?, last_error = '' "
+                "WHERE status = 'processed'",
+                (acknowledged_at,),
+            )
         log_hdhive_follow_event(
             "messages", "success", "影巢订阅消息读取完成，没有新消息",
             cycle_id=cycle_id, detail={"unread_count": 0},
@@ -6156,6 +6831,8 @@ def poll_hdhive_follow_messages(
     )
     items = extract_share_items(result)
     pending: list[tuple[str, str, dict[str, Any]]] = []
+    retry_ack_ids: list[int] = []
+    message_keys_by_id: dict[int, str] = {}
     message_ids: list[int] = []
     for item in items:
         message_key = str(
@@ -6167,11 +6844,11 @@ def poll_hdhive_follow_messages(
         )
         event_type = str(item.get("event_type") or item.get("type") or "")
         with db() as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM hdhive_message_log WHERE message_key = ?",
+            existing = connection.execute(
+                "SELECT status FROM hdhive_message_log WHERE message_key = ?",
                 (message_key,),
             ).fetchone()
-        if not exists:
+        if not existing or existing["status"] not in ("processed", "acknowledged"):
             pending.append((message_key, event_type, item))
         try:
             message_id = int(item.get("id") or item.get("message_id") or 0)
@@ -6179,28 +6856,35 @@ def poll_hdhive_follow_messages(
             message_id = 0
         if message_id > 0:
             message_ids.append(message_id)
+            message_keys_by_id[message_id] = message_key
+            if existing and existing["status"] == "processed":
+                retry_ack_ids.append(message_id)
     if pending:
         log_hdhive_follow_event(
             "messages", "success", f"读取到 {len(pending)} 条新订阅消息",
             cycle_id=cycle_id,
             detail={"unread_count": unread_count, "new_count": len(pending)},
         )
-        if refresh_follows:
-            refresh_hdhive_subscribed_follows(
-                cycle_id=cycle_id,
-                force_file_lists=True,
-            )
         stored_at = now_iso()
         with db() as connection:
             for message_key, event_type, item in pending:
+                hints = message_target_hints(item)
+                subscription_id = next(iter(hints["subscription_ids"]), None)
+                tmdb_id = next(iter(hints["tmdb_ids"]), 0)
                 connection.execute(
-                    "INSERT OR IGNORE INTO hdhive_message_log("
-                    "message_key, event_type, payload_json, created_at"
-                    ") VALUES(?, ?, ?, ?)",
+                    "INSERT INTO hdhive_message_log("
+                    "message_key, event_type, payload_json, status, "
+                    "subscription_id, tmdb_id, created_at"
+                    ") VALUES(?, ?, ?, 'pending', ?, ?, ?) "
+                    "ON CONFLICT(message_key) DO UPDATE SET "
+                    "payload_json = excluded.payload_json, "
+                    "event_type = excluded.event_type",
                     (
                         message_key,
                         event_type,
                         json.dumps(item, ensure_ascii=False),
+                        subscription_id,
+                        tmdb_id,
                         stored_at,
                     ),
                 )
@@ -6211,8 +6895,65 @@ def poll_hdhive_follow_messages(
                 "hdhive_last_message_title",
                 str(latest.get("title") or latest.get("body") or "订阅资源有更新")[:160],
             )
-    if message_ids:
-        hdhive_call("mark_messages_read", sorted(set(message_ids)))
+        if refresh_follows:
+            follow_ids, fallback = hdhive_message_follow_ids(
+                [item for _key, _event, item in pending]
+            )
+            log_hdhive_follow_event(
+                "scan",
+                "info",
+                (
+                    f"站内信已匹配 {len(follow_ids)} 条追更，开始精准扫描"
+                    if not fallback
+                    else "站内信缺少可用关联字段，回退扫描全部原生订阅"
+                ),
+                cycle_id=cycle_id,
+                detail={"follow_ids": sorted(follow_ids), "fallback": fallback},
+            )
+            try:
+                refresh_hdhive_subscribed_follows(
+                    cycle_id=cycle_id,
+                    force_file_lists=True,
+                    follow_ids=follow_ids,
+                    strict=True,
+                )
+            except Exception as error:
+                retry_at = (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat()
+                with db() as connection:
+                    connection.executemany(
+                        "UPDATE hdhive_message_log SET status = 'failed', "
+                        "attempt_count = attempt_count + 1, last_error = ?, "
+                        "next_retry_at = ? WHERE message_key = ?",
+                        [
+                            (str(error)[:500], retry_at, key)
+                            for key, _event, _item in pending
+                        ],
+                    )
+                raise
+        processed_at = now_iso()
+        with db() as connection:
+            connection.executemany(
+                "UPDATE hdhive_message_log SET status = 'processed', "
+                "attempt_count = attempt_count + 1, processed_at = ?, "
+                "last_error = '', next_retry_at = '' WHERE message_key = ?",
+                [(processed_at, key) for key, _event, _item in pending],
+            )
+    ids_to_ack = sorted(set(message_ids or retry_ack_ids))
+    if ids_to_ack:
+        hdhive_call("mark_messages_read", ids_to_ack)
+        acknowledged_at = now_iso()
+        with db() as connection:
+            connection.executemany(
+                "UPDATE hdhive_message_log SET status = 'acknowledged', "
+                "acknowledged_at = ?, last_error = '' WHERE message_key = ?",
+                [
+                    (acknowledged_at, message_keys_by_id[message_id])
+                    for message_id in ids_to_ack
+                    if message_id in message_keys_by_id
+                ],
+            )
     return len(pending)
 
 
@@ -6232,7 +6973,7 @@ def run_hdhive_follow_cycle(
     message_count = 0
     if {"subscription", "messages"}.issubset(authorized_scopes):
         message_count = poll_hdhive_follow_messages(
-            refresh_follows=False, cycle_id=cycle_id
+            refresh_follows=True, cycle_id=cycle_id
         )
         with db() as connection:
             last_full_scan = setting(connection, "hdhive_last_full_scan_at")
@@ -6246,10 +6987,10 @@ def run_hdhive_follow_cycle(
             last_full_timestamp = 0
         reconcile_due = time.time() - last_full_timestamp >= HDHIVE_FULL_RECONCILE_SECONDS
         changed = 0
-        if message_count > 0 or reconcile_due:
+        if reconcile_due:
             changed += refresh_hdhive_subscribed_follows(
                 cycle_id=cycle_id,
-                force_file_lists=message_count > 0,
+                force_file_lists=False,
             )
             with db() as connection:
                 set_setting(connection, "hdhive_last_full_scan_at", now_iso())
@@ -6257,7 +6998,11 @@ def run_hdhive_follow_cycle(
             log_hdhive_follow_event(
                 "scan",
                 "skipped",
-                "没有新的订阅消息；已跳过全量资源扫描，等待六小时兜底核对",
+                (
+                    "新订阅消息已完成精准扫描；本轮无需全量扫描"
+                    if message_count > 0
+                    else "没有新的订阅消息；已跳过全量资源扫描，等待每日兜底核对"
+                ),
                 cycle_id=cycle_id,
             )
         if include_unsubscribed:
@@ -6294,6 +7039,7 @@ def hdhive_follow_loop() -> None:
         except Exception:
             pass
         try:
+            update_worker_health("hdhive_follow", "running")
             with db() as connection:
                 row = hdhive_oauth_row(connection)
                 enabled = setting(connection, "hdhive_poll_enabled") != "0"
@@ -6346,6 +7092,7 @@ def hdhive_follow_loop() -> None:
                     interval=interval,
                     cycle_id=cycle_id,
                 )
+            update_worker_health("hdhive_follow", "ok")
         except Exception as error:
             retry_after = 0
             if isinstance(error, HTTPException) and error.status_code == 429:
@@ -6370,16 +7117,26 @@ def hdhive_follow_loop() -> None:
                 cycle_id=locals().get("cycle_id", ""),
                 detail={"retry_after_seconds": retry_after},
             )
+            update_worker_health("hdhive_follow", "error", error=str(error))
         time.sleep(60)
 
 
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
+    recovered = recover_stale_workflow_jobs()
+    update_worker_health(
+        "workflow_recovery", "ok", detail={"recovered_jobs": recovered}
+    )
     Thread(target=configure_telegram_menu, name="telegram-menu", daemon=True).start()
     Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
+    Thread(
+        target=notification_outbox_loop,
+        name="notification-outbox",
+        daemon=True,
+    ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
 
@@ -6454,6 +7211,130 @@ async def receive_emby_webhook(
 @APP.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def serialize_workflow_job(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["episode_numbers"] = episode_numbers_from_json(
+        item.pop("episode_numbers_json", "[]")
+    )
+    item["state_label"] = JOB_STATE_LABELS.get(item["state"], item["state"])
+    item["active"] = item["state"] in ACTIVE_JOB_STATES
+    return item
+
+
+def serialize_worker_health(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    thresholds = {
+        "notifications": 60,
+        "telegram": 120,
+        "dian_signin": 180,
+        "hdhive_follow": 180,
+        "emby_sync": 720,
+    }
+    threshold = thresholds.get(str(item["worker"]), 0)
+    stale = False
+    if threshold and str(item["status"]) != "idle":
+        try:
+            updated_at = datetime.fromisoformat(str(item["updated_at"]))
+            stale = (
+                datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)
+            ).total_seconds() > threshold
+        except (TypeError, ValueError):
+            stale = True
+    item["stale"] = stale
+    if stale:
+        item["status"] = "stale"
+    try:
+        item["detail"] = json.loads(str(item.pop("detail_json") or "{}"))
+    except (TypeError, ValueError):
+        item["detail"] = {}
+    return item
+
+
+@APP.get("/api/activity")
+def activity_summary(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    request_filter = "" if user["role"] == "admin" else "WHERE user_id = ?"
+    job_filter = "" if user["role"] == "admin" else "WHERE user_id = ?"
+    follow_filter = "WHERE active = 1" + (
+        "" if user["role"] == "admin" else " AND user_id = ?"
+    )
+    values = () if user["role"] == "admin" else (int(user["id"]),)
+    with db() as connection:
+        request_rows = connection.execute(
+            f"SELECT status, COUNT(*) AS count FROM movie_requests {request_filter} "
+            "GROUP BY status",
+            values,
+        ).fetchall()
+        job_rows = connection.execute(
+            f"SELECT state, COUNT(*) AS count FROM media_workflow_jobs {job_filter} "
+            "GROUP BY state",
+            values,
+        ).fetchall()
+        follow_count = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM tv_follows {follow_filter}", values
+            ).fetchone()[0]
+        )
+        recent_jobs = connection.execute(
+            "SELECT * FROM media_workflow_jobs "
+            + ("" if user["role"] == "admin" else "WHERE user_id = ? ")
+            + "ORDER BY updated_at DESC LIMIT 8",
+            values,
+        ).fetchall()
+    request_counts = {str(row["status"]): int(row["count"]) for row in request_rows}
+    job_counts = {str(row["state"]): int(row["count"]) for row in job_rows}
+    return {
+        "requests_active": sum(
+            request_counts.get(status, 0)
+            for status in ("pending", "approved", "searching")
+        ),
+        "requests_completed": request_counts.get("available", 0),
+        "follows_active": follow_count,
+        "jobs_active": sum(job_counts.get(state, 0) for state in ACTIVE_JOB_STATES),
+        "jobs_failed": job_counts.get("failed", 0),
+        "recent_jobs": [serialize_workflow_job(row) for row in recent_jobs],
+    }
+
+
+@APP.get("/api/admin/health")
+def admin_health(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        workers = connection.execute(
+            "SELECT * FROM worker_health ORDER BY worker"
+        ).fetchall()
+        pending_messages = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM hdhive_message_log "
+                "WHERE status IN ('pending', 'failed', 'processed')"
+            ).fetchone()[0]
+        )
+        pending_notifications = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM notification_outbox "
+                "WHERE status IN ('pending', 'failed')"
+            ).fetchone()[0]
+        )
+        active_jobs = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM media_workflow_jobs WHERE state IN ("
+                "'discovered', 'unlocking', 'submitted', 'transferred', "
+                "'organizing', 'waiting_library', 'failed')"
+            ).fetchone()[0]
+        )
+    return {
+        "workers": [serialize_worker_health(row) for row in workers],
+        "pending_messages": pending_messages,
+        "pending_notifications": pending_notifications,
+        "active_jobs": active_jobs,
+        "hdhive": hdhive_public_status(),
+    }
 
 
 @APP.get("/api/wecom/callback", response_class=PlainTextResponse)
@@ -6976,8 +7857,11 @@ def media_details(
         manual_transfer = connection.execute(
             "SELECT 1 FROM resource_transfer_log "
             "WHERE user_id = ? AND tmdb_id = ? AND transfer_scope = 'manual' "
-            "AND status = 'success' LIMIT 1",
-            (user["id"], tmdb_id),
+            "AND destination = ? AND status = 'success' LIMIT 1",
+            (
+                user["id"], tmdb_id,
+                storage_destination(user["storage_destination"]),
+            ),
         ).fetchone()
     basic["is_following"] = follow is not None
     basic["hdhive_subscribed"] = bool(
@@ -7475,6 +8359,11 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
         int(item["baseline_episode"]),
         "已从",
     )
+    item["current_emby_label"] = episode_progress_label(
+        int(item.get("current_emby_season") or 1),
+        int(item.get("current_emby_episode") or 0),
+        "已入库至",
+    )
     item["latest_label"] = episode_progress_label(
         int(item["last_seen_season"]),
         int(item["last_seen_episode"]),
@@ -7511,6 +8400,7 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
+    """Refresh current Emby progress without mutating the follow start baseline."""
     with db() as connection:
         row = connection.execute(
             "SELECT f.*, u.storage_destination FROM tv_follows f "
@@ -7538,7 +8428,7 @@ def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
     episode_number = int(progress.get("emby_latest_episode_number") or 0)
     with db() as connection:
         connection.execute(
-            "UPDATE tv_follows SET baseline_season = ?, baseline_episode = ?, "
+            "UPDATE tv_follows SET current_emby_season = ?, current_emby_episode = ?, "
             "updated_at = ? WHERE id = ?",
             (season_number, episode_number, now_iso(), follow_id),
         )
@@ -7566,6 +8456,38 @@ def list_follows(
         query += "ORDER BY f.active DESC, f.updated_at DESC"
         rows = connection.execute(query, values).fetchall()
     return {"follows": [serialize_follow(row) for row in rows]}
+
+
+@APP.get("/api/follows/{follow_id}/timeline")
+def follow_timeline(
+    follow_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1", (follow_id,)
+        ).fetchone()
+        if not follow or (
+            user["role"] != "admin" and int(follow["user_id"]) != int(user["id"])
+        ):
+            raise HTTPException(404, "没有找到这条追更")
+        events = connection.execute(
+            "SELECT id, stage, status, message, detail_json, created_at "
+            "FROM hdhive_follow_events WHERE follow_id = ? "
+            "ORDER BY id DESC LIMIT 80",
+            (follow_id,),
+        ).fetchall()
+        jobs = connection.execute(
+            "SELECT * FROM media_workflow_jobs WHERE follow_id = ? "
+            "ORDER BY updated_at DESC LIMIT 30",
+            (follow_id,),
+        ).fetchall()
+    return {
+        "follow": serialize_follow(follow),
+        "events": [dict(row) for row in events],
+        "jobs": [serialize_workflow_job(row) for row in jobs],
+    }
 
 
 @APP.get("/api/follows/emby-progress")
@@ -7636,19 +8558,19 @@ def follows_emby_progress(
                 season_number = int(progress.get("emby_latest_season_number") or 1)
                 episode_number = int(progress.get("emby_latest_episode_number") or 0)
             else:
-                season_number = int(row["baseline_season"] or 1)
-                episode_number = int(row["baseline_episode"] or 0)
+                season_number = int(row["current_emby_season"] or 1)
+                episode_number = int(row["current_emby_episode"] or 0)
             connection.execute(
-                "UPDATE tv_follows SET baseline_season = ?, baseline_episode = ?, "
+                "UPDATE tv_follows SET current_emby_season = ?, current_emby_episode = ?, "
                 "updated_at = ? WHERE id = ?",
                 (season_number, episode_number, refreshed_at, follow_id),
             )
             items.append({
                 "follow_id": follow_id,
-                "baseline_season": season_number,
-                "baseline_episode": episode_number,
-                "baseline_label": episode_progress_label(
-                    season_number, episode_number, "已从"
+                "current_emby_season": season_number,
+                "current_emby_episode": episode_number,
+                "current_emby_label": episode_progress_label(
+                    season_number, episode_number, "已入库至"
                 ),
             })
     return {"progress": items}
@@ -7670,12 +8592,12 @@ def follow_emby_progress(
     row = refresh_follow_emby_baseline(follow_id)
     return {
         "follow_id": follow_id,
-        "baseline_season": int(row["baseline_season"] or 1),
-        "baseline_episode": int(row["baseline_episode"] or 0),
-        "baseline_label": episode_progress_label(
-            int(row["baseline_season"] or 1),
-            int(row["baseline_episode"] or 0),
-            "已从",
+        "current_emby_season": int(row["current_emby_season"] or 1),
+        "current_emby_episode": int(row["current_emby_episode"] or 0),
+        "current_emby_label": episode_progress_label(
+            int(row["current_emby_season"] or 1),
+            int(row["current_emby_episode"] or 0),
+            "已入库至",
         ),
     }
 
@@ -7713,9 +8635,16 @@ async def create_follow(
         media_type == "tv"
         and not known_in_library
         and not (
-            has_manual_transfer(tmdb_id, int(user["id"]))
+            (
+                has_manual_transfer(
+                    tmdb_id, int(user["id"]), user["storage_destination"]
+                )
+                or has_initial_media_submission(
+                    tmdb_id, int(user["id"]), user["storage_destination"]
+                )
+            )
             if user["storage_destination"] == "p123"
-            else has_manual_transfer(tmdb_id)
+            else has_manual_transfer(tmdb_id, destination="p115")
         )
     ):
         raise HTTPException(409, "请先手动转存初始版本，再开启影巢追更")
@@ -7744,8 +8673,9 @@ async def create_follow(
             "INSERT INTO tv_follows("
             "user_id, tmdb_id, media_type, title, original_title, year, poster_path, "
             "baseline_season, baseline_episode, last_seen_season, "
-            "last_seen_episode, created_at, updated_at"
-            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "last_seen_episode, current_emby_season, current_emby_episode, "
+            "created_at, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(user_id, tmdb_id) DO UPDATE SET active = 1, "
             "media_type = excluded.media_type, title = excluded.title, "
             "original_title = excluded.original_title, "
@@ -7764,6 +8694,8 @@ async def create_follow(
             "THEN MAX(tv_follows.last_seen_episode, excluded.last_seen_episode) "
             "ELSE tv_follows.last_seen_episode END, "
             "last_seen_season = MAX(tv_follows.last_seen_season, excluded.last_seen_season), "
+            "current_emby_season = excluded.current_emby_season, "
+            "current_emby_episode = excluded.current_emby_episode, "
             "updated_at = excluded.updated_at",
             (
                 user["id"],
@@ -7773,6 +8705,8 @@ async def create_follow(
                 str(detail.get("original_name") or detail.get("original_title") or ""),
                 first_air[:4],
                 str(detail.get("poster_path") or ""),
+                baseline_season,
+                baseline_episode,
                 baseline_season,
                 baseline_episode,
                 baseline_season,
@@ -8112,6 +9046,29 @@ async def hdhive_transfer(
     if not slug or media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影巢资源信息无效")
 
+    title_spec = parse_episode_spec(payload.get("resource_title"))
+    wanted_episodes = set(title_spec["episode_numbers"])
+    selected_episode_numbers = sorted(wanted_episodes)
+    with db() as connection:
+        follow_row = connection.execute(
+            "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
+            "AND active = 1",
+            (int(user["id"]), tmdb_id),
+        ).fetchone()
+    job = begin_workflow_job(
+        user_id=int(user["id"]),
+        destination=str(user["storage_destination"]),
+        source="hdhive",
+        resource_key=slug,
+        tmdb_id=tmdb_id,
+        media_type=media_type,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        season_number=int(title_spec["season_number"]),
+        episode_numbers=selected_episode_numbers,
+        follow_id=int(follow_row["id"]) if follow_row else None,
+        scope=transfer_scope,
+    )
+    attach_workflow_job_to_request(request, int(job["id"]))
     unlocked = await asyncio.to_thread(hdhive_call, "unlock", slug)
     data = unlocked.get("data", unlocked)
     if not isinstance(data, dict):
@@ -8120,11 +9077,8 @@ async def hdhive_transfer(
     if not share_url:
         raise HTTPException(502, "影巢解锁后没有返回资源链接")
 
-    title_spec = parse_episode_spec(payload.get("resource_title"))
-    wanted_episodes = set(title_spec["episode_numbers"])
-    selected_episode_numbers = sorted(wanted_episodes)
     if user.get("storage_destination") == "p123":
-        return await deliver_to_pansave(
+        result = await deliver_to_pansave(
             user=user,
             share_url=share_url,
             source="hdhive",
@@ -8134,6 +9088,10 @@ async def hdhive_transfer(
             season_number=int(title_spec["season_number"]),
             episode_numbers=selected_episode_numbers,
         )
+        update_workflow_job(
+            int(job["id"]), "waiting_library", "链接已发送123，等待整理与入库"
+        )
+        return {**result, "job_id": int(job["id"]), "workflow_state": "waiting_library"}
 
     client = await asyncio.to_thread(p115_client)
     with db() as connection:
@@ -8161,6 +9119,7 @@ async def hdhive_transfer(
             )
         mode = "offline"
         message = "已加入115离线下载，完成后会出现在所选目录"
+        workflow_state = "submitted"
     else:
         before_files = await asyncio.to_thread(
             p115_folder_snapshot,
@@ -8204,6 +9163,7 @@ async def hdhive_transfer(
             )
         mode = "share"
         message = "已转存"
+        workflow_state = "waiting_library"
 
     record_transfer(
         user_id=int(user["id"]),
@@ -8211,7 +9171,7 @@ async def hdhive_transfer(
         resource_key=slug,
         tmdb_id=tmdb_id,
         transfer_scope=transfer_scope,
-        status="success",
+        status="submitted" if mode == "offline" else "success",
         detail=message,
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
@@ -8220,7 +9180,14 @@ async def hdhive_transfer(
         f"☁️ 影巢资源{'已加入离线下载' if mode == 'offline' else '转存成功'}\n\n"
         f"{payload.get('title') or '影片'} · {user['display_name']}\n{message}"
     )
-    return {"ok": True, "mode": mode, "message": message}
+    update_workflow_job(int(job["id"]), workflow_state, message)
+    return {
+        "ok": True,
+        "mode": mode,
+        "message": message,
+        "job_id": int(job["id"]),
+        "workflow_state": workflow_state,
+    }
 
 
 @APP.post("/api/dian/transfer")
@@ -8241,6 +9208,26 @@ async def dian_transfer(
     title_spec = parse_episode_spec(payload.get("resource_title"))
     wanted_episodes = set(title_spec["episode_numbers"])
     selected_episode_numbers = sorted(wanted_episodes)
+    with db() as connection:
+        follow_row = connection.execute(
+            "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
+            "AND active = 1",
+            (int(user["id"]), tmdb_id),
+        ).fetchone()
+    job = begin_workflow_job(
+        user_id=int(user["id"]),
+        destination=str(user["storage_destination"]),
+        source="dian",
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        media_type=media_type,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        season_number=int(title_spec["season_number"]),
+        episode_numbers=selected_episode_numbers,
+        follow_id=int(follow_row["id"]) if follow_row else None,
+        scope=transfer_scope,
+    )
+    attach_workflow_job_to_request(request, int(job["id"]))
     unlocked = await asyncio.to_thread(
         dian_call,
         "unlock",
@@ -8264,7 +9251,7 @@ async def dian_transfer(
         )
     share_url = links[0]
     if user.get("storage_destination") == "p123":
-        return await deliver_to_pansave(
+        result = await deliver_to_pansave(
             user=user,
             share_url=share_url,
             source="dian",
@@ -8274,6 +9261,10 @@ async def dian_transfer(
             season_number=int(title_spec["season_number"]),
             episode_numbers=selected_episode_numbers,
         )
+        update_workflow_job(
+            int(job["id"]), "waiting_library", "链接已发送123，等待整理与入库"
+        )
+        return {**result, "job_id": int(job["id"]), "workflow_state": "waiting_library"}
 
     client = await asyncio.to_thread(p115_client)
     with db() as connection:
@@ -8320,15 +9311,20 @@ async def dian_transfer(
             resource_key=resource_key,
             tmdb_id=tmdb_id,
             transfer_scope=transfer_scope,
-            status="success",
+            status="submitted",
             detail=f"已加入115离线下载（{len(links)}个任务）",
             season_number=int(title_spec["season_number"]),
             episode_numbers=selected_episode_numbers,
+        )
+        update_workflow_job(
+            int(job["id"]), "submitted", f"已创建{len(links)}个115离线任务"
         )
         return {
             "ok": True,
             "mode": "offline",
             "message": f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录",
+            "job_id": int(job["id"]),
+            "workflow_state": "submitted",
         }
 
     before_files = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
@@ -8383,10 +9379,13 @@ async def dian_transfer(
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
+    update_workflow_job(int(job["id"]), "waiting_library", "已确认115转存，等待入库")
     return {
         "ok": True,
         "mode": "share",
         "message": "已转存",
+        "job_id": int(job["id"]),
+        "workflow_state": "waiting_library",
     }
 
 
@@ -8482,8 +9481,10 @@ async def update_request(request_id: int, request: Request, movie_session: Optio
         if not row:
             raise HTTPException(404, "没有找到这条需求")
         connection.execute(
-            "UPDATE movie_requests SET status = ?, admin_note = ?, updated_at = ? WHERE id = ?",
-            (status, note, now_iso(), request_id),
+            "UPDATE movie_requests SET status = ?, admin_note = ?, "
+            "completed_at = CASE WHEN ? = 'available' THEN ? ELSE '' END, "
+            "updated_at = ? WHERE id = ?",
+            (status, note, status, now_iso(), now_iso(), request_id),
         )
     message = f"📌 求片状态更新\n\n{row['title']} → {STATUS_NAMES[status]}\n申请人：{row['display_name']}"
     if note:
@@ -9233,10 +10234,8 @@ def emby_sync(
     require_admin(movie_session)
     if destination not in (None, "p115", "p123"):
         raise HTTPException(400, "Emby 类型无效")
-    return {
-        "ok": True,
-        "removed": sync_emby_requests(force=True, destination=destination),
-    }
+    completed = sync_emby_requests(force=True, destination=destination)
+    return {"ok": True, "completed": completed, "removed": completed}
 
 
 @APP.post("/api/admin/wecom-test")
