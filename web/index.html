@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0d0f12">
+  <meta name="google" content="notranslate">
   <title>映单</title>
   <style>
     :root {
@@ -490,7 +491,7 @@
     @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
   </style>
 </head>
-<body>
+<body translate="no">
   <div id="authOverlay" class="overlay hidden">
     <form id="authForm" class="auth-card">
       <div class="brand"><div class="brand-mark">映</div><div><div class="brand-name">映单</div><div class="brand-sub">私人影视请求中心</div></div></div>
@@ -1222,7 +1223,9 @@
       }
     }
     async function loadFollowTimeline(followId,button) {
-      const root=$('followList').querySelector(`[data-follow-results="${followId}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在读取完整处理时间线…</div>';button.disabled=true;
+      const root=$('followList').querySelector(`[data-follow-results="${followId}"]`);
+      if(root.dataset.contentType==='timeline'&&!root.classList.contains('hidden')){root.classList.add('hidden');root.innerHTML='';root.dataset.contentType='';button.textContent='处理时间线';return;}
+      root.dataset.contentType='timeline';root.classList.remove('hidden');root.innerHTML='<div class="muted">正在读取完整处理时间线…</div>';button.disabled=true;button.textContent='收起时间线';
       try {
         const data=await api(`/api/follows/${followId}/timeline`);
         const jobs=(data.jobs||[]).map(job=>`<div class="timeline-item ${escapeHtml(job.state)}"><strong>${escapeHtml(job.state_label)}</strong> · ${escapeHtml(job.title||job.resource_key)}<div class="muted">${escapeHtml(job.detail||job.last_error||'等待下一步')} · ${escapeHtml(new Date(job.updated_at).toLocaleString('zh-CN',{hour12:false}))}</div></div>`);
@@ -1231,7 +1234,7 @@
       } catch(error){root.innerHTML=`<div class="empty">时间线读取失败：${escapeHtml(error.message)}</div>`;} finally {button.disabled=false;}
     }
     async function searchFollowResources(follow,button) {
-      const root=$('followList').querySelector(`[data-follow-results="${follow.id}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在同时查询影巢和癫影…</div>';button.disabled=true;
+      const root=$('followList').querySelector(`[data-follow-results="${follow.id}"]`);root.dataset.contentType='resources';root.classList.remove('hidden');root.innerHTML='<div class="muted">正在同时查询影巢和癫影…</div>';button.disabled=true;const timelineButton=$('followList').querySelector(`[data-follow-timeline="${follow.id}"]`);if(timelineButton)timelineButton.textContent='处理时间线';
       try {
         const result=preview?{hdhive_resources:previewHDHiveResources({...follow,media_type:follow.media_type||'tv'}),dian_resources:previewResources({...follow,media_type:follow.media_type||'tv'})}:await api(`/api/follows/${follow.id}/resources`);
         if(result.follow)Object.assign(follow,result.follow);
