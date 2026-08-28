@@ -1132,7 +1132,7 @@
     async function loadFollows() {
       const follows=preview?demoFollows:(await api('/api/follows')).follows;
       $('followCount').textContent=follows.filter(item=>item.active).length?`· ${follows.filter(item=>item.active).length}`:'';
-      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const wash=item.wash;const hours=wash?Math.ceil((wash.remaining_seconds||0)/3600):0;const washText=wash?`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')} · ${wash.locked?'洗版已锁定':`洗版中，剩余约${hours}小时`} · 当前 ${wash.last_file_size_label||'容量未知'} · 已处理 ${wash.process_count} 次`:'';return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(item.baseline_episode?`Emby 已有至第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口')}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'当前使用低频资源查询兜底，等待原生订阅权限'}</div>${washText?`<div class="request-meta">${escapeHtml(washText)}</div>`:''}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
+      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const wash=item.wash;const hours=wash?Math.ceil((wash.remaining_seconds||0)/3600):0;const washText=wash?`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')} · ${wash.locked?'洗版已锁定':`洗版中，剩余约${hours}小时`} · 当前 ${wash.last_file_size_label||'容量未知'} · 已处理 ${wash.process_count} 次`:'';const embyText=item.baseline_episode?`Emby 已有至${Number(item.baseline_season)>1?`第${item.baseline_season}季`:''}第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口';return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(embyText)}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'当前使用低频资源查询兜底，等待原生订阅权限'}</div>${washText?`<div class="request-meta">${escapeHtml(washText)}</div>`:''}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${item.id}">取消追更</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
       $('followList').querySelectorAll('[data-follow-search]').forEach(button=>button.onclick=()=>searchFollowResources(follows.find(item=>Number(item.id)===Number(button.dataset.followSearch)),button));
       $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.baseline_episode)>0,emby_latest_episode_number:Number(item.baseline_episode||0),emby_episode_label:item.baseline_episode?`已入库至第${item.baseline_episode}集`:'尚未入库'});});
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(Number(button.dataset.followDelete),button));
@@ -1159,19 +1159,22 @@
         }).join(''):'<div class="empty">当前筛选条件下还没有追更日志</div>';
       } catch(error) {root.innerHTML=`<div class="empty">追更日志读取失败：${escapeHtml(error.message)}</div>`;}
     }
-    function refreshFollowEmbyProgress(follows) {
+    async function refreshFollowEmbyProgress(follows) {
       if(preview)return;
-      follows.filter(item=>item.media_type!=='movie').forEach(async item=>{
-        try {
-          const progress=await api(`/api/follows/${item.id}/emby-progress`);
+      try {
+        const result=await api('/api/follows/emby-progress');
+        const progressById=new Map((result.progress||[]).map(item=>[Number(item.follow_id),item]));
+        follows.filter(item=>item.media_type!=='movie').forEach(item=>{
+          const progress=progressById.get(Number(item.id));
+          if(!progress)return;
           item.baseline_season=Number(progress.baseline_season||1);
           item.baseline_episode=Number(progress.baseline_episode||0);
           const note=$('followList').querySelector(`[data-follow-progress="${item.id}"]`);
-          if(note)note.textContent=item.baseline_episode?`Emby 已有至第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口';
-        } catch(error) {
-          // Keep the saved progress visible when Emby is temporarily unavailable.
-        }
-      });
+          if(note)note.textContent=item.baseline_episode?`Emby 已有至${item.baseline_season>1?`第${item.baseline_season}季`:''}第${item.baseline_episode}集，新的115候选将自动进入洗版窗口`:'新的115候选将自动进入洗版窗口';
+        });
+      } catch(error) {
+        // Keep the saved progress visible when Emby is temporarily unavailable.
+      }
     }
     async function searchFollowResources(follow,button) {
       const root=$('followList').querySelector(`[data-follow-results="${follow.id}"]`);root.classList.remove('hidden');root.innerHTML='<div class="muted">正在同时查询影巢和癫影…</div>';button.disabled=true;
@@ -1362,7 +1365,7 @@
       $('hdhiveLockAfterWindow').checked=Boolean(hdhive.lock_after_window);
       const followAuthorized=Boolean(hdhive.subscription_authorized&&hdhive.messages_authorized);
       $('hdhiveFollowPermission').textContent=followAuthorized?'订阅与消息已授权':hdhive.connected?'需要重新授权':'等待授权';
-      $('hdhiveFollowStatus').textContent=`仅处理115资源 · 最近检查：${hdhive.last_poll_at||'尚未检查'} · 最近消息：${hdhive.last_message_title||'暂无'} · 洗版中：${hdhive.pending_candidates||0}${hdhive.last_poll_error?` · 错误：${hdhive.last_poll_error}`:''}`;
+      $('hdhiveFollowStatus').textContent=`仅自动处理115直链资源 · 最近检查：${hdhive.last_poll_at||'尚未检查'} · 最近全量核对：${hdhive.last_full_scan_at||'尚未核对'} · 最近消息：${hdhive.last_message_title||'暂无'} · 洗版中：${hdhive.pending_candidates||0}${hdhive.next_poll_at?` · 下次重试：${hdhive.next_poll_at}`:''}${hdhive.last_poll_error?` · 错误：${hdhive.last_poll_error}`:''}`;
       $('hdhiveSigninEnabled').checked=Boolean(hdhive.signin_enabled);
       $('hdhiveSigninTime').value=hdhive.signin_time||'08:35';
       $('hdhiveSigninMode').value=hdhive.signin_mode||'normal';

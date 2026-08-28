@@ -119,7 +119,8 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
     def test_follow_progress_refreshes_after_initial_list_render(self):
         html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
         self.assertIn("refreshFollowEmbyProgress(follows)", html)
-        self.assertIn("/emby-progress`)", html)
+        self.assertIn("api('/api/follows/emby-progress')", html)
+        self.assertNotIn("api(`/api/follows/${item.id}/emby-progress`)", html)
         self.assertNotIn("await refreshFollowEmbyProgress(follows)", html)
 
     def test_admin_can_edit_notice_inline(self):

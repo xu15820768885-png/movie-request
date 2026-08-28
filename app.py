@@ -85,6 +85,10 @@ RESOURCE_RESPONSE_CACHE: dict[tuple[str, str, str, int, int], tuple[float, dict[
 RESOURCE_REQUEST_LOCKS: dict[tuple[str, str, str, int, int], Lock] = {}
 RESOURCE_CACHE_SECONDS = 120
 RESOURCE_CACHE_MAX_ITEMS = 256
+HDHIVE_FILE_LIST_CACHE_SECONDS = 6 * 3600
+HDHIVE_INVALID_FILE_LIST_CACHE_SECONDS = 24 * 3600
+HDHIVE_TRANSIENT_FILE_LIST_CACHE_SECONDS = 15 * 60
+HDHIVE_FULL_RECONCILE_SECONDS = 6 * 3600
 IMAGE_DOWNLOAD_LOCKS: dict[str, Lock] = {}
 IMAGE_CACHE_CLEANUP_LOCK = Lock()
 IMAGE_CACHE_LAST_CLEANUP = 0.0
@@ -509,6 +513,16 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS hdhive_wash_episode_time_idx
                 ON hdhive_wash_episodes(follow_id, closes_at);
+            CREATE TABLE IF NOT EXISTS hdhive_file_list_cache (
+                slug TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'success',
+                error TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS hdhive_file_list_cache_expiry_idx
+                ON hdhive_file_list_cache(expires_at);
             """
         )
         user_columns = {
@@ -765,7 +779,17 @@ def hdhive_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
             )
         if error.status == 429:
             wait = f"，请等待约 {error.retry_after} 秒" if error.retry_after else ""
-            raise HTTPException(429, f"影巢调用已达到限制{wait}") from error
+            scope = f"（限制范围：{error.limit_scope}）" if error.limit_scope else ""
+            headers = (
+                {"Retry-After": str(error.retry_after)}
+                if error.retry_after > 0
+                else None
+            )
+            raise HTTPException(
+                429,
+                f"影巢调用已达到限制{scope}{wait}",
+                headers=headers,
+            ) from error
         raise HTTPException(error.status or 502, f"影巢接口：{error}") from error
     except (requests.RequestException, RuntimeError, ValueError, KeyError) as error:
         raise HTTPException(502, f"暂时无法连接影巢：{error}") from error
@@ -1448,6 +1472,61 @@ def select_largest_missing_episode_files(
     return list(selected.values()), selected_episodes
 
 
+def select_largest_missing_episode_files_by_season(
+    items: list[dict[str, Any]],
+    missing_episode_keys: set[tuple[int, int]],
+    fallback_season: int = 1,
+) -> tuple[list[dict[str, Any]], set[tuple[int, int]]]:
+    """Pick media and subtitle files without merging equal episode numbers across seasons."""
+
+    media_extensions = {
+        ".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".wmv", ".flv", ".webm"
+    }
+    subtitle_extensions = {".srt", ".ass", ".ssa", ".sub", ".vtt"}
+    best_by_episode: dict[tuple[int, int], dict[str, Any]] = {}
+    subtitles: list[tuple[dict[str, Any], set[tuple[int, int]]]] = []
+    for item in items:
+        if item.get("_share_is_dir"):
+            continue
+        name = str(item.get("_share_name") or "")
+        parsed = parse_episode_spec(name)
+        seasons = {
+            int(value) for value in parsed.get("season_numbers") or [] if int(value) > 0
+        }
+        # A cross-season filename cannot safely map one flat episode list back
+        # to its seasons, so leave it for manual handling.
+        if len(seasons) > 1:
+            continue
+        season = next(iter(seasons), int(fallback_season or 1))
+        keys = {
+            (season, int(episode))
+            for episode in parsed.get("episode_numbers") or []
+            if (season, int(episode)) in missing_episode_keys
+        }
+        if not keys:
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix in subtitle_extensions:
+            subtitles.append((item, keys))
+            continue
+        if suffix and suffix not in media_extensions:
+            continue
+        size = p115_share_item_size(item)
+        for key in keys:
+            current = best_by_episode.get(key)
+            if current is None or size > p115_share_item_size(current):
+                best_by_episode[key] = item
+
+    selected: dict[str, dict[str, Any]] = {}
+    for item in best_by_episode.values():
+        selected[str(item.get("_share_id") or id(item))] = item
+    selected_keys = set(best_by_episode)
+    for item, keys in subtitles:
+        if keys & selected_keys:
+            selected[str(item.get("_share_id") or id(item))] = item
+    return list(selected.values()), selected_keys
+
+
 def transfer_completed(source: str, resource_key: str, transfer_scope: str) -> bool:
     with db() as connection:
         return bool(
@@ -2011,6 +2090,15 @@ def hdhive_resource_is_supported(resource: dict[str, Any]) -> bool:
         resource.get("pan_type") or resource.get("share_type_label") or ""
     ).strip().lower()
     return "115" in pan_type or bool(resource.get("is_offline"))
+
+
+def hdhive_resource_is_direct_115(resource: dict[str, Any]) -> bool:
+    """Return whether HDHive can preview and directly receive this 115 share."""
+
+    pan_type = str(
+        resource.get("pan_type") or resource.get("share_type_label") or ""
+    ).strip().lower()
+    return "115" in pan_type and not bool(resource.get("is_offline"))
 
 
 def normalize_supported_hdhive_resources(
@@ -3043,6 +3131,36 @@ def episode_progress_label(
     if season_number > 1:
         return f"{prefix}第{season_number}季第{episode_number}集"
     return f"{prefix}第{episode_number}集"
+
+
+def update_follow_progress_pair(
+    connection: sqlite3.Connection,
+    follow_id: int,
+    prefix: str,
+    season_number: int,
+    episode_number: int,
+) -> None:
+    """Advance a season/episode pair atomically instead of maximizing each column."""
+
+    if prefix not in ("last_seen", "last_transferred"):
+        raise ValueError("invalid follow progress prefix")
+    season_column = f"{prefix}_season"
+    episode_column = f"{prefix}_episode"
+    connection.execute(
+        f"UPDATE tv_follows SET {episode_column} = CASE "
+        f"WHEN ? > {season_column} THEN ? "
+        f"WHEN ? = {season_column} THEN MAX({episode_column}, ?) "
+        f"ELSE {episode_column} END, "
+        f"{season_column} = MAX({season_column}, ?) WHERE id = ?",
+        (
+            int(season_number),
+            int(episode_number),
+            int(season_number),
+            int(episode_number),
+            int(season_number),
+            int(follow_id),
+        ),
+    )
 
 
 def emby_series_episode_progress(
@@ -5128,6 +5246,93 @@ def hdhive_file_episode_candidates(
     return candidates
 
 
+def hdhive_cached_file_list(
+    slug: str,
+    *,
+    force: bool = False,
+) -> tuple[Optional[dict[str, Any]], bool, str]:
+    """Read an HDHive file list with durable success and failure cooldowns."""
+
+    slug = str(slug or "").strip()
+    if not slug:
+        return None, False, "资源缺少 slug"
+    now = datetime.now(timezone.utc)
+    with db() as connection:
+        cached = connection.execute(
+            "SELECT payload_json, status, error, expires_at "
+            "FROM hdhive_file_list_cache WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+    if cached:
+        try:
+            fresh = datetime.fromisoformat(str(cached["expires_at"])) > now
+        except (TypeError, ValueError):
+            fresh = False
+        if fresh:
+            if cached["status"] != "success":
+                return None, True, str(cached["error"] or "资源文件列表暂不可用")
+            if not force:
+                try:
+                    payload = json.loads(str(cached["payload_json"] or "{}"))
+                except (TypeError, ValueError):
+                    payload = None
+                if isinstance(payload, dict):
+                    return payload, True, ""
+
+    try:
+        result = hdhive_call("resource_file_list", slug)
+    except HTTPException as error:
+        if error.status_code == 429 or error.status_code in (401, 403):
+            raise
+        permanent = error.status_code in (400, 404, 410, 422)
+        ttl = (
+            HDHIVE_INVALID_FILE_LIST_CACHE_SECONDS
+            if permanent
+            else HDHIVE_TRANSIENT_FILE_LIST_CACHE_SECONDS
+        )
+        message = str(error.detail or f"HTTP {error.status_code}")[:500]
+        checked_at = now_iso()
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO hdhive_file_list_cache("
+                "slug, payload_json, status, error, expires_at, updated_at"
+                ") VALUES(?, '', ?, ?, ?, ?) "
+                "ON CONFLICT(slug) DO UPDATE SET payload_json = '', "
+                "status = excluded.status, error = excluded.error, "
+                "expires_at = excluded.expires_at, updated_at = excluded.updated_at",
+                (
+                    slug,
+                    "invalid" if permanent else "failed",
+                    message,
+                    (now + timedelta(seconds=ttl)).isoformat(),
+                    checked_at,
+                ),
+            )
+        return None, False, message
+
+    checked_at = now_iso()
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO hdhive_file_list_cache("
+            "slug, payload_json, status, error, expires_at, updated_at"
+            ") VALUES(?, ?, 'success', '', ?, ?) "
+            "ON CONFLICT(slug) DO UPDATE SET payload_json = excluded.payload_json, "
+            "status = 'success', error = '', expires_at = excluded.expires_at, "
+            "updated_at = excluded.updated_at",
+            (
+                slug,
+                json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                (now + timedelta(seconds=HDHIVE_FILE_LIST_CACHE_SECONDS)).isoformat(),
+                checked_at,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM hdhive_file_list_cache WHERE expires_at < ?",
+            ((now - timedelta(days=7)).isoformat(),),
+        )
+    return result, False, ""
+
+
 def hdhive_wash_candidate_allowed(
     follow: sqlite3.Row,
     candidate: dict[str, Any],
@@ -5148,10 +5353,10 @@ def hdhive_wash_candidate_allowed(
             "AND season_number = ? AND episode_number = ?",
             (follow_id, season, episode),
         ).fetchone()
+        if not config["wash_after_emby"] and (season, episode) in emby_present:
+            return False
         if row is None:
             if (season, episode) <= baseline:
-                return False
-            if not config["wash_after_emby"] and (season, episode) in emby_present:
                 return False
             opened_at = now.isoformat()
             closes_at = (now + timedelta(hours=config["window_hours"])).isoformat()
@@ -5222,6 +5427,7 @@ def auto_wash_hdhive_follow(
     follow_id: int,
     resources: list[dict[str, Any]],
     cycle_id: str = "",
+    force_file_lists: bool = False,
 ) -> dict[str, Any]:
     config = hdhive_wash_config()
     if not config["enabled"]:
@@ -5257,7 +5463,13 @@ def auto_wash_hdhive_follow(
         or 1
     )
     prepared: list[tuple[dict[str, Any], dict[tuple[int, int], dict[str, Any]]]] = []
-    for resource in sorted(resources, key=hdhive_resource_priority, reverse=True)[:12]:
+    direct_resources = [
+        resource for resource in resources
+        if hdhive_resource_is_direct_115(resource)
+    ]
+    for resource in sorted(
+        direct_resources, key=hdhive_resource_priority, reverse=True
+    )[:12]:
         slug = str(resource.get("slug") or "").strip()
         if not slug or not hdhive_resource_is_supported(resource):
             continue
@@ -5267,13 +5479,25 @@ def auto_wash_hdhive_follow(
             follow=follow, cycle_id=cycle_id, detail={"resource_slug": slug},
         )
         try:
-            file_result = hdhive_call("resource_file_list", slug)
-        except HTTPException as error:
+            file_result, from_cache, file_error = hdhive_cached_file_list(
+                slug, force=force_file_lists
+            )
+        except HTTPException:
+            raise
+        if file_result is None:
             log_hdhive_follow_event(
-                "file_list", "failed",
-                f"资源文件列表读取失败：{resource_title} · {error.detail}",
+                "file_list", "skipped" if from_cache else "failed",
+                (
+                    f"资源文件列表已进入冷却：{resource_title} · {file_error}"
+                    if from_cache
+                    else f"资源文件列表读取失败：{resource_title} · {file_error}"
+                ),
                 follow=follow, cycle_id=cycle_id,
-                detail={"resource_slug": slug},
+                detail={
+                    "resource_slug": slug,
+                    "cached": from_cache,
+                    "error": file_error,
+                },
             )
             continue
         candidates = hdhive_file_episode_candidates(slug, file_result, fallback_season)
@@ -5295,6 +5519,7 @@ def auto_wash_hdhive_follow(
                 "resource_slug": slug,
                 "identified_count": len(candidates),
                 "candidate_count": len(allowed),
+                "cached": from_cache,
             },
         )
         if allowed:
@@ -5343,7 +5568,8 @@ def auto_wash_hdhive_follow(
     for resource, candidates in prepared:
         slug = str(resource.get("slug") or "")
         resource_title = str(resource.get("title") or slug)
-        target_episodes = {episode for _season, episode in candidates}
+        target_keys = set(candidates)
+        target_episodes = {episode for _season, episode in target_keys}
         episode_label = compact_episode_numbers(target_episodes)
         log_hdhive_follow_event(
             "unlock", "running",
@@ -5373,9 +5599,12 @@ def auto_wash_hdhive_follow(
                 detail={"resource_slug": slug},
             )
             tree = p115_share_tree(client, share_url)
-            selected, selected_episodes = select_largest_missing_episode_files(
-                tree, target_episodes
+            selected, selected_keys = select_largest_missing_episode_files_by_season(
+                tree,
+                target_keys,
+                fallback_season=int(follow["baseline_season"] or 1),
             )
+            selected_episodes = {episode for _season, episode in selected_keys}
             selected_ids = [
                 str(item.get("_share_id") or "")
                 for item in selected
@@ -5436,7 +5665,7 @@ def auto_wash_hdhive_follow(
 
         checked_at = now_iso()
         for (season, episode), candidate in candidates.items():
-            if episode not in selected_episodes:
+            if (season, episode) not in selected_keys:
                 continue
             detail = (
                 f"自动洗版第{episode}集：{candidate['file_name']} "
@@ -5490,14 +5719,17 @@ def auto_wash_hdhive_follow(
     latest = max(transferred)
     message = f"已提交洗版：{', '.join(summaries)}"
     with db() as connection:
+        update_follow_progress_pair(
+            connection, follow_id, "last_transferred", latest[0], latest[1]
+        )
+        update_follow_progress_pair(
+            connection, follow_id, "last_seen", latest[0], latest[1]
+        )
         connection.execute(
-            "UPDATE tv_follows SET last_transferred_season = ?, "
-            "last_transferred_episode = MAX(last_transferred_episode, ?), "
-            "last_seen_season = ?, last_seen_episode = MAX(last_seen_episode, ?), "
-            "last_checked_at = ?, last_message = ?, updated_at = ? WHERE id = ?",
+            "UPDATE tv_follows SET last_checked_at = ?, last_message = ?, "
+            "updated_at = ? WHERE id = ?",
             (
-                latest[0], latest[1], latest[0], latest[1], now_iso(), message,
-                now_iso(), follow_id,
+                now_iso(), message, now_iso(), follow_id,
             ),
         )
     send_notifications(
@@ -5674,18 +5906,16 @@ def auto_replenish_hdhive_follow(
             "多集资源优先，同集选择最大文件"
         )
         with db() as connection:
+            update_follow_progress_pair(
+                connection, follow_id, "last_transferred", season_number, latest
+            )
+            update_follow_progress_pair(
+                connection, follow_id, "last_seen", season_number, latest
+            )
             connection.execute(
-                "UPDATE tv_follows SET last_transferred_season = ?, "
-                "last_transferred_episode = MAX(last_transferred_episode, ?), "
-                "last_seen_season = ?, "
-                "last_seen_episode = MAX(last_seen_episode, ?), "
-                "last_checked_at = ?, last_message = ?, updated_at = ? "
-                "WHERE id = ?",
+                "UPDATE tv_follows SET last_checked_at = ?, last_message = ?, "
+                "updated_at = ? WHERE id = ?",
                 (
-                    season_number,
-                    latest,
-                    season_number,
-                    latest,
                     checked_at,
                     message,
                     checked_at,
@@ -5729,10 +5959,14 @@ def auto_replenish_hdhive_follow(
 def refresh_hdhive_subscribed_follows(
     include_unsubscribed: bool = False,
     cycle_id: str = "",
+    only_unsubscribed: bool = False,
+    force_file_lists: bool = False,
 ) -> int:
     with db() as connection:
         query = "SELECT * FROM tv_follows WHERE active = 1"
-        if not include_unsubscribed:
+        if only_unsubscribed:
+            query += " AND hdhive_subscription_id IS NULL"
+        elif not include_unsubscribed:
             query += " AND hdhive_subscription_id IS NOT NULL"
         follows = connection.execute(query).fetchall()
     changed = 0
@@ -5749,14 +5983,31 @@ def refresh_hdhive_subscribed_follows(
                 "scan", "failed", f"影巢追更资源读取失败：{error.detail}",
                 follow=follow, cycle_id=cycle_id,
             )
+            if error.status_code == 429:
+                raise
             continue
         resources = normalize_supported_hdhive_resources(
             extract_share_items(result)
         )
+        direct_resources = [
+            resource for resource in resources
+            if hdhive_resource_is_direct_115(resource)
+        ]
         log_hdhive_follow_event(
-            "scan", "success", f"影巢资源读取完成，共找到 {len(resources)} 个115候选",
+            "scan", "success",
+            (
+                f"影巢资源读取完成，共找到 {len(direct_resources)} 个115直转候选"
+                + (
+                    f"；另有 {len(resources) - len(direct_resources)} 个离线候选不读取文件列表"
+                    if len(resources) > len(direct_resources)
+                    else ""
+                )
+            ),
             follow=follow, cycle_id=cycle_id,
-            detail={"resource_count": len(resources)},
+            detail={
+                "resource_count": len(resources),
+                "direct_115_count": len(direct_resources),
+            },
         )
         if media_type == "movie":
             resources = [
@@ -5784,7 +6035,10 @@ def refresh_hdhive_subscribed_follows(
         wash_config = hdhive_wash_config()
         if wash_config["enabled"]:
             wash_result = auto_wash_hdhive_follow(
-                int(follow["id"]), resources, cycle_id=cycle_id
+                int(follow["id"]),
+                direct_resources,
+                cycle_id=cycle_id,
+                force_file_lists=force_file_lists,
             )
             transferred = wash_result.get("transferred") or []
             if transferred:
@@ -5932,7 +6186,10 @@ def poll_hdhive_follow_messages(
             detail={"unread_count": unread_count, "new_count": len(pending)},
         )
         if refresh_follows:
-            refresh_hdhive_subscribed_follows(cycle_id=cycle_id)
+            refresh_hdhive_subscribed_follows(
+                cycle_id=cycle_id,
+                force_file_lists=True,
+            )
         stored_at = now_iso()
         with db() as connection:
             for message_key, event_type, item in pending:
@@ -5964,8 +6221,9 @@ def run_hdhive_follow_cycle(
     authorized_scopes: set[str],
     include_unsubscribed: bool,
     interval: int,
+    cycle_id: str = "",
 ) -> dict[str, Any]:
-    cycle_id = secrets.token_hex(8)
+    cycle_id = cycle_id or secrets.token_hex(8)
     log_hdhive_follow_event(
         "poll", "running", "后台追更检查开始",
         cycle_id=cycle_id,
@@ -5976,17 +6234,46 @@ def run_hdhive_follow_cycle(
         message_count = poll_hdhive_follow_messages(
             refresh_follows=False, cycle_id=cycle_id
         )
-        changed = refresh_hdhive_subscribed_follows(
-            include_unsubscribed=include_unsubscribed,
-            cycle_id=cycle_id,
-        )
+        with db() as connection:
+            last_full_scan = setting(connection, "hdhive_last_full_scan_at")
+        try:
+            last_full_timestamp = (
+                datetime.fromisoformat(last_full_scan).timestamp()
+                if last_full_scan
+                else 0
+            )
+        except (TypeError, ValueError):
+            last_full_timestamp = 0
+        reconcile_due = time.time() - last_full_timestamp >= HDHIVE_FULL_RECONCILE_SECONDS
+        changed = 0
+        if message_count > 0 or reconcile_due:
+            changed += refresh_hdhive_subscribed_follows(
+                cycle_id=cycle_id,
+                force_file_lists=message_count > 0,
+            )
+            with db() as connection:
+                set_setting(connection, "hdhive_last_full_scan_at", now_iso())
+        else:
+            log_hdhive_follow_event(
+                "scan",
+                "skipped",
+                "没有新的订阅消息；已跳过全量资源扫描，等待六小时兜底核对",
+                cycle_id=cycle_id,
+            )
+        if include_unsubscribed:
+            changed += refresh_hdhive_subscribed_follows(
+                cycle_id=cycle_id,
+                only_unsubscribed=True,
+            )
     else:
         changed = refresh_hdhive_subscribed_follows(
-            include_unsubscribed=True, cycle_id=cycle_id
+            include_unsubscribed=True,
+            cycle_id=cycle_id,
         )
     with db() as connection:
         set_setting(connection, "hdhive_last_poll_at", now_iso())
         set_setting(connection, "hdhive_last_poll_error", "")
+        set_setting(connection, "hdhive_next_poll_at", "")
     log_hdhive_follow_event(
         "poll", "success", "后台追更检查完成",
         cycle_id=cycle_id,
@@ -6015,6 +6302,7 @@ def hdhive_follow_loop() -> None:
                     int(setting(connection, "hdhive_poll_interval") or 900),
                 )
                 last_poll = setting(connection, "hdhive_last_poll_at")
+                next_poll = setting(connection, "hdhive_next_poll_at")
                 authorized_scopes = {
                     value
                     for value in str(row["authorized_scopes"] or "").split()
@@ -6036,23 +6324,51 @@ def hdhive_follow_loop() -> None:
                 if last_poll
                 else 0
             )
+            try:
+                next_time = (
+                    datetime.fromisoformat(next_poll).timestamp()
+                    if next_poll
+                    else 0
+                )
+            except (TypeError, ValueError):
+                next_time = 0
             if (
                 HDHIVE_MESSAGE_POLLING_ENABLED
                 and enabled
                 and configured
                 and time.time() - last_time >= interval
+                and time.time() >= next_time
             ):
+                cycle_id = secrets.token_hex(8)
                 run_hdhive_follow_cycle(
                     authorized_scopes=authorized_scopes,
                     include_unsubscribed=bool(unsubscribed_count),
                     interval=interval,
+                    cycle_id=cycle_id,
                 )
         except Exception as error:
+            retry_after = 0
+            if isinstance(error, HTTPException) and error.status_code == 429:
+                try:
+                    retry_after = int((error.headers or {}).get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0
+            retry_after = max(retry_after, 300)
+            failed_at = datetime.now(timezone.utc)
             with db() as connection:
                 set_setting(connection, "hdhive_last_poll_error", str(error)[:240])
+                set_setting(connection, "hdhive_last_poll_at", failed_at.isoformat())
+                set_setting(
+                    connection,
+                    "hdhive_next_poll_at",
+                    (failed_at + timedelta(seconds=retry_after)).isoformat(),
+                )
             log_hdhive_follow_event(
-                "poll", "failed", f"后台追更检查异常：{error}",
+                "poll",
+                "failed",
+                f"后台追更检查异常：{error}；将在约 {retry_after} 秒后重试",
                 cycle_id=locals().get("cycle_id", ""),
+                detail={"retry_after_seconds": retry_after},
             )
         time.sleep(60)
 
@@ -6710,6 +7026,8 @@ def hdhive_public_status() -> dict[str, Any]:
             300, int(setting(connection, "hdhive_poll_interval") or 900)
         )
         last_poll = setting(connection, "hdhive_last_poll_at")
+        next_poll = setting(connection, "hdhive_next_poll_at")
+        last_full_scan = setting(connection, "hdhive_last_full_scan_at")
         last_message_at = setting(connection, "hdhive_last_message_at")
         last_message_title = setting(connection, "hdhive_last_message_title")
         last_poll_error = setting(connection, "hdhive_last_poll_error")
@@ -6794,6 +7112,8 @@ def hdhive_public_status() -> dict[str, Any]:
         "poll_enabled": poll_enabled,
         "poll_interval": poll_interval,
         "last_poll_at": last_poll,
+        "next_poll_at": next_poll,
+        "last_full_scan_at": last_full_scan,
         "last_message_at": last_message_at,
         "last_message_title": last_message_title,
         "last_poll_error": last_poll_error,
@@ -7248,6 +7568,92 @@ def list_follows(
     return {"follows": [serialize_follow(row) for row in rows]}
 
 
+@APP.get("/api/follows/emby-progress")
+def follows_emby_progress(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    """Refresh all visible follows while sharing one library lookup per destination."""
+
+    user = require_user(movie_session)
+    with db() as connection:
+        query = (
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
+        )
+        values: tuple[Any, ...] = ()
+        if user["role"] != "admin":
+            query += "AND f.user_id = ? "
+            values = (user["id"],)
+        rows = connection.execute(query, values).fetchall()
+
+    progress_by_id: dict[int, dict[str, Any]] = {}
+    rows_by_destination: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        if str(row["media_type"] or "tv") != "tv":
+            continue
+        destination = storage_destination(row["storage_destination"])
+        rows_by_destination.setdefault(destination, []).append(row)
+
+    jobs: list[tuple[int, str, int]] = []
+    for destination, destination_rows in rows_by_destination.items():
+        library_ids = destination_emby_ids(destination)
+        for row in destination_rows:
+            tmdb_id = int(row["tmdb_id"])
+            if tmdb_id in library_ids:
+                jobs.append((int(row["id"]), destination, tmdb_id))
+            else:
+                progress_by_id[int(row["id"])] = {"not_in_library": True}
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as executor:
+            future_map = {
+                executor.submit(
+                    destination_episode_progress,
+                    destination,
+                    tmdb_id,
+                    known_in_library=True,
+                ): follow_id
+                for follow_id, destination, tmdb_id in jobs
+            }
+            for future in as_completed(future_map):
+                follow_id = future_map[future]
+                try:
+                    progress_by_id[follow_id] = future.result()
+                except Exception:
+                    progress_by_id[follow_id] = {}
+
+    refreshed_at = now_iso()
+    items: list[dict[str, Any]] = []
+    with db() as connection:
+        for row in rows:
+            if str(row["media_type"] or "tv") != "tv":
+                continue
+            follow_id = int(row["id"])
+            progress = progress_by_id.get(follow_id, {})
+            if progress.get("not_in_library"):
+                season_number, episode_number = 1, 0
+            elif progress.get("emby_latest_episode_number") is not None:
+                season_number = int(progress.get("emby_latest_season_number") or 1)
+                episode_number = int(progress.get("emby_latest_episode_number") or 0)
+            else:
+                season_number = int(row["baseline_season"] or 1)
+                episode_number = int(row["baseline_episode"] or 0)
+            connection.execute(
+                "UPDATE tv_follows SET baseline_season = ?, baseline_episode = ?, "
+                "updated_at = ? WHERE id = ?",
+                (season_number, episode_number, refreshed_at, follow_id),
+            )
+            items.append({
+                "follow_id": follow_id,
+                "baseline_season": season_number,
+                "baseline_episode": episode_number,
+                "baseline_label": episode_progress_label(
+                    season_number, episode_number, "已从"
+                ),
+            })
+    return {"progress": items}
+
+
 @APP.get("/api/follows/{follow_id}/emby-progress")
 def follow_emby_progress(
     follow_id: int,
@@ -7344,8 +7750,20 @@ async def create_follow(
             "media_type = excluded.media_type, title = excluded.title, "
             "original_title = excluded.original_title, "
             "year = excluded.year, poster_path = excluded.poster_path, "
+            "baseline_episode = CASE "
+            "WHEN excluded.baseline_season > tv_follows.baseline_season "
+            "THEN excluded.baseline_episode "
+            "WHEN excluded.baseline_season = tv_follows.baseline_season "
+            "THEN MAX(tv_follows.baseline_episode, excluded.baseline_episode) "
+            "ELSE tv_follows.baseline_episode END, "
             "baseline_season = MAX(tv_follows.baseline_season, excluded.baseline_season), "
-            "baseline_episode = MAX(tv_follows.baseline_episode, excluded.baseline_episode), "
+            "last_seen_episode = CASE "
+            "WHEN excluded.last_seen_season > tv_follows.last_seen_season "
+            "THEN excluded.last_seen_episode "
+            "WHEN excluded.last_seen_season = tv_follows.last_seen_season "
+            "THEN MAX(tv_follows.last_seen_episode, excluded.last_seen_episode) "
+            "ELSE tv_follows.last_seen_episode END, "
+            "last_seen_season = MAX(tv_follows.last_seen_season, excluded.last_seen_season), "
             "updated_at = excluded.updated_at",
             (
                 user["id"],

@@ -141,6 +141,33 @@ class HDHiveFoundationTests(unittest.TestCase):
             {"large", "sub", "111"},
         )
 
+    def test_season_aware_selection_does_not_mix_equal_episode_numbers(self):
+        items = [
+            {"_share_name": "Show.S01E01.mkv", "_share_id": "s1e1", "s": 2000},
+            {"_share_name": "Show.S02E01.mkv", "_share_id": "s2e1", "s": 1000},
+            {"_share_name": "Show.S02E01.zh.ass", "_share_id": "s2sub", "s": 10},
+        ]
+
+        selected, episode_keys = app.select_largest_missing_episode_files_by_season(
+            items,
+            {(2, 1)},
+        )
+
+        self.assertEqual(episode_keys, {(2, 1)})
+        self.assertEqual(
+            {item["_share_id"] for item in selected},
+            {"s2e1", "s2sub"},
+        )
+
+    def test_auto_wash_only_accepts_direct_115_resources(self):
+        direct = {"pan_type": "115", "is_offline": False}
+        magnet = {"share_type_label": "磁力", "is_offline": True}
+        ed2k = {"share_type_label": "ED2K", "is_offline": True}
+
+        self.assertTrue(app.hdhive_resource_is_direct_115(direct))
+        self.assertFalse(app.hdhive_resource_is_direct_115(magnet))
+        self.assertFalse(app.hdhive_resource_is_direct_115(ed2k))
+
     def test_hdhive_secrets_are_encrypted_at_rest(self):
         with tempfile.TemporaryDirectory() as temporary:
             with patch.object(app, "DATA_DIR", Path(temporary)):
@@ -599,6 +626,110 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertTrue(app.HDHIVE_MESSAGE_POLLING_ENABLED)
         self.assertTrue(status["poll_enabled"])
 
+    def test_file_list_400_is_cached_instead_of_retried(self):
+        error = app.HTTPException(400, "资源不存在或 slug 已失效")
+        with patch.object(app, "hdhive_call", side_effect=error) as call:
+            first = app.hdhive_cached_file_list("expired-slug")
+            second = app.hdhive_cached_file_list("expired-slug")
+            forced = app.hdhive_cached_file_list("expired-slug", force=True)
+
+        self.assertIsNone(first[0])
+        self.assertFalse(first[1])
+        self.assertIsNone(second[0])
+        self.assertTrue(second[1])
+        self.assertTrue(forced[1])
+        self.assertIn("slug", second[2])
+        call.assert_called_once_with("resource_file_list", "expired-slug")
+
+    def test_hdhive_429_preserves_retry_after_and_limit_scope(self):
+        class LimitedClient:
+            def messages(self):
+                raise app.HDHiveOpenAPIError(
+                    "请求过多",
+                    status=429,
+                    retry_after=777,
+                    limit_scope="query",
+                )
+
+        with patch.object(app, "hdhive_client", return_value=LimitedClient()):
+            with self.assertRaises(app.HTTPException) as raised:
+                app.hdhive_call("messages")
+
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.headers["Retry-After"], "777")
+        self.assertIn("query", raised.exception.detail)
+
+    def test_follow_progress_pair_resets_episode_when_season_advances(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, last_seen_season, last_seen_episode, "
+                "created_at, updated_at) VALUES(?, 223911, '仙逆', 1, 155, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            app.update_follow_progress_pair(
+                connection, follow_id, "last_seen", 2, 5
+            )
+            row = connection.execute(
+                "SELECT last_seen_season, last_seen_episode FROM tv_follows WHERE id = ?",
+                (follow_id,),
+            ).fetchone()
+
+        self.assertEqual(
+            (row["last_seen_season"], row["last_seen_episode"]),
+            (2, 5),
+        )
+
+    def test_existing_wash_window_stops_after_emby_when_disabled(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, baseline_episode, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 154, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            opened = datetime.now(timezone.utc)
+            connection.execute(
+                "INSERT INTO hdhive_wash_episodes("
+                "follow_id, season_number, episode_number, opened_at, closes_at, updated_at"
+                ") VALUES(?, 1, 155, ?, ?, ?)",
+                (
+                    follow_id,
+                    opened.isoformat(),
+                    (opened + timedelta(hours=48)).isoformat(),
+                    opened.isoformat(),
+                ),
+            )
+            follow = connection.execute(
+                "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+            ).fetchone()
+
+        allowed = app.hdhive_wash_candidate_allowed(
+            follow,
+            {
+                "season_number": 1,
+                "episode_number": 155,
+                "fingerprint": "fingerprint-155",
+                "slug": "resource-slug",
+            },
+            {
+                "wash_after_emby": False,
+                "window_hours": 48,
+                "lock_after_window": True,
+                "max_transfers": 4,
+                "reprocess_changed": True,
+            },
+            {(1, 155)},
+        )
+
+        self.assertFalse(allowed)
+
     def test_status_requires_reauthorization_until_new_scopes_are_in_token(self):
         with app.db() as connection:
             connection.execute(
@@ -652,6 +783,55 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                     )
         self.assertEqual(result["follow"]["baseline_episode"], 232)
         self.assertEqual(app.list_follows(self.token)["follows"][0]["title"], "吞噬星空")
+
+    def test_reenabled_follow_replaces_episode_when_season_advances(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, active, baseline_season, baseline_episode, "
+                "last_seen_season, last_seen_episode, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', 0, 1, 155, 1, 155, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+        detail = {
+            "id": 223911,
+            "name": "仙逆",
+            "first_air_date": "2023-09-25",
+        }
+        with patch.object(app, "tmdb_get", return_value=detail):
+            with patch.object(app, "destination_emby_ids", return_value={223911}):
+                with patch.object(
+                    app,
+                    "destination_episode_progress",
+                    return_value={
+                        "emby_latest_season_number": 2,
+                        "emby_latest_episode_number": 5,
+                    },
+                ):
+                    result = asyncio.run(
+                        app.create_follow(
+                            FakeRequest({"tmdb_id": 223911, "media_type": "tv"}),
+                            self.token,
+                        )
+                    )
+
+        self.assertEqual(
+            (
+                result["follow"]["baseline_season"],
+                result["follow"]["baseline_episode"],
+            ),
+            (2, 5),
+        )
+        self.assertEqual(
+            (
+                result["follow"]["last_seen_season"],
+                result["follow"]["last_seen_episode"],
+            ),
+            (2, 5),
+        )
 
     def test_follow_binds_the_requested_resource_without_auto_transfer(self):
         detail = {
@@ -1136,7 +1316,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             app.hdhive_follow_events(movie_session=self.token)
         self.assertEqual(denied.exception.status_code, 403)
 
-    def test_follow_cycle_scans_resources_even_without_new_message(self):
+    def test_follow_cycle_runs_six_hour_reconciliation_without_new_message(self):
         with patch.object(
             app, "poll_hdhive_follow_messages", return_value=0
         ) as messages:
@@ -1155,8 +1335,28 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             refresh_follows=False, cycle_id=result["cycle_id"]
         )
         refresh.assert_called_once_with(
-            include_unsubscribed=False, cycle_id=result["cycle_id"]
+            cycle_id=result["cycle_id"], force_file_lists=False
         )
+
+    def test_follow_cycle_skips_recent_full_scan_without_new_message(self):
+        with app.db() as connection:
+            app.set_setting(connection, "hdhive_last_full_scan_at", app.now_iso())
+        with patch.object(
+            app, "poll_hdhive_follow_messages", return_value=0
+        ) as messages:
+            with patch.object(
+                app, "refresh_hdhive_subscribed_follows", return_value=3
+            ) as refresh:
+                result = app.run_hdhive_follow_cycle(
+                    authorized_scopes={"subscription", "messages"},
+                    include_unsubscribed=False,
+                    interval=900,
+                )
+
+        self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["changed_count"], 0)
+        messages.assert_called_once()
+        refresh.assert_not_called()
 
     def test_emby_library_confirmation_is_added_to_follow_log(self):
         with app.db() as connection:
@@ -1424,6 +1624,42 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         progress.assert_called_once_with(
             "p115", 223911, known_in_library=True, force=True
         )
+
+    def test_follow_progress_batch_shares_one_library_query(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            for tmdb_id, title in ((223911, "仙逆"), (101172, "吞噬星空")):
+                connection.execute(
+                    "INSERT INTO tv_follows("
+                    "user_id, tmdb_id, title, baseline_episode, created_at, updated_at"
+                    ") VALUES(?, ?, ?, 1, ?, ?)",
+                    (user_id, tmdb_id, title, app.now_iso(), app.now_iso()),
+                )
+
+        with patch.object(
+            app, "destination_emby_ids", return_value={223911, 101172}
+        ) as library:
+            with patch.object(
+                app,
+                "destination_episode_progress",
+                side_effect=lambda _destination, tmdb_id, **_kwargs: {
+                    "emby_latest_season_number": 2 if tmdb_id == 223911 else 1,
+                    "emby_latest_episode_number": 5 if tmdb_id == 223911 else 233,
+                },
+            ) as progress:
+                result = app.follows_emby_progress(self.token)
+
+        self.assertEqual(len(result["progress"]), 2)
+        library.assert_called_once_with("p115")
+        self.assertEqual(progress.call_count, 2)
+        values = {
+            item["follow_id"]: (item["baseline_season"], item["baseline_episode"])
+            for item in result["progress"]
+        }
+        self.assertIn((2, 5), values.values())
+        self.assertIn((1, 233), values.values())
 
     def test_admin_can_confirm_whole_transfer_with_existing_episodes(self):
         class FakeP115:
