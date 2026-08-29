@@ -1323,40 +1323,6 @@ def p115_offline_snapshot(client: Any) -> set[tuple[str, str, str]]:
     }
 
 
-def p115_offline_link_identity(value: Any) -> str:
-    link = str(value or "").strip()
-    parsed = urlparse(link)
-    if parsed.scheme.lower() == "magnet":
-        for xt in parse_qs(parsed.query).get("xt", []):
-            marker = "urn:btih:"
-            if str(xt).lower().startswith(marker):
-                return str(xt)[len(marker):].lower()
-    return link.casefold()
-
-
-def p115_completed_offline_task_hash(client: Any, share_url: str) -> str:
-    """Find the completed task that blocks resubmitting the same offline URL."""
-
-    wanted = p115_offline_link_identity(share_url)
-    result = p115_call(
-        "读取115已完成云下载任务失败",
-        client.clouddownload_task_list,
-        {"page": 1, "page_size": 100, "stat": 11},
-    )
-    if not response_ok(result):
-        return ""
-    for item in extract_share_items(result):
-        info_hash = str(item.get("info_hash") or "").strip()
-        identities = {
-            p115_offline_link_identity(item.get("url")),
-            p115_offline_link_identity(item.get("original_url")),
-            info_hash.lower(),
-        }
-        if wanted and wanted in identities:
-            return info_hash
-    return ""
-
-
 def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
     for _ in range(4):
         after = snapshot()
@@ -9279,31 +9245,50 @@ async def hdhive_transfer(
             and duplicate_task
             and offline_retry_cleanup
         ):
-            completed_hash = await asyncio.to_thread(
-                p115_completed_offline_task_hash, client, share_url
+            cleared = await asyncio.to_thread(
+                p115_call,
+                "清理115已完成离线任务记录失败",
+                client.clouddownload_task_clear,
+                {"flag": 0},
             )
-            if completed_hash:
-                deleted = await asyncio.to_thread(
-                    p115_call,
-                    "清理115已完成离线任务记录失败",
-                    client.clouddownload_task_del,
-                    {"hash[0]": completed_hash, "flag": 0},
+            if not response_ok(cleared):
+                raise HTTPException(
+                    502,
+                    response_message(cleared, "115已完成任务记录清理失败"),
                 )
-                if not response_ok(deleted):
-                    raise HTTPException(
-                        502,
-                        response_message(deleted, "115已完成任务记录清理失败"),
-                    )
-                before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
-                queued = await asyncio.to_thread(
-                    p115_call,
-                    "重新提交115离线任务失败",
-                    client.clouddownload_task_add_url,
-                    {"url": share_url, "wp_path_id": target_cid},
-                )
-                retried_completed_task = True
+            log_hdhive_follow_event(
+                "transfer", "running",
+                "115报告离线任务重复；已清空完成任务记录并保留文件，正在重新提交",
+                follow_id=event_follow_id, user_id=int(user["id"]),
+                tmdb_id=tmdb_id,
+                title=str(payload.get("title") or payload.get("resource_title") or ""),
+                detail={**event_detail, "offline_clear_flag": 0},
+            )
+            before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
+            queued = await asyncio.to_thread(
+                p115_call,
+                "重新提交115离线任务失败",
+                client.clouddownload_task_add_url,
+                {"url": share_url, "wp_path_id": target_cid},
+            )
+            retried_completed_task = True
         if not response_ok(queued):
-            raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+            retry_message = response_message(queued, "115离线任务提交失败")
+            if retried_completed_task and (
+                "任务已存在" in retry_message or "重复" in retry_message
+            ):
+                retry_message = (
+                    "已清理115已完成任务记录，但该链接仍有任务存在；"
+                    "可能仍在进行中，请在115云下载中确认后重试"
+                )
+            log_hdhive_follow_event(
+                "transfer", "failed", retry_message,
+                follow_id=event_follow_id, user_id=int(user["id"]),
+                tmdb_id=tmdb_id,
+                title=str(payload.get("title") or payload.get("resource_title") or ""),
+                detail={**event_detail, "offline_retry": retried_completed_task},
+            )
+            raise HTTPException(502, retry_message)
         changed = await asyncio.to_thread(
             wait_for_p115_change,
             lambda: p115_offline_snapshot(client),

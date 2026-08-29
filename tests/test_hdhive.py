@@ -1775,20 +1775,15 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             "已加入115离线下载，完成后会出现在所选目录",
         )
 
-    def test_duplicate_completed_offline_task_is_removed_without_files_and_retried(self):
+    def test_duplicate_completed_offline_tasks_are_cleared_without_files_and_retried(self):
         info_hash = "ABCDEF1234567890"
 
         class FakeP115:
             def __init__(self):
                 self.add_count = 0
-                self.deleted = None
+                self.cleared = None
 
             def clouddownload_task_list(self, payload):
-                if payload.get("stat") == 11:
-                    return {
-                        "state": True,
-                        "tasks": [{"info_hash": info_hash, "status": 11}],
-                    }
                 return {"state": True, "tasks": []}
 
             def clouddownload_task_add_url(self, _payload):
@@ -1800,8 +1795,8 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                     }
                 return {"state": True, "task_id": "offline-new"}
 
-            def clouddownload_task_del(self, payload):
-                self.deleted = payload
+            def clouddownload_task_clear(self, payload):
+                self.cleared = payload
                 return {"state": True}
 
         client = FakeP115()
@@ -1830,7 +1825,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                         )
 
         self.assertEqual(client.add_count, 2)
-        self.assertEqual(client.deleted, {"hash[0]": info_hash, "flag": 0})
+        self.assertEqual(client.cleared, {"flag": 0})
         self.assertEqual(result["message"], "已保留原文件并重新加入115离线下载")
 
     def test_duplicate_offline_cleanup_can_be_disabled(self):
@@ -1844,7 +1839,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                     "message": "任务已存在，请勿输入重复的链接地址",
                 }
 
-            def clouddownload_task_del(self, _payload):
+            def clouddownload_task_clear(self, _payload):
                 raise AssertionError("disabled cleanup must not delete tasks")
 
         with app.db() as connection:
