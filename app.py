@@ -6995,7 +6995,15 @@ def run_hdhive_follow_cycle(
             )
         except (TypeError, ValueError):
             last_full_timestamp = 0
-        reconcile_due = time.time() - last_full_timestamp >= HDHIVE_FULL_RECONCILE_SECONDS
+        # Site messages are only an acceleration signal. Some HDHive shares are
+        # updated in place without producing a message, so a quiet poll must
+        # still inspect the bound follows. The file-list cache keeps these
+        # interval scans inexpensive; the daily reconciliation remains useful
+        # after a targeted message scan to catch unrelated follows.
+        reconcile_due = (
+            message_count == 0
+            or time.time() - last_full_timestamp >= HDHIVE_FULL_RECONCILE_SECONDS
+        )
         changed = 0
         if reconcile_due:
             changed += refresh_hdhive_subscribed_follows(
@@ -7009,9 +7017,7 @@ def run_hdhive_follow_cycle(
                 "scan",
                 "skipped",
                 (
-                    "新订阅消息已完成精准扫描；本轮无需全量扫描"
-                    if message_count > 0
-                    else "没有新的订阅消息；已跳过全量资源扫描，等待每日兜底核对"
+                    "新订阅消息已完成精准扫描；本轮无需重复全量扫描"
                 ),
                 cycle_id=cycle_id,
             )
@@ -9198,20 +9204,88 @@ async def hdhive_transfer(
             client,
             target_cid,
         )
-        snap = await asyncio.to_thread(
-            p115_call,
-            "读取115分享失败",
-            client.share_snap,
-            0,
-            share_url=share_url,
-        )
-        if not response_ok(snap):
-            raise HTTPException(502, response_message(snap, "无法读取115分享"))
-        selected_ids = [
-            p115_share_item_id(item)
-            for item in extract_share_items(snap)
-            if p115_share_item_id(item)
-        ]
+        selected_ids: list[str] = []
+        completed_episodes: set[int] = set()
+        selected_incremental: set[tuple[int, int]] = set()
+        if media_type == "tv" and wanted_episodes:
+            season_number = int(title_spec["season_number"])
+            tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+            available_keys: set[tuple[int, int]] = set()
+            for item in tree:
+                if item.get("_share_is_dir"):
+                    continue
+                parsed = parse_episode_spec(item.get("_share_name"))
+                seasons = {
+                    int(value)
+                    for value in parsed.get("season_numbers") or []
+                    if int(value) > 0
+                }
+                if len(seasons) > 1:
+                    continue
+                item_season = next(iter(seasons), season_number)
+                available_keys.update(
+                    (item_season, int(episode))
+                    for episode in parsed.get("episode_numbers") or []
+                    if int(episode) > 0
+                )
+            requested_keys = {
+                (season_number, episode) for episode in wanted_episodes
+            }
+            candidate_keys = (available_keys & requested_keys) or requested_keys
+            completed_keys: set[tuple[int, int]] = set()
+            for candidate_season in {season for season, _episode in candidate_keys}:
+                candidate_episodes = {
+                    episode
+                    for season, episode in candidate_keys
+                    if season == candidate_season
+                }
+                completed_keys.update(
+                    (candidate_season, episode)
+                    for episode in completed_episode_numbers(
+                        tmdb_id, candidate_season, candidate_episodes
+                    )
+                )
+            completed_episodes = {
+                episode
+                for candidate_season, episode in completed_keys
+                if candidate_season == season_number
+            }
+            missing_keys = candidate_keys - completed_keys
+            if missing_keys:
+                selected, selected_incremental = (
+                    select_largest_missing_episode_files_by_season(
+                        tree,
+                        missing_keys,
+                        fallback_season=season_number,
+                    )
+                )
+                selected_ids = [
+                    str(item.get("_share_id") or "")
+                    for item in selected
+                    if item.get("_share_id")
+                ]
+                selected_episode_numbers = sorted(
+                    episode for _season, episode in selected_incremental
+                )
+            elif completed_keys:
+                raise HTTPException(409, "这个分享中可识别的剧集都已转存")
+            if missing_keys and completed_keys and not selected_ids:
+                raise HTTPException(502, "115分享中没有找到可安全增量转存的新集文件")
+        if not selected_ids:
+            snap = await asyncio.to_thread(
+                p115_call,
+                "读取115分享失败",
+                client.share_snap,
+                0,
+                share_url=share_url,
+            )
+            if not response_ok(snap):
+                raise HTTPException(502, response_message(snap, "无法读取115分享"))
+            selected_ids = [
+                p115_share_item_id(item)
+                for item in extract_share_items(snap)
+                if p115_share_item_id(item)
+            ]
         if not selected_ids:
             raise HTTPException(502, "115分享中没有找到可转存内容")
         received = await asyncio.to_thread(
@@ -9234,7 +9308,18 @@ async def hdhive_transfer(
                 "115接口没有把文件写入目标目录；返回：" + response_summary(received),
             )
         mode = "share"
-        message = "已转存"
+        if completed_episodes and selected_episode_numbers:
+            message = (
+                "已增量转存第"
+                f"{compact_episode_numbers(set(selected_episode_numbers))}集"
+            )
+            update_workflow_job_episodes(
+                int(job["id"]),
+                int(title_spec["season_number"]),
+                set(selected_episode_numbers),
+            )
+        else:
+            message = "已转存"
         workflow_state = "waiting_library"
 
     record_transfer(

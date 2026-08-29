@@ -1499,7 +1499,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             cycle_id=result["cycle_id"], force_file_lists=False
         )
 
-    def test_follow_cycle_skips_recent_full_scan_without_new_message(self):
+    def test_follow_cycle_scans_recent_follows_without_new_message(self):
         with app.db() as connection:
             app.set_setting(connection, "hdhive_last_full_scan_at", app.now_iso())
         with patch.object(
@@ -1515,6 +1515,28 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["changed_count"], 3)
+        messages.assert_called_once()
+        refresh.assert_called_once_with(
+            cycle_id=result["cycle_id"], force_file_lists=False
+        )
+
+    def test_follow_cycle_skips_recent_full_scan_after_targeted_message(self):
+        with app.db() as connection:
+            app.set_setting(connection, "hdhive_last_full_scan_at", app.now_iso())
+        with patch.object(
+            app, "poll_hdhive_follow_messages", return_value=1
+        ) as messages:
+            with patch.object(
+                app, "refresh_hdhive_subscribed_follows", return_value=3
+            ) as refresh:
+                result = app.run_hdhive_follow_cycle(
+                    authorized_scopes={"subscription", "messages"},
+                    include_unsubscribed=False,
+                    interval=900,
+                )
+
+        self.assertEqual(result["message_count"], 1)
         self.assertEqual(result["changed_count"], 0)
         messages.assert_called_once()
         refresh.assert_not_called()

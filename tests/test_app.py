@@ -1979,6 +1979,84 @@ class MovieRequestTests(unittest.TestCase):
         notify.assert_called_once()
         self.assertIn("\n已转存", notify.call_args.args[0])
 
+    def test_hdhive_115_transfer_only_receives_new_episode_from_updated_share(self):
+        class FakeP115:
+            def fs_files(self, _payload):
+                return {"state": True, "data": {"list": []}}
+
+            def share_snap(self, cid, **_kwargs):
+                if cid == 0:
+                    return {
+                        "state": True,
+                        "data": {"list": [{"cid": "100", "n": "第一季"}]},
+                    }
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [
+                            {
+                                "fid": str(episode),
+                                "n": f"Show.S01E{episode:02d}.mkv",
+                                "s": episode * 1000,
+                            }
+                            for episode in range(1, 8)
+                        ]
+                    },
+                }
+
+            def share_receive(self, payload, **_kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+        app.record_transfer(
+            user_id=user_id,
+            source="hdhive",
+            resource_key="updated-share",
+            tmdb_id=223911,
+            transfer_scope="manual",
+            status="success",
+            detail="已转存第1-6集",
+            season_number=1,
+            episode_numbers=list(range(1, 7)),
+        )
+
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"full_url": "https://115.com/s/updated"}},
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "wait_for_p115_change", return_value=True):
+                    with patch.object(app, "send_notifications_async"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(
+                                FakeRequest(
+                                    {
+                                        "slug": "updated-share",
+                                        "tmdb_id": 223911,
+                                        "media_type": "tv",
+                                        "title": "测试剧",
+                                        "resource_title": "测试剧 S01E01-E07",
+                                    }
+                                ),
+                                self.token,
+                            )
+                        )
+
+        self.assertEqual(client.received, {"file_id": "7", "cid": "0"})
+        self.assertEqual(result["message"], "已增量转存第7集")
+        with app.db() as connection:
+            rows = connection.execute(
+                "SELECT episode_number FROM resource_transfer_log "
+                "WHERE resource_key = 'updated-share' ORDER BY episode_number"
+            ).fetchall()
+        self.assertEqual([row["episode_number"] for row in rows], list(range(1, 8)))
+
     def test_pansave_send_link_uses_saved_user_session(self):
         with app.db() as connection:
             app.set_setting(connection, "pansave_telegram_api_id", "123456")
