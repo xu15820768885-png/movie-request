@@ -135,7 +135,11 @@ async def movie_http_exception_handler(
         fail_workflow_job(workflow_job_id, error.detail)
     if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
         user = session_user(request.cookies.get("movie_session"))
-        if user:
+        processing_conflict = (
+            int(error.status_code) == 409
+            and "正在处理" in str(error.detail or "")
+        )
+        if user and not processing_conflict:
             await asyncio.to_thread(
                 send_notifications,
                 f"❌ 资源转存失败 · "
@@ -9190,20 +9194,6 @@ async def hdhive_transfer(
         "media_type": media_type,
         "resource_status": resource_status,
     }
-    job = begin_workflow_job(
-        user_id=int(user["id"]),
-        destination=str(user["storage_destination"]),
-        source="hdhive",
-        resource_key=slug,
-        tmdb_id=tmdb_id,
-        media_type=media_type,
-        title=str(payload.get("title") or payload.get("resource_title") or ""),
-        season_number=int(title_spec["season_number"]),
-        episode_numbers=selected_episode_numbers,
-        follow_id=event_follow_id,
-        scope=transfer_scope,
-    )
-    attach_workflow_job_to_request(request, int(job["id"]))
     log_hdhive_follow_event(
         "unlock", "running", "正在解锁影巢资源",
         follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
@@ -9239,6 +9229,57 @@ async def hdhive_transfer(
         )
         raise HTTPException(502, "影巢解锁后没有返回资源链接")
     share_url = links[0]
+    selected_links = links
+    episode_links_filtered = False
+    if (
+        storage_destination(str(user["storage_destination"])) == "p115"
+        and not is_115_share_url(share_url)
+        and media_type == "tv"
+        and wanted_episodes
+    ):
+        season_number = int(title_spec["season_number"])
+        progress = await asyncio.to_thread(
+            destination_episode_progress,
+            str(user["storage_destination"]),
+            tmdb_id,
+            known_in_library=True,
+        )
+        by_season = progress.get("emby_episode_numbers") or {}
+        present_episodes = {
+            int(value)
+            for value in by_season.get(str(season_number), [])
+            if int(value) > 0
+        }
+        present_episodes.update(
+            transferred_episode_set(tmdb_id, season_number)
+        )
+        selected_links, selected_episodes = select_missing_episode_transfer_links(
+            links,
+            season_number=season_number,
+            wanted_episodes=wanted_episodes,
+            present_episodes=present_episodes,
+        )
+        if not selected_links:
+            raise HTTPException(409, "这个资源中可识别的剧集都已存在")
+        episode_links_filtered = selected_links != links
+        selected_episode_numbers = sorted(selected_episodes)
+
+    # Build idempotency from the episodes that will actually be submitted.
+    # This lets a corrected E07-only attempt bypass an older bad E01-E07 job.
+    job = begin_workflow_job(
+        user_id=int(user["id"]),
+        destination=str(user["storage_destination"]),
+        source="hdhive",
+        resource_key=slug,
+        tmdb_id=tmdb_id,
+        media_type=media_type,
+        title=str(payload.get("title") or payload.get("resource_title") or ""),
+        season_number=int(title_spec["season_number"]),
+        episode_numbers=selected_episode_numbers,
+        follow_id=event_follow_id,
+        scope=transfer_scope,
+    )
+    attach_workflow_job_to_request(request, int(job["id"]))
     log_hdhive_follow_event(
         "unlock", "success", "影巢资源解锁成功，正在提交到网盘",
         follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
@@ -9276,41 +9317,6 @@ async def hdhive_transfer(
         )
 
     if not is_115_share_url(share_url):
-        selected_links = links
-        episode_links_filtered = False
-        if media_type == "tv" and wanted_episodes:
-            season_number = int(title_spec["season_number"])
-            progress = await asyncio.to_thread(
-                destination_episode_progress,
-                str(user["storage_destination"]),
-                tmdb_id,
-                known_in_library=True,
-            )
-            by_season = progress.get("emby_episode_numbers") or {}
-            present_episodes = {
-                int(value)
-                for value in by_season.get(str(season_number), [])
-                if int(value) > 0
-            }
-            present_episodes.update(
-                transferred_episode_set(tmdb_id, season_number)
-            )
-            selected_links, selected_episodes = (
-                select_missing_episode_transfer_links(
-                    links,
-                    season_number=season_number,
-                    wanted_episodes=wanted_episodes,
-                    present_episodes=present_episodes,
-                )
-            )
-            if not selected_links:
-                raise HTTPException(409, "这个资源中可识别的剧集都已存在")
-            episode_links_filtered = selected_links != links
-            selected_episode_numbers = sorted(selected_episodes)
-            update_workflow_job_episodes(
-                int(job["id"]), season_number, selected_episodes
-            )
-
         def submit_offline_links(error_label: str) -> dict[str, Any]:
             if len(selected_links) == 1:
                 return p115_call(

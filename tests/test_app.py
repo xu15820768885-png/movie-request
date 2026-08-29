@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import app
@@ -2089,6 +2090,20 @@ class MovieRequestTests(unittest.TestCase):
             "title": "测试剧",
             "resource_title": "S01E01-E07 已规范命名",
         }
+        legacy_job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="seven-ed2k-links",
+            tmdb_id=223911,
+            media_type="tv",
+            title="测试剧",
+            season_number=1,
+            episode_numbers=list(range(1, 8)),
+        )
+        app.update_workflow_job(
+            int(legacy_job["id"]), "submitted", "旧版本误提交第一集"
+        )
         with patch.object(
             app,
             "hdhive_call",
@@ -2120,10 +2135,15 @@ class MovieRequestTests(unittest.TestCase):
             ).fetchall()
             job = connection.execute(
                 "SELECT episode_numbers_json FROM media_workflow_jobs "
-                "WHERE resource_key = 'seven-ed2k-links'"
+                "WHERE resource_key = 'seven-ed2k-links' ORDER BY id DESC"
             ).fetchone()
+            job_count = connection.execute(
+                "SELECT COUNT(*) FROM media_workflow_jobs "
+                "WHERE resource_key = 'seven-ed2k-links'"
+            ).fetchone()[0]
         self.assertEqual([row["episode_number"] for row in episodes], [7])
         self.assertEqual(json.loads(job["episode_numbers_json"]), [7])
+        self.assertEqual(job_count, 2)
 
     def test_pansave_send_link_uses_saved_user_session(self):
         with app.db() as connection:
@@ -2245,6 +2265,22 @@ class MovieRequestTests(unittest.TestCase):
                 app.send_notifications("测试通知")
         telegram.assert_called_once_with("测试通知")
         wecom.assert_called_once_with("测试通知")
+
+    def test_processing_conflict_does_not_send_transfer_failure_notification(self):
+        request = SimpleNamespace(
+            url=SimpleNamespace(path="/api/hdhive/transfer"),
+            cookies={"movie_session": self.token},
+            state=SimpleNamespace(),
+        )
+        with patch.object(app, "send_notifications") as notify:
+            response = asyncio.run(
+                app.movie_http_exception_handler(
+                    request,
+                    app.HTTPException(409, "这个资源正在处理：已提交"),
+                )
+            )
+        self.assertEqual(response.status_code, 409)
+        notify.assert_not_called()
 
     def test_notification_outbox_retries_and_deduplicates(self):
         with app.db() as connection:
