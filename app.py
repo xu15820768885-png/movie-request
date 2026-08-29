@@ -95,7 +95,7 @@ RESOURCE_CACHE_MAX_ITEMS = 256
 HDHIVE_FILE_LIST_CACHE_SECONDS = 6 * 3600
 HDHIVE_INVALID_FILE_LIST_CACHE_SECONDS = 24 * 3600
 HDHIVE_TRANSIENT_FILE_LIST_CACHE_SECONDS = 15 * 60
-HDHIVE_FULL_RECONCILE_SECONDS = 24 * 3600
+HDHIVE_QUIET_SCAN_SECONDS = 6 * 3600
 IMAGE_DOWNLOAD_LOCKS: dict[str, Lock] = {}
 IMAGE_CACHE_CLEANUP_LOCK = Lock()
 IMAGE_CACHE_LAST_CLEANUP = 0.0
@@ -1321,6 +1321,40 @@ def p115_offline_snapshot(client: Any) -> set[tuple[str, str, str]]:
         )
         for item in extract_share_items(result)
     }
+
+
+def p115_offline_link_identity(value: Any) -> str:
+    link = str(value or "").strip()
+    parsed = urlparse(link)
+    if parsed.scheme.lower() == "magnet":
+        for xt in parse_qs(parsed.query).get("xt", []):
+            marker = "urn:btih:"
+            if str(xt).lower().startswith(marker):
+                return str(xt)[len(marker):].lower()
+    return link.casefold()
+
+
+def p115_completed_offline_task_hash(client: Any, share_url: str) -> str:
+    """Find the completed task that blocks resubmitting the same offline URL."""
+
+    wanted = p115_offline_link_identity(share_url)
+    result = p115_call(
+        "读取115已完成云下载任务失败",
+        client.clouddownload_task_list,
+        {"page": 1, "page_size": 100, "stat": 11},
+    )
+    if not response_ok(result):
+        return ""
+    for item in extract_share_items(result):
+        info_hash = str(item.get("info_hash") or "").strip()
+        identities = {
+            p115_offline_link_identity(item.get("url")),
+            p115_offline_link_identity(item.get("original_url")),
+            info_hash.lower(),
+        }
+        if wanted and wanted in identities:
+            return info_hash
+    return ""
 
 
 def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
@@ -6589,22 +6623,34 @@ def refresh_hdhive_subscribed_follows(
     strict: bool = False,
 ) -> int:
     with db() as connection:
-        query = "SELECT * FROM tv_follows WHERE active = 1"
+        query = (
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.active = 1"
+        )
         if only_unsubscribed:
-            query += " AND hdhive_subscription_id IS NULL"
+            query += " AND f.hdhive_subscription_id IS NULL"
         elif not include_unsubscribed:
-            query += " AND hdhive_subscription_id IS NOT NULL"
+            query += " AND f.hdhive_subscription_id IS NOT NULL"
         values: list[Any] = []
         if follow_ids is not None:
             if not follow_ids:
                 return 0
             marks = ",".join("?" for _ in follow_ids)
-            query += f" AND id IN ({marks})"
+            query += f" AND f.id IN ({marks})"
             values.extend(sorted(follow_ids))
+        query += (
+            " ORDER BY CASE u.storage_destination WHEN 'p115' THEN 0 ELSE 1 END, "
+            "f.id ASC"
+        )
         follows = connection.execute(query, values).fetchall()
     changed = 0
+    processed_targets: set[tuple[str, int]] = set()
     for follow in follows:
         media_type = str(follow["media_type"] or "tv")
+        target_key = (media_type, int(follow["tmdb_id"]))
+        if target_key in processed_targets:
+            continue
+        processed_targets.add(target_key)
         log_hdhive_follow_event(
             "scan", "running", "开始读取影巢追更资源",
             follow=follow, cycle_id=cycle_id,
@@ -6981,6 +7027,7 @@ def run_hdhive_follow_cycle(
         detail={"interval_seconds": interval},
     )
     message_count = 0
+    changed = 0
     if {"subscription", "messages"}.issubset(authorized_scopes):
         message_count = poll_hdhive_follow_messages(
             refresh_follows=True, cycle_id=cycle_id
@@ -6995,16 +7042,10 @@ def run_hdhive_follow_cycle(
             )
         except (TypeError, ValueError):
             last_full_timestamp = 0
-        # Site messages are only an acceleration signal. Some HDHive shares are
-        # updated in place without producing a message, so a quiet poll must
-        # still inspect the bound follows. The file-list cache keeps these
-        # interval scans inexpensive; the daily reconciliation remains useful
-        # after a targeted message scan to catch unrelated follows.
         reconcile_due = (
             message_count == 0
-            or time.time() - last_full_timestamp >= HDHIVE_FULL_RECONCILE_SECONDS
+            and time.time() - last_full_timestamp >= HDHIVE_QUIET_SCAN_SECONDS
         )
-        changed = 0
         if reconcile_due:
             changed += refresh_hdhive_subscribed_follows(
                 cycle_id=cycle_id,
@@ -7018,20 +7059,16 @@ def run_hdhive_follow_cycle(
                 "skipped",
                 (
                     "新订阅消息已完成精准扫描；本轮无需重复全量扫描"
+                    if message_count > 0
+                    else "没有新的订阅消息；六小时兜底检查尚未到期"
                 ),
                 cycle_id=cycle_id,
             )
-        if include_unsubscribed:
-            changed += refresh_hdhive_subscribed_follows(
-                cycle_id=cycle_id,
-                only_unsubscribed=True,
-                force_file_lists=True,
-            )
     else:
-        changed = refresh_hdhive_subscribed_follows(
-            include_unsubscribed=True,
+        log_hdhive_follow_event(
+            "scan", "skipped",
+            "未同时获得订阅与站内信权限，不执行后台追更资源刷新",
             cycle_id=cycle_id,
-            force_file_lists=True,
         )
     with db() as connection:
         set_setting(connection, "hdhive_last_poll_at", now_iso())
@@ -7934,6 +7971,9 @@ def hdhive_public_status() -> dict[str, Any]:
         last_message_title = setting(connection, "hdhive_last_message_title")
         last_poll_error = setting(connection, "hdhive_last_poll_error")
         auto_transfer = setting(connection, "hdhive_auto_transfer") != "0"
+        offline_retry_cleanup = (
+            setting(connection, "p115_offline_retry_cleanup") != "0"
+        )
         wash_window_hours = max(
             12, min(72, int(setting(connection, "hdhive_wash_window_hours") or 48))
         )
@@ -8013,6 +8053,7 @@ def hdhive_public_status() -> dict[str, Any]:
         "last_error": row["last_error"],
         "poll_enabled": poll_enabled,
         "poll_interval": poll_interval,
+        "quiet_scan_interval": HDHIVE_QUIET_SCAN_SECONDS,
         "last_poll_at": last_poll,
         "next_poll_at": next_poll,
         "last_full_scan_at": last_full_scan,
@@ -8020,6 +8061,7 @@ def hdhive_public_status() -> dict[str, Any]:
         "last_message_title": last_message_title,
         "last_poll_error": last_poll_error,
         "auto_transfer": auto_transfer,
+        "offline_retry_cleanup": offline_retry_cleanup,
         "only_115": True,
         "wash_window_hours": wash_window_hours,
         "wash_after_emby": wash_after_emby,
@@ -8197,6 +8239,7 @@ async def update_hdhive_config(
             set_setting(connection, "hdhive_poll_interval", interval)
         boolean_settings = {
             "auto_transfer": "hdhive_auto_transfer",
+            "offline_retry_cleanup": "p115_offline_retry_cleanup",
             "wash_after_emby": "hdhive_wash_after_emby",
             "reprocess_changed": "hdhive_reprocess_changed",
             "lock_after_window": "hdhive_lock_after_window",
@@ -8488,7 +8531,47 @@ def list_follows(
             query += "WHERE f.active = 1 "
         query += "ORDER BY f.active DESC, f.updated_at DESC"
         rows = connection.execute(query, values).fetchall()
-    return {"follows": [serialize_follow(row) for row in rows]}
+    items = [serialize_follow(row) for row in rows]
+    if user["role"] != "admin":
+        return {"follows": items}
+
+    grouped: dict[tuple[str, int], dict[str, Any]] = {}
+    for item in items:
+        key = (str(item.get("media_type") or "tv"), int(item["tmdb_id"]))
+        current = grouped.get(key)
+        if current is None:
+            current = dict(item)
+            current["follow_ids"] = []
+            current["follower_names"] = []
+            grouped[key] = current
+        current["follow_ids"].append(int(item["id"]))
+        name = str(item.get("display_name") or item.get("username") or "家人")
+        if name not in current["follower_names"]:
+            current["follower_names"].append(name)
+        current["hdhive_subscribed"] = bool(
+            current.get("hdhive_subscribed") or item.get("hdhive_subscribed")
+        )
+        if not current.get("hdhive_subscription_id") and item.get(
+            "hdhive_subscription_id"
+        ):
+            current["id"] = int(item["id"])
+            current["hdhive_subscription_id"] = item["hdhive_subscription_id"]
+        current_progress = (
+            int(current.get("current_emby_season") or 1),
+            int(current.get("current_emby_episode") or 0),
+        )
+        item_progress = (
+            int(item.get("current_emby_season") or 1),
+            int(item.get("current_emby_episode") or 0),
+        )
+        if item_progress > current_progress:
+            current["current_emby_season"] = item_progress[0]
+            current["current_emby_episode"] = item_progress[1]
+            current["current_emby_label"] = item.get("current_emby_label") or ""
+    for item in grouped.values():
+        item["follower_count"] = len(item["follower_names"])
+        item["display_name"] = "、".join(item["follower_names"])
+    return {"follows": list(grouped.values())}
 
 
 @APP.get("/api/follows/{follow_id}/timeline")
@@ -9176,15 +9259,49 @@ async def hdhive_transfer(
     client = await asyncio.to_thread(p115_client)
     with db() as connection:
         target_cid = setting(connection, "p115_target_cid") or "0"
+        offline_retry_cleanup = (
+            setting(connection, "p115_offline_retry_cleanup") != "0"
+        )
 
     if not is_115_share_url(share_url):
         before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
+        retried_completed_task = False
         queued = await asyncio.to_thread(
             p115_call,
             "提交115离线任务失败",
             client.clouddownload_task_add_url,
             {"url": share_url, "wp_path_id": target_cid},
         )
+        failure_message = response_message(queued, "115离线任务提交失败")
+        duplicate_task = "任务已存在" in failure_message or "重复" in failure_message
+        if (
+            not response_ok(queued)
+            and duplicate_task
+            and offline_retry_cleanup
+        ):
+            completed_hash = await asyncio.to_thread(
+                p115_completed_offline_task_hash, client, share_url
+            )
+            if completed_hash:
+                deleted = await asyncio.to_thread(
+                    p115_call,
+                    "清理115已完成离线任务记录失败",
+                    client.clouddownload_task_del,
+                    {"hash[0]": completed_hash, "flag": 0},
+                )
+                if not response_ok(deleted):
+                    raise HTTPException(
+                        502,
+                        response_message(deleted, "115已完成任务记录清理失败"),
+                    )
+                before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
+                queued = await asyncio.to_thread(
+                    p115_call,
+                    "重新提交115离线任务失败",
+                    client.clouddownload_task_add_url,
+                    {"url": share_url, "wp_path_id": target_cid},
+                )
+                retried_completed_task = True
         if not response_ok(queued):
             raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
         changed = await asyncio.to_thread(
@@ -9198,7 +9315,11 @@ async def hdhive_transfer(
                 "115接口没有创建云下载任务；返回：" + response_summary(queued),
             )
         mode = "offline"
-        message = "已加入115离线下载，完成后会出现在所选目录"
+        message = (
+            "已保留原文件并重新加入115离线下载"
+            if retried_completed_task
+            else "已加入115离线下载，完成后会出现在所选目录"
+        )
         workflow_state = "submitted"
     else:
         before_files = await asyncio.to_thread(

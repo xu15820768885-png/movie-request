@@ -1109,6 +1109,60 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(app.list_follows(self.token)["follows"], [])
         self.assertEqual(app.list_follows(self.admin_token)["follows"], [])
 
+    def test_admin_watchlist_groups_same_title_followed_by_family_members(self):
+        with app.db() as connection:
+            member_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            admin_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+            connection.executemany(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 9001, ?, ?)",
+                [
+                    (member_id, app.now_iso(), app.now_iso()),
+                    (admin_id, app.now_iso(), app.now_iso()),
+                ],
+            )
+
+        admin_items = app.list_follows(self.admin_token)["follows"]
+        member_items = app.list_follows(self.token)["follows"]
+
+        self.assertEqual(len(admin_items), 1)
+        self.assertEqual(admin_items[0]["follower_count"], 2)
+        self.assertEqual(set(admin_items[0]["follower_names"]), {"家人", "管理员"})
+        self.assertEqual(len(admin_items[0]["follow_ids"]), 2)
+        self.assertEqual(len(member_items), 1)
+        self.assertNotIn("follower_count", member_items[0])
+
+    def test_background_refresh_scans_shared_family_follow_once(self):
+        with app.db() as connection:
+            member_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            admin_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+            connection.executemany(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 9001, ?, ?)",
+                [
+                    (member_id, app.now_iso(), app.now_iso()),
+                    (admin_id, app.now_iso(), app.now_iso()),
+                ],
+            )
+            app.set_setting(connection, "hdhive_auto_transfer", "0")
+
+        with patch.object(
+            app, "hdhive_call", return_value={"data": []}
+        ) as hdhive:
+            app.refresh_hdhive_subscribed_follows(force_file_lists=True)
+
+        hdhive.assert_called_once_with("resources", "tv", 223911)
+
     def test_cancel_follow_also_deletes_native_hdhive_subscription(self):
         with app.db() as connection:
             user_id = connection.execute(
@@ -1222,6 +1276,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                         "signin_enabled": True,
                         "signin_time": "07:45",
                         "signin_mode": "normal",
+                        "offline_retry_cleanup": False,
                     }
                 ),
                 self.admin_token,
@@ -1232,6 +1287,8 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertTrue(status["signin_enabled"])
         self.assertEqual(status["signin_time"], "07:45")
         self.assertEqual(status["signin_mode"], "normal")
+        self.assertFalse(status["offline_retry_cleanup"])
+        self.assertEqual(status["quiet_scan_interval"], 6 * 3600)
         with patch.object(
             app,
             "perform_hdhive_signin",
@@ -1496,7 +1553,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(completed["events"][0]["resource_status"], "completed")
         self.assertEqual(ongoing["events"], [])
 
-    def test_follow_cycle_runs_daily_reconciliation_without_new_message(self):
+    def test_follow_cycle_runs_six_hour_fallback_without_new_message(self):
         with patch.object(
             app, "poll_hdhive_follow_messages", return_value=0
         ) as messages:
@@ -1518,7 +1575,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             cycle_id=result["cycle_id"], force_file_lists=True
         )
 
-    def test_follow_cycle_scans_recent_follows_without_new_message(self):
+    def test_follow_cycle_skips_recent_six_hour_fallback_without_new_message(self):
         with app.db() as connection:
             app.set_setting(connection, "hdhive_last_full_scan_at", app.now_iso())
         with patch.object(
@@ -1534,11 +1591,23 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["message_count"], 0)
-        self.assertEqual(result["changed_count"], 3)
+        self.assertEqual(result["changed_count"], 0)
         messages.assert_called_once()
-        refresh.assert_called_once_with(
-            cycle_id=result["cycle_id"], force_file_lists=True
-        )
+        refresh.assert_not_called()
+
+    def test_follow_cycle_without_message_permissions_does_not_refresh_resources(self):
+        with patch.object(app, "poll_hdhive_follow_messages") as messages:
+            with patch.object(app, "refresh_hdhive_subscribed_follows") as refresh:
+                result = app.run_hdhive_follow_cycle(
+                    authorized_scopes={"query", "unlock"},
+                    include_unsubscribed=True,
+                    interval=900,
+                )
+
+        self.assertEqual(result["message_count"], 0)
+        self.assertEqual(result["changed_count"], 0)
+        messages.assert_not_called()
+        refresh.assert_not_called()
 
     def test_follow_cycle_skips_recent_full_scan_after_targeted_message(self):
         with app.db() as connection:
@@ -1705,6 +1774,103 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             result["message"],
             "已加入115离线下载，完成后会出现在所选目录",
         )
+
+    def test_duplicate_completed_offline_task_is_removed_without_files_and_retried(self):
+        info_hash = "ABCDEF1234567890"
+
+        class FakeP115:
+            def __init__(self):
+                self.add_count = 0
+                self.deleted = None
+
+            def clouddownload_task_list(self, payload):
+                if payload.get("stat") == 11:
+                    return {
+                        "state": True,
+                        "tasks": [{"info_hash": info_hash, "status": 11}],
+                    }
+                return {"state": True, "tasks": []}
+
+            def clouddownload_task_add_url(self, _payload):
+                self.add_count += 1
+                if self.add_count == 1:
+                    return {
+                        "state": False,
+                        "message": "任务已存在，请勿输入重复的链接地址",
+                    }
+                return {"state": True, "task_id": "offline-new"}
+
+            def clouddownload_task_del(self, payload):
+                self.deleted = payload
+                return {"state": True}
+
+        client = FakeP115()
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={
+                "data": {"url": f"magnet:?xt=urn:btih:{info_hash}"}
+            },
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(app, "wait_for_p115_change", return_value=True):
+                    with patch.object(app, "send_notifications_async"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(
+                                FakeRequest(
+                                    {
+                                        "slug": "updated-offline",
+                                        "tmdb_id": 223911,
+                                        "media_type": "tv",
+                                        "resource_title": "测试剧 S01E01-E07",
+                                    }
+                                ),
+                                self.token,
+                            )
+                        )
+
+        self.assertEqual(client.add_count, 2)
+        self.assertEqual(client.deleted, {"hash[0]": info_hash, "flag": 0})
+        self.assertEqual(result["message"], "已保留原文件并重新加入115离线下载")
+
+    def test_duplicate_offline_cleanup_can_be_disabled(self):
+        class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                return {"state": True, "tasks": []}
+
+            def clouddownload_task_add_url(self, _payload):
+                return {
+                    "state": False,
+                    "message": "任务已存在，请勿输入重复的链接地址",
+                }
+
+            def clouddownload_task_del(self, _payload):
+                raise AssertionError("disabled cleanup must not delete tasks")
+
+        with app.db() as connection:
+            app.set_setting(connection, "p115_offline_retry_cleanup", "0")
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"url": "magnet:?xt=urn:btih:disabled"}},
+        ):
+            with patch.object(app, "p115_client", return_value=FakeP115()):
+                with self.assertRaises(app.HTTPException) as raised:
+                    asyncio.run(
+                        app.hdhive_transfer(
+                            FakeRequest(
+                                {
+                                    "slug": "disabled-offline",
+                                    "tmdb_id": 223911,
+                                    "media_type": "tv",
+                                    "resource_title": "测试剧 S01E01-E07",
+                                }
+                            ),
+                            self.token,
+                        )
+                    )
+
+        self.assertIn("任务已存在", raised.exception.detail)
 
     def test_manual_transfer_receives_full_share_and_allows_retry(self):
         class FakeP115:

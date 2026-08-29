@@ -70,6 +70,7 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("p123_emby_webhook_enabled:$('settingsP123EmbyWebhookEnabled').checked", html)
         self.assertIn("PanSave", html)
         self.assertIn('id="hdhiveAutoTransfer"', html)
+        self.assertIn('id="hdhiveOfflineRetryCleanup"', html)
         self.assertIn('id="hdhiveWashWindow"', html)
         self.assertIn('id="hdhiveMaxTransfers"', html)
         self.assertIn('data-hdhive-filter="${key}"', html)
