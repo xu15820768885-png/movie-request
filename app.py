@@ -21,7 +21,7 @@ from email.parser import BytesParser
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Iterable, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 import uvicorn
@@ -2172,6 +2172,51 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
 
     add(data)
     return links
+
+
+def select_missing_episode_transfer_links(
+    links: list[str],
+    *,
+    season_number: int,
+    wanted_episodes: set[int],
+    present_episodes: set[int],
+) -> tuple[list[str], set[int]]:
+    """Select only missing episodes when each offline URL names its episode."""
+    if not links or not wanted_episodes:
+        return links, set(wanted_episodes)
+
+    parsed_links: list[tuple[str, set[int]]] = []
+    available: set[int] = set()
+    for link in links:
+        parsed = parse_episode_spec(unquote(link))
+        seasons = {
+            int(value)
+            for value in parsed.get("season_numbers") or []
+            if int(value) > 0
+        }
+        if seasons and season_number not in seasons:
+            episodes: set[int] = set()
+        else:
+            episodes = {
+                int(value)
+                for value in parsed.get("episode_numbers") or []
+                if int(value) > 0
+            } & wanted_episodes
+        parsed_links.append((link, episodes))
+        available.update(episodes)
+
+    # Only filter when every requested episode can be mapped to at least one
+    # URL. A partial/ambiguous payload must retain the original safe fallback.
+    if not wanted_episodes.issubset(available):
+        return links, set(wanted_episodes)
+
+    missing = wanted_episodes - present_episodes
+    if not missing:
+        return [], set()
+    selected = [
+        link for link, episodes in parsed_links if episodes & missing
+    ]
+    return selected, missing
 
 
 def compact_episode_numbers(numbers: set[int]) -> str:
@@ -9184,8 +9229,8 @@ async def hdhive_transfer(
             detail=event_detail,
         )
         raise HTTPException(502, "影巢解锁结果格式无效")
-    share_url = str(data.get("full_url") or data.get("url") or "").strip()
-    if not share_url:
+    links = extract_dian_transfer_links({"payload": data})
+    if not links:
         log_hdhive_follow_event(
             "unlock", "failed", "影巢解锁后没有返回资源链接",
             follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
@@ -9193,6 +9238,7 @@ async def hdhive_transfer(
             detail=event_detail,
         )
         raise HTTPException(502, "影巢解锁后没有返回资源链接")
+    share_url = links[0]
     log_hdhive_follow_event(
         "unlock", "success", "影巢资源解锁成功，正在提交到网盘",
         follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
@@ -9230,13 +9276,64 @@ async def hdhive_transfer(
         )
 
     if not is_115_share_url(share_url):
+        selected_links = links
+        episode_links_filtered = False
+        if media_type == "tv" and wanted_episodes:
+            season_number = int(title_spec["season_number"])
+            progress = await asyncio.to_thread(
+                destination_episode_progress,
+                str(user["storage_destination"]),
+                tmdb_id,
+                known_in_library=True,
+            )
+            by_season = progress.get("emby_episode_numbers") or {}
+            present_episodes = {
+                int(value)
+                for value in by_season.get(str(season_number), [])
+                if int(value) > 0
+            }
+            present_episodes.update(
+                transferred_episode_set(tmdb_id, season_number)
+            )
+            selected_links, selected_episodes = (
+                select_missing_episode_transfer_links(
+                    links,
+                    season_number=season_number,
+                    wanted_episodes=wanted_episodes,
+                    present_episodes=present_episodes,
+                )
+            )
+            if not selected_links:
+                raise HTTPException(409, "这个资源中可识别的剧集都已存在")
+            episode_links_filtered = selected_links != links
+            selected_episode_numbers = sorted(selected_episodes)
+            update_workflow_job_episodes(
+                int(job["id"]), season_number, selected_episodes
+            )
+
+        def submit_offline_links(error_label: str) -> dict[str, Any]:
+            if len(selected_links) == 1:
+                return p115_call(
+                    error_label,
+                    client.clouddownload_task_add_url,
+                    {"url": selected_links[0], "wp_path_id": target_cid},
+                )
+            offline_payload = {
+                f"url[{index}]": link
+                for index, link in enumerate(selected_links)
+            }
+            offline_payload["wp_path_id"] = target_cid
+            return p115_call(
+                error_label,
+                client.clouddownload_task_add_urls,
+                offline_payload,
+            )
+
         before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
         retried_completed_task = False
         queued = await asyncio.to_thread(
-            p115_call,
+            submit_offline_links,
             "提交115离线任务失败",
-            client.clouddownload_task_add_url,
-            {"url": share_url, "wp_path_id": target_cid},
         )
         failure_message = response_message(queued, "115离线任务提交失败")
         duplicate_task = "任务已存在" in failure_message or "重复" in failure_message
@@ -9266,10 +9363,8 @@ async def hdhive_transfer(
             )
             before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
             queued = await asyncio.to_thread(
-                p115_call,
+                submit_offline_links,
                 "重新提交115离线任务失败",
-                client.clouddownload_task_add_url,
-                {"url": share_url, "wp_path_id": target_cid},
             )
             retried_completed_task = True
         if not response_ok(queued):
@@ -9305,6 +9400,11 @@ async def hdhive_transfer(
             if retried_completed_task
             else "已加入115离线下载，完成后会出现在所选目录"
         )
+        if episode_links_filtered and selected_episode_numbers:
+            message += (
+                "：第"
+                f"{compact_episode_numbers(set(selected_episode_numbers))}集"
+            )
         workflow_state = "submitted"
     else:
         before_files = await asyncio.to_thread(

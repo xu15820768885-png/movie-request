@@ -2057,6 +2057,74 @@ class MovieRequestTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual([row["episode_number"] for row in rows], list(range(1, 8)))
 
+    def test_hdhive_ed2k_pack_submits_only_missing_episode(self):
+        class FakeP115:
+            def clouddownload_task_list(self, _payload):
+                tasks = (
+                    [{"info_hash": "episode-7", "name": "Show.S01E07.mkv"}]
+                    if hasattr(self, "offline_payload")
+                    else []
+                )
+                return {"state": True, "tasks": tasks}
+
+            def clouddownload_task_add_url(self, payload):
+                self.offline_payload = payload
+                return {"state": True, "info_hash": "episode-7"}
+
+            def clouddownload_task_add_urls(self, _payload):
+                raise AssertionError("only the missing E07 link should be submitted")
+
+        links = [
+            (
+                "ed2k://|file|Show.2026.S01E"
+                f"{episode:02d}.mkv|{episode}00|HASH{episode}|/"
+            )
+            for episode in range(1, 8)
+        ]
+        client = FakeP115()
+        payload = {
+            "slug": "seven-ed2k-links",
+            "tmdb_id": 223911,
+            "media_type": "tv",
+            "title": "测试剧",
+            "resource_title": "S01E01-E07 已规范命名",
+        }
+        with patch.object(
+            app,
+            "hdhive_call",
+            return_value={"data": {"offline_urls": links}},
+        ):
+            with patch.object(app, "p115_client", return_value=client):
+                with patch.object(
+                    app,
+                    "destination_episode_progress",
+                    return_value={
+                        "emby_episode_numbers": {"1": list(range(1, 7))}
+                    },
+                ):
+                    with patch.object(app, "send_notifications_async"):
+                        result = asyncio.run(
+                            app.hdhive_transfer(FakeRequest(payload), self.token)
+                        )
+
+        self.assertEqual(
+            client.offline_payload,
+            {"url": links[6], "wp_path_id": "0"},
+        )
+        self.assertEqual(result["mode"], "offline")
+        self.assertIn("第7集", result["message"])
+        with app.db() as connection:
+            episodes = connection.execute(
+                "SELECT episode_number FROM resource_transfer_log "
+                "WHERE resource_key = 'seven-ed2k-links'"
+            ).fetchall()
+            job = connection.execute(
+                "SELECT episode_numbers_json FROM media_workflow_jobs "
+                "WHERE resource_key = 'seven-ed2k-links'"
+            ).fetchone()
+        self.assertEqual([row["episode_number"] for row in episodes], [7])
+        self.assertEqual(json.loads(job["episode_numbers_json"]), [7])
+
     def test_pansave_send_link_uses_saved_user_session(self):
         with app.db() as connection:
             app.set_setting(connection, "pansave_telegram_api_id", "123456")
