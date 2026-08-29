@@ -7008,7 +7008,7 @@ def run_hdhive_follow_cycle(
         if reconcile_due:
             changed += refresh_hdhive_subscribed_follows(
                 cycle_id=cycle_id,
-                force_file_lists=False,
+                force_file_lists=True,
             )
             with db() as connection:
                 set_setting(connection, "hdhive_last_full_scan_at", now_iso())
@@ -7025,11 +7025,13 @@ def run_hdhive_follow_cycle(
             changed += refresh_hdhive_subscribed_follows(
                 cycle_id=cycle_id,
                 only_unsubscribed=True,
+                force_file_lists=True,
             )
     else:
         changed = refresh_hdhive_subscribed_follows(
             include_unsubscribed=True,
             cycle_id=cycle_id,
+            force_file_lists=True,
         )
     with db() as connection:
         set_setting(connection, "hdhive_last_poll_at", now_iso())

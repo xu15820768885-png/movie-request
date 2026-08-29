@@ -641,6 +641,25 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertIn("slug", second[2])
         call.assert_called_once_with("resource_file_list", "expired-slug")
 
+    def test_forced_file_list_refresh_bypasses_success_cache(self):
+        first_payload = {"data": {"files": [{"name": "Show.S01E06.mkv"}]}}
+        updated_payload = {"data": {"files": [{"name": "Show.S01E07.mkv"}]}}
+        with patch.object(
+            app,
+            "hdhive_call",
+            side_effect=[first_payload, updated_payload],
+        ) as call:
+            first = app.hdhive_cached_file_list("updated-slug")
+            cached = app.hdhive_cached_file_list("updated-slug")
+            forced = app.hdhive_cached_file_list("updated-slug", force=True)
+
+        self.assertEqual(first[0], first_payload)
+        self.assertEqual(cached[0], first_payload)
+        self.assertTrue(cached[1])
+        self.assertEqual(forced[0], updated_payload)
+        self.assertFalse(forced[1])
+        self.assertEqual(call.call_count, 2)
+
     def test_hdhive_429_preserves_retry_after_and_limit_scope(self):
         class LimitedClient:
             def messages(self):
@@ -1496,7 +1515,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             refresh_follows=True, cycle_id=result["cycle_id"]
         )
         refresh.assert_called_once_with(
-            cycle_id=result["cycle_id"], force_file_lists=False
+            cycle_id=result["cycle_id"], force_file_lists=True
         )
 
     def test_follow_cycle_scans_recent_follows_without_new_message(self):
@@ -1518,7 +1537,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(result["changed_count"], 3)
         messages.assert_called_once()
         refresh.assert_called_once_with(
-            cycle_id=result["cycle_id"], force_file_lists=False
+            cycle_id=result["cycle_id"], force_file_lists=True
         )
 
     def test_follow_cycle_skips_recent_full_scan_after_targeted_message(self):
