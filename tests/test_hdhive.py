@@ -1572,6 +1572,58 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(result["messages"][0]["follow_id"], follow_id)
         self.assertEqual(result["messages"][0]["status"], "acknowledged")
 
+    def test_message_without_ids_matches_title_and_all_following_members(self):
+        with app.db() as connection:
+            admin_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+            member_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'member'"
+                ).fetchone()[0]
+            )
+            first_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, active, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 1, ?, ?)",
+                (admin_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            second_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, active, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 1, ?, ?)",
+                (member_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO hdhive_message_log(message_key, event_type, payload_json, "
+                "status, created_at) VALUES('title-only', 'resource_updated', ?, "
+                "'acknowledged', ?)",
+                (
+                    json.dumps(
+                        {
+                            "title": "订阅影视有新资源更新",
+                            "content": "剧集《仙逆》更新了第156集",
+                            "resource": {"quality": "2160p"},
+                            "access_token": "must-not-leak",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    app.now_iso(),
+                ),
+            )
+
+        message = app.hdhive_messages(movie_session=self.admin_token)["messages"][0]
+
+        self.assertEqual(message["follow_title"], "仙逆")
+        self.assertEqual(set(message["follow_ids"]), {first_id, second_id})
+        self.assertIn("管理员", message["display_name"])
+        self.assertIn("家人", message["display_name"])
+        self.assertIn(
+            {"label": "resource.quality", "value": "2160p"},
+            message["detail_fields"],
+        )
+        self.assertNotIn("must-not-leak", str(message["detail_fields"]))
+
     def test_management_log_includes_and_filters_completed_manual_unlocks(self):
         with app.db() as connection:
             user_id = connection.execute(

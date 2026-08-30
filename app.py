@@ -7490,6 +7490,27 @@ def serialize_workflow_job(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def reset_workflow_job_record(job_id: int) -> bool:
+    """Cancel a non-terminal job so the same resource may be processed again."""
+    timestamp = now_iso()
+    with db() as connection:
+        row = connection.execute(
+            "SELECT id, state FROM media_workflow_jobs WHERE id = ?", (int(job_id),)
+        ).fetchone()
+        if not row:
+            return False
+        if str(row["state"]) in ("ingested", "cancelled"):
+            raise HTTPException(409, "已完成或已重置的任务无需再次重置")
+        connection.execute(
+            "UPDATE media_workflow_jobs SET state = 'cancelled', "
+            "detail = '管理员已重置；后续可重新处理这个资源', "
+            "last_error = '', next_retry_at = '', completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (timestamp, timestamp, int(job_id)),
+        )
+    return True
+
+
 def serialize_worker_health(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     thresholds = {
@@ -7570,6 +7591,28 @@ def activity_summary(
             "ORDER BY j.updated_at DESC LIMIT 100",
             job_owner_values,
         ).fetchall()
+        active_requests = connection.execute(
+            "SELECT r.*, u.display_name FROM movie_requests r "
+            "LEFT JOIN users u ON u.id = r.user_id "
+            "WHERE r.status IN ('pending', 'approved', 'searching') "
+            + ("" if user["role"] == "admin" else "AND r.user_id = ? ")
+            + "ORDER BY r.updated_at DESC LIMIT 100",
+            values,
+        ).fetchall()
+        completed_requests = connection.execute(
+            "SELECT r.*, u.display_name FROM movie_requests r "
+            "LEFT JOIN users u ON u.id = r.user_id WHERE r.status = 'available' "
+            + ("" if user["role"] == "admin" else "AND r.user_id = ? ")
+            + "ORDER BY r.updated_at DESC LIMIT 100",
+            values,
+        ).fetchall()
+        active_follows = connection.execute(
+            "SELECT f.*, u.display_name FROM tv_follows f "
+            "LEFT JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
+            + ("" if user["role"] == "admin" else "AND f.user_id = ? ")
+            + "ORDER BY f.updated_at DESC LIMIT 100",
+            values,
+        ).fetchall()
     request_counts = {str(row["status"]): int(row["count"]) for row in request_rows}
     job_counts = {str(row["state"]): int(row["count"]) for row in job_rows}
     return {
@@ -7586,6 +7629,48 @@ def activity_summary(
         "recent_jobs": [serialize_workflow_job(row) for row in recent_jobs],
         "active_jobs": [serialize_workflow_job(row) for row in active_jobs],
         "failed_jobs": [serialize_workflow_job(row) for row in failed_jobs],
+        "active_requests": [serialize_request(row) for row in active_requests],
+        "completed_requests": [serialize_request(row) for row in completed_requests],
+        "active_follows": (
+            group_follow_items([serialize_follow(row) for row in active_follows])
+            if user["role"] == "admin"
+            else [serialize_follow(row) for row in active_follows]
+        ),
+    }
+
+
+@APP.post("/api/admin/workflow-jobs/{job_id}/reset")
+def reset_workflow_job(
+    job_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    if not reset_workflow_job_record(job_id):
+        raise HTTPException(404, "任务不存在")
+    return {"ok": True, "job_id": int(job_id), "message": "任务已重置，可重新处理"}
+
+
+@APP.post("/api/admin/workflow-jobs/reset-stale")
+def reset_stale_workflow_jobs(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    states = sorted(ACTIVE_JOB_STATES - {"failed"})
+    marks = ",".join("?" for _ in states)
+    timestamp = now_iso()
+    with db() as connection:
+        cursor = connection.execute(
+            "UPDATE media_workflow_jobs SET state = 'cancelled', "
+            "detail = '管理员批量重置停滞任务；后续可重新处理这个资源', "
+            "last_error = '', next_retry_at = '', completed_at = ?, updated_at = ? "
+            f"WHERE state IN ({marks}) AND updated_at < ?",
+            (timestamp, timestamp, *states, cutoff),
+        )
+    return {
+        "ok": True,
+        "reset_count": int(cursor.rowcount or 0),
+        "message": f"已重置 {int(cursor.rowcount or 0)} 个停滞任务",
     }
 
 
@@ -8441,6 +8526,39 @@ def hdhive_message_text(payload: Any, keys: set[str], depth: int = 0) -> str:
     return ""
 
 
+def hdhive_message_detail_fields(payload: Any) -> list[dict[str, str]]:
+    """Flatten useful inbox fields while omitting credentials and large blobs."""
+    blocked = {
+        "token", "access_token", "refresh_token", "secret", "app_secret",
+        "cookie", "password", "authorization", "signature", "sign",
+    }
+    fields: list[dict[str, str]] = []
+
+    def walk(value: Any, path: str = "", depth: int = 0) -> None:
+        if depth > 4 or len(fields) >= 30:
+            return
+        if isinstance(value, dict):
+            for raw_key, child in value.items():
+                key = str(raw_key or "").strip()
+                if key and key.lower() not in blocked:
+                    walk(child, f"{path}.{key}" if path else key, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            if all(not isinstance(item, (dict, list, tuple)) for item in value):
+                text = "、".join(str(item) for item in value if item is not None)
+                if text:
+                    fields.append({"label": path or "内容", "value": text[:500]})
+            else:
+                for index, child in enumerate(value[:10]):
+                    walk(child, f"{path}[{index + 1}]", depth + 1)
+        elif value is not None and path:
+            text = str(value).strip()
+            if text:
+                fields.append({"label": path, "value": text[:500]})
+
+    walk(payload)
+    return fields
+
+
 @APP.get("/api/admin/hdhive/messages")
 def hdhive_messages(
     limit: int = 60,
@@ -8460,15 +8578,15 @@ def hdhive_messages(
             "LEFT JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
             "ORDER BY f.id DESC"
         ).fetchall()
-    by_subscription: dict[int, sqlite3.Row] = {}
-    by_tmdb: dict[int, sqlite3.Row] = {}
+    by_subscription: dict[int, list[sqlite3.Row]] = {}
+    by_tmdb: dict[int, list[sqlite3.Row]] = {}
     for follow in follows:
         subscription_id = int(follow["hdhive_subscription_id"] or 0)
         tmdb_id = int(follow["tmdb_id"] or 0)
-        if subscription_id and subscription_id not in by_subscription:
-            by_subscription[subscription_id] = follow
-        if tmdb_id and tmdb_id not in by_tmdb:
-            by_tmdb[tmdb_id] = follow
+        if subscription_id:
+            by_subscription.setdefault(subscription_id, []).append(follow)
+        if tmdb_id:
+            by_tmdb.setdefault(tmdb_id, []).append(follow)
     messages: list[dict[str, Any]] = []
     for row in rows:
         try:
@@ -8482,7 +8600,6 @@ def hdhive_messages(
             or 0
         )
         tmdb_id = int(row["tmdb_id"] or next(iter(hints["tmdb_ids"]), 0) or 0)
-        follow = by_subscription.get(subscription_id) or by_tmdb.get(tmdb_id)
         headline = hdhive_message_text(
             payload, {"title", "subject", "headline", "notification_title"}
         )
@@ -8492,6 +8609,41 @@ def hdhive_messages(
         remote_created_at = hdhive_message_text(
             payload,
             {"created_at", "sent_at", "published_at", "event_time", "timestamp"},
+        )
+        matching_follows = list(
+            by_subscription.get(subscription_id) or by_tmdb.get(tmdb_id) or []
+        )
+        if not matching_follows:
+            message_text = f"{headline}\n{content}"
+            title_matches = [
+                candidate for candidate in follows
+                if len(str(candidate["title"] or "").strip()) >= 2
+                and str(candidate["title"]).strip() in message_text
+            ]
+            if title_matches:
+                longest = max(
+                    len(str(candidate["title"]).strip())
+                    for candidate in title_matches
+                )
+                matched_titles = {
+                    str(candidate["title"]).strip()
+                    for candidate in title_matches
+                    if len(str(candidate["title"]).strip()) == longest
+                }
+                matching_follows = [
+                    candidate for candidate in title_matches
+                    if str(candidate["title"]).strip() in matched_titles
+                ]
+        follow = matching_follows[0] if matching_follows else None
+        follow_ids = list(
+            dict.fromkeys(int(candidate["id"]) for candidate in matching_follows)
+        )
+        member_names = list(
+            dict.fromkeys(
+                str(candidate["display_name"] or "").strip()
+                for candidate in matching_follows
+                if str(candidate["display_name"] or "").strip()
+            )
         )
         messages.append(
             {
@@ -8508,8 +8660,10 @@ def hdhive_messages(
                 "subscription_id": subscription_id,
                 "tmdb_id": tmdb_id or int(follow["tmdb_id"] if follow else 0),
                 "follow_id": int(follow["id"] if follow else 0),
+                "follow_ids": follow_ids,
                 "follow_title": str(follow["title"] if follow else ""),
-                "display_name": str(follow["display_name"] if follow else ""),
+                "display_name": "、".join(member_names),
+                "detail_fields": hdhive_message_detail_fields(payload),
             }
         )
     return {"messages": messages, "count": len(messages)}
@@ -8817,6 +8971,47 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def group_follow_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge family members following the same TMDB title into one media card."""
+    grouped: dict[tuple[str, int], dict[str, Any]] = {}
+    for item in items:
+        key = (str(item.get("media_type") or "tv"), int(item["tmdb_id"]))
+        current = grouped.get(key)
+        if current is None:
+            current = dict(item)
+            current["follow_ids"] = []
+            current["follower_names"] = []
+            grouped[key] = current
+        current["follow_ids"].append(int(item["id"]))
+        name = str(item.get("display_name") or item.get("username") or "家人")
+        if name not in current["follower_names"]:
+            current["follower_names"].append(name)
+        current["hdhive_subscribed"] = bool(
+            current.get("hdhive_subscribed") or item.get("hdhive_subscribed")
+        )
+        if not current.get("hdhive_subscription_id") and item.get(
+            "hdhive_subscription_id"
+        ):
+            current["id"] = int(item["id"])
+            current["hdhive_subscription_id"] = item["hdhive_subscription_id"]
+        current_progress = (
+            int(current.get("current_emby_season") or 1),
+            int(current.get("current_emby_episode") or 0),
+        )
+        item_progress = (
+            int(item.get("current_emby_season") or 1),
+            int(item.get("current_emby_episode") or 0),
+        )
+        if item_progress > current_progress:
+            current["current_emby_season"] = item_progress[0]
+            current["current_emby_episode"] = item_progress[1]
+            current["current_emby_label"] = item.get("current_emby_label") or ""
+    for item in grouped.values():
+        item["follower_count"] = len(item["follower_names"])
+        item["display_name"] = "、".join(item["follower_names"])
+    return list(grouped.values())
+
+
 def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
     """Refresh current Emby progress without mutating the follow start baseline."""
     with db() as connection:
@@ -8877,43 +9072,7 @@ def list_follows(
     if user["role"] != "admin":
         return {"follows": items}
 
-    grouped: dict[tuple[str, int], dict[str, Any]] = {}
-    for item in items:
-        key = (str(item.get("media_type") or "tv"), int(item["tmdb_id"]))
-        current = grouped.get(key)
-        if current is None:
-            current = dict(item)
-            current["follow_ids"] = []
-            current["follower_names"] = []
-            grouped[key] = current
-        current["follow_ids"].append(int(item["id"]))
-        name = str(item.get("display_name") or item.get("username") or "家人")
-        if name not in current["follower_names"]:
-            current["follower_names"].append(name)
-        current["hdhive_subscribed"] = bool(
-            current.get("hdhive_subscribed") or item.get("hdhive_subscribed")
-        )
-        if not current.get("hdhive_subscription_id") and item.get(
-            "hdhive_subscription_id"
-        ):
-            current["id"] = int(item["id"])
-            current["hdhive_subscription_id"] = item["hdhive_subscription_id"]
-        current_progress = (
-            int(current.get("current_emby_season") or 1),
-            int(current.get("current_emby_episode") or 0),
-        )
-        item_progress = (
-            int(item.get("current_emby_season") or 1),
-            int(item.get("current_emby_episode") or 0),
-        )
-        if item_progress > current_progress:
-            current["current_emby_season"] = item_progress[0]
-            current["current_emby_episode"] = item_progress[1]
-            current["current_emby_label"] = item.get("current_emby_label") or ""
-    for item in grouped.values():
-        item["follower_count"] = len(item["follower_names"])
-        item["display_name"] = "、".join(item["follower_names"])
-    return {"follows": list(grouped.values())}
+    return {"follows": group_follow_items(items)}
 
 
 @APP.get("/api/follows/{follow_id}/timeline")

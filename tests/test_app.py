@@ -119,6 +119,75 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["failed_jobs"][0]["last_error"], "目标目录没有变化")
         self.assertEqual(result["failed_jobs"][0]["episode_numbers"], [37])
 
+    def test_admin_can_reset_one_job_and_reprocess_same_resource(self):
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+        job = app.begin_workflow_job(
+            user_id=user_id,
+            destination="p115",
+            source="hdhive",
+            resource_key="resettable-resource",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆",
+            season_number=1,
+            episode_numbers=[156],
+        )
+
+        result = app.reset_workflow_job(int(job["id"]), self.token)
+        restarted = app.begin_workflow_job(
+            user_id=user_id,
+            destination="p115",
+            source="hdhive",
+            resource_key="resettable-resource",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆",
+            season_number=1,
+            episode_numbers=[156],
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(restarted["state"], "unlocking")
+        self.assertEqual(int(restarted["id"]), int(job["id"]))
+
+    def test_admin_can_reset_all_stale_processing_jobs(self):
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+        stale = app.begin_workflow_job(
+            user_id=user_id,
+            destination="p115",
+            source="hdhive",
+            resource_key="stale-resource",
+            tmdb_id=301418,
+            media_type="tv",
+            title="现在不是外遇的问题",
+            season_number=1,
+            episode_numbers=[7],
+        )
+        with app.db() as connection:
+            connection.execute(
+                "UPDATE media_workflow_jobs SET updated_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", int(stale["id"])),
+            )
+
+        result = app.reset_stale_workflow_jobs(self.token)
+
+        self.assertEqual(result["reset_count"], 1)
+        with app.db() as connection:
+            state = connection.execute(
+                "SELECT state FROM media_workflow_jobs WHERE id = ?", (int(stale["id"]),)
+            ).fetchone()[0]
+        self.assertEqual(state, "cancelled")
+
     def test_tmdb_image_proxy_caches_image_on_nas(self):
         class FakeImageResponse:
             content = b"fake-jpeg"

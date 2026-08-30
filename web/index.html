@@ -217,13 +217,20 @@
     .message-inbox-head { display:flex; justify-content:space-between; gap:12px; align-items:end; flex:1; }
     .message-inbox-head h3 { margin:0 0 4px; font-size:15px; }
     .message-list { display:grid; gap:8px; }
-    .message-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; padding:14px 15px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+    .message-card { border:1px solid var(--line); border-radius:13px; background:var(--panel); overflow:hidden; }
     .message-card.failed { border-color:rgba(228,123,123,.42); }
+    .message-card > summary { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; padding:14px 15px; list-style:none; cursor:pointer; }
+    .message-card > summary::-webkit-details-marker { display:none; }
+    .message-card > summary::after { content:'查看详情'; grid-column:2; color:var(--orange-2); font-size:10px; font-weight:800; }
+    .message-card[open] > summary::after { content:'收起详情'; }
     .message-headline { font-size:13px; font-weight:850; }
     .message-content { margin-top:5px; color:#d6d1ca; font-size:12px; line-height:1.55; }
     .message-meta { margin-top:6px; color:var(--muted); font-size:10px; line-height:1.55; }
     .message-actions { display:grid; justify-items:end; align-content:start; gap:8px; }
-    .message-card > .task-timeline { grid-column:1 / -1; }
+    .message-detail { display:grid; gap:8px; padding:0 15px 15px; }
+    .message-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px; }
+    .message-detail-field { padding:9px 10px; border-radius:9px; background:rgba(255,255,255,.025); font-size:10px; line-height:1.55; overflow-wrap:anywhere; }
+    .message-detail-field strong { display:block; margin-bottom:3px; color:var(--muted); }
     .message-status { padding:5px 8px; border-radius:999px; color:#b7f1d4; background:rgba(103,199,154,.12); font-size:10px; font-weight:800; white-space:nowrap; }
     .message-card.failed .message-status { color:#ffc4c4; background:rgba(228,123,123,.12); }
     .follow-event-list { display: grid; gap: 9px; }
@@ -595,11 +602,11 @@
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
       <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。</div>
       <section id="activityOverview" class="activity-overview" aria-label="映单处理概览">
-        <div class="activity-card"><span>处理中需求</span><strong id="activityRequests">0</strong></div>
-        <div class="activity-card"><span>活跃追更</span><strong id="activityFollows">0</strong></div>
+        <button id="activityRequestsCard" class="activity-card" type="button"><span>处理中需求</span><strong id="activityRequests">0</strong></button>
+        <button id="activityFollowsCard" class="activity-card" type="button"><span>活跃追更</span><strong id="activityFollows">0</strong></button>
         <button id="activityJobsCard" class="activity-card" type="button"><span>处理中任务</span><strong id="activityJobs">0</strong></button>
         <button id="activityFailedCard" class="activity-card alert" type="button"><span>失败待重试</span><strong id="activityFailed">0</strong></button>
-        <div class="activity-card"><span>历史已入库</span><strong id="activityCompleted">0</strong></div>
+        <button id="activityCompletedCard" class="activity-card" type="button"><span>历史已入库</span><strong id="activityCompleted">0</strong></button>
       </section>
 
       <nav class="tabs">
@@ -799,7 +806,7 @@
   </div>
   <div id="taskOverlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="任务详情">
     <section class="task-dialog">
-      <div class="task-dialog-head"><div><h2 id="taskDialogTitle">处理中任务</h2><div id="taskDialogHelp" class="muted" style="font-size:12px"></div></div><button id="taskDialogClose" class="btn btn-small" type="button">关闭</button></div>
+      <div class="task-dialog-head"><div><h2 id="taskDialogTitle">处理中任务</h2><div id="taskDialogHelp" class="muted" style="font-size:12px"></div></div><div class="inline-actions"><button id="taskDialogResetStale" class="btn btn-danger btn-small hidden" type="button">重置全部停滞任务</button><button id="taskDialogClose" class="btn btn-small" type="button">关闭</button></div></div>
       <div id="taskDialogList" class="task-list"></div>
     </section>
   </div>
@@ -823,7 +830,8 @@
     let searchController = null;
     let searchSequence = 0;
     let requestsLoadPromise = null;
-    let activityData = {active_jobs:[],failed_jobs:[]};
+    let activityData = {active_jobs:[],failed_jobs:[],active_requests:[],completed_requests:[],active_follows:[]};
+    let currentTaskDialogKind = '';
     const detailCache = new Map();
     const resourceCache = new Map();
     const searchCache = new Map();
@@ -928,7 +936,7 @@
     async function loadActivity() {
       if(!currentUser)return;
       try {
-        const data=preview?{requests_active:2,follows_active:3,jobs_active:1,jobs_failed:1,requests_completed:12,active_jobs:[demoJobs[0]],failed_jobs:[demoJobs[1]]}:await api('/api/activity');
+        const data=preview?{requests_active:2,follows_active:1,jobs_active:1,jobs_failed:1,requests_completed:1,active_jobs:[demoJobs[0]],failed_jobs:[demoJobs[1]],active_requests:demoRequests.filter(item=>item.status!=='available'),completed_requests:demoRequests.filter(item=>item.status==='available'),active_follows:demoFollows}:await api('/api/activity');
         activityData=data;
         $('activityRequests').textContent=data.requests_active||0;
         $('activityFollows').textContent=data.follows_active||0;
@@ -957,20 +965,46 @@
       const episode=taskEpisodeLabel(job);
       const retry=failed&&job.next_retry_at?`下次重试：${formatTaskTime(job.next_retry_at)}`:failed?'等待后台重新尝试':'';
       const progress=taskProgress(job);
-      return `<details class="task-item ${failed?'failed':''}"><summary><div><div class="task-item-title">${escapeHtml(job.title||`TMDB ${job.tmdb_id||'未知'}`)}${owner}</div><div class="task-item-sub">${episode?`${escapeHtml(episode)} · `:''}更新于 ${escapeHtml(formatTaskTime(job.updated_at))}</div></div><span class="task-state">${escapeHtml(job.state_label||job.state)}</span></summary><div class="task-body">${!failed?`<div class="task-progress" aria-label="处理进度 ${progress}%"><span style="width:${progress}%"></span></div>`:''}${failed?`<div class="task-error"><strong>失败原因：</strong>${escapeHtml(job.last_error||'未记录具体原因')}</div>`:`<div class="task-detail">${escapeHtml(job.detail||job.state_label||'任务正在继续处理')}</div>`}<div class="task-meta">${failed?`${escapeHtml(retry)} · `:''}已尝试 ${Number(job.attempt_count||0)} 次 · ${escapeHtml(job.destination==='p115'?'115网盘':job.destination||'目标网盘')} · TMDB ${Number(job.tmdb_id||0)}<br>创建：${escapeHtml(formatTaskTime(job.created_at))}</div>${job.follow_id?`<button class="btn btn-small task-timeline-button" type="button" data-task-timeline="${Number(job.follow_id)}">查看完整处理链</button><div class="task-timeline" data-task-timeline-root="${Number(job.follow_id)}"></div>`:''}</div></details>`;
+      const reset=currentUser?.role==='admin'?`<button class="btn btn-danger btn-small" type="button" data-reset-job="${Number(job.id)}">重置任务</button>`:'';
+      return `<details class="task-item ${failed?'failed':''}"><summary><div><div class="task-item-title">${escapeHtml(job.title||`TMDB ${job.tmdb_id||'未知'}`)}${owner}</div><div class="task-item-sub">${episode?`${escapeHtml(episode)} · `:''}更新于 ${escapeHtml(formatTaskTime(job.updated_at))}</div></div><span class="task-state">${escapeHtml(job.state_label||job.state)}</span></summary><div class="task-body">${!failed?`<div class="task-progress" aria-label="处理进度 ${progress}%"><span style="width:${progress}%"></span></div>`:''}${failed?`<div class="task-error"><strong>失败原因：</strong>${escapeHtml(job.last_error||'未记录具体原因')}</div>`:`<div class="task-detail">${escapeHtml(job.detail||job.state_label||'任务正在继续处理')}</div>`}<div class="task-meta">${failed?`${escapeHtml(retry)} · `:''}已尝试 ${Number(job.attempt_count||0)} 次 · ${escapeHtml(job.destination==='p115'?'115网盘':job.destination||'目标网盘')} · TMDB ${Number(job.tmdb_id||0)}<br>创建：${escapeHtml(formatTaskTime(job.created_at))}</div><div class="inline-actions">${job.follow_id?`<button class="btn btn-small task-timeline-button" type="button" data-task-timeline="${Number(job.follow_id)}">查看完整处理链</button>`:''}${reset}</div>${job.follow_id?`<div class="task-timeline" data-task-timeline-root="${Number(job.follow_id)}"></div>`:''}</div></details>`;
+    }
+    function renderActivityMedia(item,kind) {
+      const follow=kind==='follows';
+      const owner=item.display_name?` · ${escapeHtml(item.display_name)}`:'';
+      const detail=follow?`${item.current_emby_label||'尚未识别入库进度'} · ${item.hdhive_subscribed?'影巢追更已开启':'尚未绑定影巢订阅'}`:`${item.media_type==='movie'?'电影':'剧集'} · TMDB ${Number(item.tmdb_id||0)}${owner}`;
+      const state=follow?'追更中':escapeHtml(item.status_name||statusOptions[item.status]||item.status);
+      return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title||'未命名影片')} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${detail}${follow&&owner?owner:''}</div>${item.admin_note?`<div class="request-note">${escapeHtml(item.admin_note)}</div>`:''}</div><span class="badge badge-${follow?'approved':escapeHtml(item.status)}">${state}</span></article>`;
     }
     function openTaskDialog(kind) {
+      currentTaskDialogKind=kind;
       const failed=kind==='failed';
-      const jobs=failed?(activityData.failed_jobs||[]):(activityData.active_jobs||[]);
-      $('taskDialogTitle').textContent=failed?'失败待重试':'处理中任务';
-      $('taskDialogHelp').textContent=failed?'点开任务查看失败原因、尝试次数和下次重试时间。':'点开任务查看当前步骤、处理进度和完整处理链。';
-      $('taskDialogList').innerHTML=jobs.length?jobs.map(renderTaskItem).join(''):`<div class="empty">当前没有${failed?'失败待重试':'正在处理'}的任务</div>`;
+      const mediaKinds={requests:['处理中需求','这里显示尚未入库的求片需求。','active_requests'],follows:['活跃追更','这里显示当前所有成员正在追更的影片。','active_follows'],completed:['历史已入库','这里显示已经完成入库的求片记录。','completed_requests']};
+      const media=mediaKinds[kind];
+      const jobs=failed?(activityData.failed_jobs||[]):kind==='active'?(activityData.active_jobs||[]):[];
+      $('taskDialogTitle').textContent=media?media[0]:failed?'失败待重试':'处理中任务';
+      $('taskDialogHelp').textContent=media?media[1]:failed?'点开任务查看失败原因、尝试次数和下次重试时间。':'点开任务查看当前步骤、处理进度和完整处理链；卡住时可以重置后重新处理。';
+      if(media){const items=activityData[media[2]]||[];$('taskDialogList').innerHTML=items.length?items.map(item=>renderActivityMedia(item,kind)).join(''):'<div class="empty">当前没有对应记录</div>';}
+      else $('taskDialogList').innerHTML=jobs.length?jobs.map(renderTaskItem).join(''):`<div class="empty">当前没有${failed?'失败待重试':'正在处理'}的任务</div>`;
+      $('taskDialogResetStale').classList.toggle('hidden',kind!=='active'||currentUser?.role!=='admin');
       $('taskDialogList').querySelectorAll('[data-task-timeline]').forEach(button=>button.onclick=()=>loadTaskTimeline(Number(button.dataset.taskTimeline),button));
+      $('taskDialogList').querySelectorAll('[data-reset-job]').forEach(button=>button.onclick=()=>resetWorkflowJob(Number(button.dataset.resetJob),button));
       $('taskOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
+    }
+    async function resetWorkflowJob(jobId,button) {
+      if(!confirm('确认重置这条任务？它会从处理中移除，之后可以重新处理同一资源。'))return;
+      button.disabled=true;
+      try {const data=preview?{message:'任务已重置，可重新处理'}:await api(`/api/admin/workflow-jobs/${jobId}/reset`,{method:'POST'});toast(data.message);await loadActivity();openTaskDialog(currentTaskDialogKind);}
+      catch(error){toast(error.message,true);button.disabled=false;}
+    }
+    async function resetStaleWorkflowJobs() {
+      if(!confirm('确认重置全部超过 6 小时没有更新的处理中任务？'))return;
+      const button=$('taskDialogResetStale');button.disabled=true;
+      try {const data=preview?{message:'已重置 1 个停滞任务'}:await api('/api/admin/workflow-jobs/reset-stale',{method:'POST'});toast(data.message);await loadActivity();openTaskDialog('active');}
+      catch(error){toast(error.message,true);} finally {button.disabled=false;}
     }
     function closeTaskDialog() {$('taskOverlay').classList.add('hidden');document.body.style.overflow='';}
     async function loadTaskTimeline(followId,button) {
-      const root=button.nextElementSibling;button.disabled=true;button.textContent='正在读取…';
+      const root=button.closest('.task-body').querySelector('[data-task-timeline-root]');button.disabled=true;button.textContent='正在读取…';
       try {
         const data=preview?{events:demoFollowEvents.filter(event=>Number(event.follow_id)===followId)}:await api(`/api/follows/${followId}/timeline`);
         const labels={subscription:'订阅绑定',poll:'后台轮询',messages:'站内信',scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
@@ -1316,17 +1350,19 @@
         root.innerHTML=messages.length?messages.map(message=>{
           const failed=message.status==='failed';const media=message.follow_title?`关联《${message.follow_title}》${message.display_name?` · ${message.display_name}`:''}`:message.tmdb_id?`关联 TMDB ${message.tmdb_id}`:'未匹配到现有追更';
           const error=failed&&message.last_error?`<div class="task-error" style="margin-top:8px">处理失败：${escapeHtml(message.last_error)}</div>`:'';
-          return `<article class="message-card ${failed?'failed':''}"><div><div class="message-headline">${escapeHtml(message.headline||'影巢订阅有新资源更新')}</div><div class="message-content">${escapeHtml(message.content||media)}</div>${error}<div class="message-meta">${escapeHtml(media)} · 收到于 ${escapeHtml(formatTaskTime(message.remote_created_at||message.received_at))}${message.attempt_count?` · 已尝试 ${Number(message.attempt_count)} 次`:''}</div></div><div class="message-actions"><span class="message-status">${escapeHtml(statusLabels[message.status]||message.status)}</span>${message.follow_id?`<button class="btn btn-small" type="button" data-message-timeline="${Number(message.follow_id)}">查看后续处理</button>`:''}</div><div class="task-timeline" data-message-timeline-root="${Number(message.follow_id||0)}"></div></article>`;
+          const followIds=(message.follow_ids||[message.follow_id]).map(Number).filter(Boolean);
+          const fields=(message.detail_fields||[]).map(field=>`<div class="message-detail-field"><strong>${escapeHtml(field.label)}</strong>${escapeHtml(field.value)}</div>`).join('');
+          return `<details class="message-card ${failed?'failed':''}"><summary><div><div class="message-headline">${escapeHtml(message.headline||'影巢订阅有新资源更新')}</div><div class="message-content">${escapeHtml(message.content||media)}</div>${error}<div class="message-meta">${escapeHtml(media)} · 收到于 ${escapeHtml(formatTaskTime(message.remote_created_at||message.received_at))}${message.attempt_count?` · 已尝试 ${Number(message.attempt_count)} 次`:''}</div></div><div class="message-actions"><span class="message-status">${escapeHtml(statusLabels[message.status]||message.status)}</span></div></summary><div class="message-detail"><div class="message-detail-grid"><div class="message-detail-field"><strong>消息编号</strong>${escapeHtml(message.message_key||'未提供')}</div><div class="message-detail-field"><strong>消息类型</strong>${escapeHtml(message.event_type||'未提供')}</div><div class="message-detail-field"><strong>订阅编号</strong>${escapeHtml(message.subscription_id||'未提供')}</div><div class="message-detail-field"><strong>关联影片</strong>${escapeHtml(media)}</div>${fields}</div>${followIds.length?`<button class="btn btn-small" type="button" data-message-timeline="${followIds.join(',')}">查看后续处理</button>`:''}<div class="task-timeline" data-message-timeline-root="${followIds.join(',')}"></div></div></details>`;
         }).join(''):'<div class="empty">尚未收到影巢资源更新通知</div>';
-        root.querySelectorAll('[data-message-timeline]').forEach(button=>button.onclick=()=>loadMessageTimeline(Number(button.dataset.messageTimeline),button));
+        root.querySelectorAll('[data-message-timeline]').forEach(button=>button.onclick=()=>loadMessageTimeline(button.dataset.messageTimeline.split(',').map(Number).filter(Boolean),button));
       } catch(error) {root.innerHTML=`<div class="empty">影巢更新通知读取失败：${escapeHtml(error.message)}</div>`;}
     }
-    async function loadMessageTimeline(followId,button) {
+    async function loadMessageTimeline(followIds,button) {
       const root=button.closest('.message-card').querySelector('[data-message-timeline-root]');button.disabled=true;button.textContent='正在读取…';
       try {
-        const data=preview?{events:demoFollowEvents.filter(event=>Number(event.follow_id)===followId)}:await api(`/api/follows/${followId}/timeline`);
+        const results=preview?followIds.map(followId=>({events:demoFollowEvents.filter(event=>Number(event.follow_id)===followId)})):await Promise.all(followIds.map(followId=>api(`/api/follows/${followId}/timeline`)));
         const labels={scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
-        const events=(data.events||[]).filter(event=>labels[event.stage]).slice(0,30);
+        const events=results.flatMap(data=>data.events||[]).filter(event=>labels[event.stage]).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0,30);
         root.innerHTML=events.length?`<div class="timeline-list">${events.map(event=>`<div class="timeline-item ${escapeHtml(event.status)}"><strong>${escapeHtml(labels[event.stage])}</strong> · ${escapeHtml(event.message)}<div class="muted">${escapeHtml(formatTaskTime(event.created_at))}</div></div>`).join('')}</div>`:'<div class="muted">这条通知尚未产生影片处理步骤</div>';
         button.textContent='已显示后续处理';
       } catch(error) {root.innerHTML=`<div class="task-error">后续处理读取失败：${escapeHtml(error.message)}</div>`;button.disabled=false;button.textContent='重试读取';}
@@ -1755,8 +1791,12 @@
       }
     };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
+    $('activityRequestsCard').onclick=()=>openTaskDialog('requests');
+    $('activityFollowsCard').onclick=()=>openTaskDialog('follows');
     $('activityJobsCard').onclick=()=>openTaskDialog('active');
     $('activityFailedCard').onclick=()=>openTaskDialog('failed');
+    $('activityCompletedCard').onclick=()=>openTaskDialog('completed');
+    $('taskDialogResetStale').onclick=resetStaleWorkflowJobs;
     $('taskDialogClose').onclick=closeTaskDialog;
     $('taskOverlay').onclick=event=>{if(event.target===$('taskOverlay'))closeTaskDialog();};
     $('followLogRefresh').onclick=()=>{loadFollowEvents();if($('hdhiveMessageInbox').open){hdhiveMessagesLoaded=false;loadHdhiveMessages();}};
