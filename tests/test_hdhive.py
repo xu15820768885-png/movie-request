@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -1529,6 +1530,45 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         with self.assertRaises(app.HTTPException) as denied:
             app.hdhive_follow_events(movie_session=self.token)
         self.assertEqual(denied.exception.status_code, 403)
+
+    def test_real_subscription_message_content_is_visible_to_admin(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 55, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO hdhive_message_log(message_key, event_type, "
+                "payload_json, status, subscription_id, tmdb_id, "
+                "attempt_count, acknowledged_at, created_at) "
+                "VALUES('notice-1', 'resource_updated', ?, 'acknowledged', "
+                "55, 223911, 1, ?, ?)",
+                (
+                    json.dumps(
+                        {
+                            "title": "订阅影视有新资源更新",
+                            "content": "剧集《仙逆》更新了仙逆 (2023)",
+                            "created_at": "2026-08-30T18:24:14+08:00",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    app.now_iso(),
+                    app.now_iso(),
+                ),
+            )
+
+        result = app.hdhive_messages(movie_session=self.admin_token)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["messages"][0]["headline"], "订阅影视有新资源更新")
+        self.assertIn("《仙逆》", result["messages"][0]["content"])
+        self.assertEqual(result["messages"][0]["follow_id"], follow_id)
+        self.assertEqual(result["messages"][0]["status"], "acknowledged")
 
     def test_management_log_includes_and_filters_completed_manual_unlocks(self):
         with app.db() as connection:

@@ -77,6 +77,48 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(app.verify_password("hello123", encoded))
         self.assertFalse(app.verify_password("wrong123", encoded))
 
+    def test_activity_separates_processing_and_failed_jobs_with_details(self):
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+        processing = app.begin_workflow_job(
+            user_id=user_id,
+            destination="p115",
+            source="hdhive",
+            resource_key="processing-resource",
+            tmdb_id=101172,
+            media_type="tv",
+            title="吞噬星空",
+            season_number=1,
+            episode_numbers=[233],
+        )
+        app.update_workflow_job(
+            int(processing["id"]), "waiting_library", "已确认转存，等待入库"
+        )
+        failed = app.begin_workflow_job(
+            user_id=user_id,
+            destination="p115",
+            source="hdhive",
+            resource_key="failed-resource",
+            tmdb_id=155903,
+            media_type="tv",
+            title="庆余年",
+            season_number=2,
+            episode_numbers=[37],
+        )
+        app.fail_workflow_job(int(failed["id"]), "目标目录没有变化", retry_seconds=900)
+
+        result = app.activity_summary(self.token)
+
+        self.assertEqual(result["jobs_active"], 1)
+        self.assertEqual(result["jobs_failed"], 1)
+        self.assertEqual(result["active_jobs"][0]["state"], "waiting_library")
+        self.assertEqual(result["failed_jobs"][0]["last_error"], "目标目录没有变化")
+        self.assertEqual(result["failed_jobs"][0]["episode_numbers"], [37])
+
     def test_tmdb_image_proxy_caches_image_on_nas(self):
         class FakeImageResponse:
             content = b"fake-jpeg"

@@ -205,27 +205,76 @@
     .badge-rejected { color: #ffc4c4; background: rgba(228,123,123,.14); }
     .admin-grid { display: grid; grid-template-columns: minmax(0,1.65fr) minmax(300px,.8fr); gap: 18px; }
     .panel { padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(155deg,rgba(255,255,255,.018),transparent 52%),var(--panel); box-shadow: 0 14px 34px rgba(0,0,0,.12); }
-    .follow-log-summary { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; margin-bottom: 16px; }
-    .follow-log-stat { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
-    .follow-log-stat span { display: block; color: var(--muted); font-size: 11px; }
-    .follow-log-stat strong { display: block; margin-top: 6px; font-size: 24px; }
-    .follow-log-toolbar { display: flex; gap: 10px; align-items: end; margin-bottom: 14px; }
+    .follow-log-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
     .follow-log-toolbar label { min-width: 160px; }
+    .follow-log-count { margin-left: auto; align-self: center; color: var(--muted); font-size: 11px; }
+    .message-inbox { margin-bottom:16px; }
+    .message-inbox-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:10px; }
+    .message-inbox-head h3 { margin:0 0 4px; font-size:15px; }
+    .message-list { display:grid; gap:8px; }
+    .message-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; padding:14px 15px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+    .message-card.failed { border-color:rgba(228,123,123,.42); }
+    .message-headline { font-size:13px; font-weight:850; }
+    .message-content { margin-top:5px; color:#d6d1ca; font-size:12px; line-height:1.55; }
+    .message-meta { margin-top:6px; color:var(--muted); font-size:10px; line-height:1.55; }
+    .message-actions { display:grid; justify-items:end; align-content:start; gap:8px; }
+    .message-card > .task-timeline { grid-column:1 / -1; }
+    .message-status { padding:5px 8px; border-radius:999px; color:#b7f1d4; background:rgba(103,199,154,.12); font-size:10px; font-weight:800; white-space:nowrap; }
+    .message-card.failed .message-status { color:#ffc4c4; background:rgba(228,123,123,.12); }
     .follow-event-list { display: grid; gap: 9px; }
-    .follow-event { display: grid; grid-template-columns: 150px minmax(0,1fr) auto; gap: 16px; align-items: start; padding: 15px 16px; border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 13px; background: rgba(255,255,255,.018); }
+    .follow-event { border: 1px solid var(--line); border-left: 4px solid var(--blue); border-radius: 13px; background: rgba(255,255,255,.018); overflow: hidden; }
     .follow-event.success { border-left-color: var(--green); }
     .follow-event.failed { border-left-color: var(--red); }
     .follow-event.skipped { border-left-color: var(--yellow); }
     .follow-event.running { border-left-color: var(--blue); }
+    .follow-event > summary { display: grid; grid-template-columns: 138px minmax(0,1fr) auto; gap: 16px; align-items: start; padding: 15px 16px; list-style: none; cursor: pointer; }
+    .follow-event > summary::-webkit-details-marker { display: none; }
+    .follow-event > summary::after { content: '查看资源记录'; color: var(--orange-2); font-size: 10px; font-weight: 800; white-space: nowrap; }
+    .follow-event[open] > summary::after { content: '收起记录'; }
     .follow-event-time { color: var(--muted); font-size: 11px; line-height: 1.6; }
     .follow-event-title { font-weight: 800; font-size: 13px; }
     .follow-event-message { margin-top: 5px; color: #d6d1ca; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
     .follow-event-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
     .follow-event-stage { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 10px; white-space: nowrap; }
+    .follow-event-steps { display: grid; gap: 8px; padding: 0 16px 16px 170px; }
+    .follow-stage-group { border:1px solid rgba(53,49,44,.72); border-radius:10px; background:rgba(0,0,0,.1); overflow:hidden; }
+    .follow-stage-group > summary { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; list-style:none; cursor:pointer; color:var(--cream); font-size:11px; font-weight:850; }
+    .follow-stage-group > summary::-webkit-details-marker { display:none; }
+    .follow-stage-group > summary::after { content:'展开'; color:var(--muted); font-size:10px; }
+    .follow-stage-group[open] > summary::after { content:'收起'; }
+    .follow-stage-list { display:grid; gap:6px; padding:0 8px 8px; }
+    .follow-step { display:grid; grid-template-columns:112px 66px minmax(0,1fr); gap:10px; padding:10px 12px; border-radius:9px; background:rgba(255,255,255,.025); color:#d6d1ca; font-size:11px; line-height:1.5; }
+    .follow-step-time, .follow-step-stage { color: var(--muted); }
+    .follow-step-episode { color:var(--orange-2); font-weight:850; }
+    .follow-step-status { margin-left:6px; color:var(--muted); font-weight:700; }
     .activity-overview { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin:16px 0 24px; }
-    .activity-card { padding:13px 14px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+    .activity-card { width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:13px; color:var(--text); background:var(--panel); text-align:left; }
+    button.activity-card { transition:.18s ease; }
+    button.activity-card:hover { border-color:#5a5149; transform:translateY(-1px); }
+    button.activity-card::after { content:'查看'; float:right; margin-top:-17px; color:var(--muted); font-size:10px; font-weight:800; }
+    button.activity-card.alert { border-color:rgba(228,123,123,.35); }
+    button.activity-card.alert strong { color:#ffc4c4; }
     .activity-card span { display:block; color:var(--muted); font-size:10px; }
     .activity-card strong { display:block; margin-top:5px; font-size:20px; }
+    .task-dialog { width:min(820px,100%); max-height:calc(100vh - 40px); overflow:auto; padding:22px; border:1px solid #4a433c; border-radius:22px; background:#171513; box-shadow:var(--shadow); }
+    .task-dialog-head { display:flex; justify-content:space-between; gap:16px; align-items:start; margin-bottom:16px; }
+    .task-dialog-head h2 { margin:0 0 6px; font-size:21px; }
+    .task-list { display:grid; gap:10px; }
+    .task-item { border:1px solid var(--line); border-radius:13px; background:var(--panel); overflow:hidden; }
+    .task-item.failed { border-color:rgba(228,123,123,.42); }
+    .task-item > summary { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:15px; list-style:none; cursor:pointer; }
+    .task-item > summary::-webkit-details-marker { display:none; }
+    .task-item-title { font-size:13px; font-weight:850; }
+    .task-item-sub { margin-top:5px; color:var(--muted); font-size:11px; line-height:1.5; }
+    .task-state { padding:5px 8px; border-radius:999px; color:#b7d9ff; background:rgba(119,174,232,.12); font-size:10px; font-weight:800; white-space:nowrap; }
+    .task-item.failed .task-state { color:#ffc4c4; background:rgba(228,123,123,.12); }
+    .task-body { padding:0 15px 15px; }
+    .task-progress { height:7px; margin:2px 0 12px; border-radius:99px; background:#2b2825; overflow:hidden; }
+    .task-progress > span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--orange),var(--green)); }
+    .task-detail, .task-error { padding:10px 12px; border-radius:9px; background:rgba(0,0,0,.14); font-size:11px; line-height:1.6; }
+    .task-error { color:#ffc4c4; background:rgba(228,123,123,.09); }
+    .task-meta { margin-top:9px; color:var(--muted); font-size:10px; line-height:1.65; }
+    .task-timeline { margin-top:10px; }
     .timeline-list { display:grid; gap:7px; margin-top:10px; }
     .timeline-item { padding:10px 12px; border-left:3px solid var(--blue); border-radius:9px; background:rgba(255,255,255,.025); font-size:11px; line-height:1.55; }
     .timeline-item.failed { border-left-color:var(--red); }
@@ -481,12 +530,16 @@
       .user-editor .btn { min-height: 42px; }
       .member-create-grid { grid-template-columns: 1fr; }
       .inline { grid-template-columns: 1fr; }
-      .follow-log-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .activity-overview, .health-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       .follow-log-toolbar { display: grid; grid-template-columns: 1fr; }
       .follow-log-toolbar label { min-width: 0; }
-      .follow-event { grid-template-columns: 1fr auto; gap: 8px; }
-      .follow-event-time { grid-column: 1 / -1; }
+      .follow-log-count { margin-left:0; }
+      .message-card { grid-template-columns:1fr; }
+      .message-actions { justify-items:start; }
+      .follow-event > summary { grid-template-columns:1fr auto; gap:8px; }
+      .follow-event-time { grid-column:1 / -1; }
+      .follow-event-steps { padding:0 12px 12px; }
+      .follow-step { grid-template-columns:1fr; gap:4px; }
     }
     @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
   </style>
@@ -536,8 +589,8 @@
       <section id="activityOverview" class="activity-overview" aria-label="映单处理概览">
         <div class="activity-card"><span>处理中需求</span><strong id="activityRequests">0</strong></div>
         <div class="activity-card"><span>活跃追更</span><strong id="activityFollows">0</strong></div>
-        <div class="activity-card"><span>处理中任务</span><strong id="activityJobs">0</strong></div>
-        <div class="activity-card"><span>失败待重试</span><strong id="activityFailed">0</strong></div>
+        <button id="activityJobsCard" class="activity-card" type="button"><span>处理中任务</span><strong id="activityJobs">0</strong></button>
+        <button id="activityFailedCard" class="activity-card alert" type="button"><span>失败待重试</span><strong id="activityFailed">0</strong></button>
         <div class="activity-card"><span>历史已入库</span><strong id="activityCompleted">0</strong></div>
       </section>
 
@@ -558,20 +611,19 @@
       </section>
       <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看影巢原生追更、115自动洗版窗口和 Emby 入库进度</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="followLogView" class="view hidden">
-        <div class="section-head"><div><h2>管理日志</h2><span>查看追更及完结资源的识别、解锁、转存和等待入库过程</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新日志</button></div>
-        <div class="follow-log-summary">
-          <div class="follow-log-stat"><span>最近24小时成功记录</span><strong id="followLogSuccess">0</strong></div>
-          <div class="follow-log-stat"><span>失败记录</span><strong id="followLogFailed">0</strong></div>
-          <div class="follow-log-stat"><span>无需处理记录</span><strong id="followLogSkipped">0</strong></div>
-          <div class="follow-log-stat"><span>开始执行记录</span><strong id="followLogRunning">0</strong></div>
-        </div>
+        <div class="section-head"><div><h2>处理记录</h2><span>默认只看具体影片的处理结果；点开一条记录可查看识别、解锁、转存和入库步骤</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新记录</button></div>
+        <section class="message-inbox">
+          <div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">显示影巢实际推送的站内信内容，以及它触发的处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div>
+          <div id="hdhiveMessageList" class="message-list"><div class="empty">正在读取影巢更新通知…</div></div>
+        </section>
         <div class="panel">
           <div class="follow-log-toolbar">
-            <label>处理步骤<select id="followLogStage"><option value="">全部步骤</option><option value="messages">站内信</option><option value="scan">资源扫描</option><option value="file_list">文件识别</option><option value="unlock">资源解锁</option><option value="transfer">115转存</option><option value="library">Emby入库</option><option value="complete">处理结果</option><option value="poll">后台轮询</option><option value="subscription">订阅绑定</option></select></label>
+            <label>处理步骤<select id="followLogStage"><option value="">全部步骤</option><option value="scan">资源扫描</option><option value="file_list">文件识别</option><option value="unlock">资源解锁</option><option value="transfer">115转存</option><option value="library">Emby入库</option><option value="complete">处理结果</option></select></label>
             <label>处理状态<select id="followLogStatus"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option><option value="skipped">无需处理</option><option value="running">开始执行</option></select></label>
             <label>资源状态<select id="followLogResourceStatus"><option value="">全部资源</option><option value="ongoing">未完结（追更中）</option><option value="completed">已完结</option></select></label>
+            <span id="followLogCount" class="follow-log-count"></span>
           </div>
-          <div id="followEventList" class="follow-event-list"><div class="empty">正在读取管理日志…</div></div>
+          <div id="followEventList" class="follow-event-list"><div class="empty">正在读取处理记录…</div></div>
         </div>
       </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
@@ -737,6 +789,12 @@
       </section>
     </main>
   </div>
+  <div id="taskOverlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="任务详情">
+    <section class="task-dialog">
+      <div class="task-dialog-head"><div><h2 id="taskDialogTitle">处理中任务</h2><div id="taskDialogHelp" class="muted" style="font-size:12px"></div></div><button id="taskDialogClose" class="btn btn-small" type="button">关闭</button></div>
+      <div id="taskDialogList" class="task-list"></div>
+    </section>
+  </div>
   <div id="detailOverlay" class="detail-overlay hidden" role="dialog" aria-modal="true" aria-label="影片详情"><div id="detailCard" class="detail-card"><div class="detail-loading">正在读取 TMDB 影片详情…</div></div></div>
   <div id="toast" class="toast hidden"></div>
   <div id="previewRibbon" class="preview-ribbon hidden">界面预览 · 示例影片均带真实 TMDB ID</div>
@@ -757,6 +815,7 @@
     let searchController = null;
     let searchSequence = 0;
     let requestsLoadPromise = null;
+    let activityData = {active_jobs:[],failed_jobs:[]};
     const detailCache = new Map();
     const resourceCache = new Map();
     const searchCache = new Map();
@@ -777,11 +836,20 @@
       {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'影巢原生订阅已开启，等待第233集资源',active:true,hdhive_subscribed:true,hdhive_subscription_id:9001}
     ];
     const demoFollowEvents = [
-      {id:5,title:'繁花',display_name:'妈妈',tmdb_id:119543,stage:'unlock',status:'success',resource_status:'completed',message:'影巢资源解锁成功，正在提交到网盘',created_at:new Date().toISOString()},
-      {id:4,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',resource_status:'ongoing',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',created_at:new Date().toISOString()},
-      {id:3,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第233集',created_at:new Date(Date.now()-30000).toISOString()},
-      {id:2,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'scan',status:'success',resource_status:'ongoing',message:'影巢资源读取完成，共找到 8 个115候选',created_at:new Date(Date.now()-60000).toISOString()},
-      {id:1,title:'',display_name:'',tmdb_id:0,stage:'messages',status:'success',message:'读取到 1 条新订阅消息',created_at:new Date(Date.now()-90000).toISOString()}
+      {id:5,cycle_id:'manual-1',title:'繁花',display_name:'妈妈',tmdb_id:119543,stage:'unlock',status:'success',resource_status:'completed',message:'影巢资源解锁成功，正在提交到网盘',created_at:new Date().toISOString()},
+      {id:6,cycle_id:'cycle-2',follow_id:2,title:'吞噬星空',display_name:'爸爸',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第234集',detail:{season_number:1,episode_numbers:[234]},created_at:new Date(Date.now()-10000).toISOString()},
+      {id:4,cycle_id:'cycle-1',follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',resource_status:'ongoing',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',detail:{season_number:1,episode_numbers:[233]},created_at:new Date().toISOString()},
+      {id:3,cycle_id:'cycle-1',follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第233集',detail:{season_number:1,episode_numbers:[233]},created_at:new Date(Date.now()-30000).toISOString()},
+      {id:2,cycle_id:'cycle-1',follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'scan',status:'success',resource_status:'ongoing',message:'影巢资源读取完成，共找到 8 个115候选',created_at:new Date(Date.now()-60000).toISOString()},
+      {id:1,cycle_id:'cycle-1',title:'',display_name:'',tmdb_id:0,stage:'messages',status:'success',message:'读取到 1 条新订阅消息',created_at:new Date(Date.now()-90000).toISOString()}
+    ];
+    const demoJobs = [
+      {id:31,follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,season_number:1,episode_numbers:[233],state:'waiting_library',state_label:'等待入库',detail:'第233集已确认转存，等待PanSave整理与Emby入库',attempt_count:1,destination:'p115',source:'hdhive',created_at:new Date(Date.now()-3600000).toISOString(),updated_at:new Date().toISOString()},
+      {id:30,follow_id:1,title:'庆余年',display_name:'爸爸',tmdb_id:155903,season_number:2,episode_numbers:[37],state:'failed',state_label:'处理失败',detail:'处理失败，等待重试',last_error:'115已受理第37集，但未确认目标目录发生变化',attempt_count:2,next_retry_at:new Date(Date.now()+900000).toISOString(),destination:'p115',source:'hdhive',created_at:new Date(Date.now()-7200000).toISOString(),updated_at:new Date(Date.now()-600000).toISOString()}
+    ];
+    const demoMessages = [
+      {message_key:'9001',headline:'订阅影视有新资源更新',content:'剧集《仙逆》更新了仙逆 (2023)',status:'acknowledged',follow_id:1,follow_title:'仙逆',display_name:'妈妈',tmdb_id:223911,received_at:new Date().toISOString()},
+      {message_key:'9002',headline:'订阅影视有新资源更新',content:'剧集《吞噬星空》更新至第233集',status:'acknowledged',follow_id:1,follow_title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,received_at:new Date(Date.now()-3600000).toISOString()}
     ];
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
@@ -847,18 +915,61 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog') loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog'){loadHdhiveMessages();loadFollowEvents();} if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
     }
     async function loadActivity() {
       if(!currentUser)return;
       try {
-        const data=preview?{requests_active:2,follows_active:3,jobs_active:1,jobs_failed:0,requests_completed:12}:await api('/api/activity');
+        const data=preview?{requests_active:2,follows_active:3,jobs_active:1,jobs_failed:1,requests_completed:12,active_jobs:[demoJobs[0]],failed_jobs:[demoJobs[1]]}:await api('/api/activity');
+        activityData=data;
         $('activityRequests').textContent=data.requests_active||0;
         $('activityFollows').textContent=data.follows_active||0;
         $('activityJobs').textContent=data.jobs_active||0;
         $('activityFailed').textContent=data.jobs_failed||0;
         $('activityCompleted').textContent=data.requests_completed||0;
       } catch {}
+    }
+    function taskEpisodeLabel(job) {
+      const episodes=(job.episode_numbers||[]).map(Number).filter(Boolean);
+      if(!episodes.length)return '';
+      const season=Number(job.season_number||0);
+      return `${season?`第${season}季 `:''}第${episodes.join('、')}集`;
+    }
+    function taskProgress(job) {
+      return {discovered:10,unlocking:25,submitted:45,transferred:65,organizing:80,waiting_library:90,ingested:100}[job.state]||0;
+    }
+    function formatTaskTime(value) {
+      if(!value)return '尚未安排';
+      const time=new Date(value);
+      return Number.isNaN(time.getTime())?String(value):time.toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'});
+    }
+    function renderTaskItem(job) {
+      const failed=job.state==='failed';
+      const owner=job.display_name?` · ${escapeHtml(job.display_name)}`:'';
+      const episode=taskEpisodeLabel(job);
+      const retry=failed&&job.next_retry_at?`下次重试：${formatTaskTime(job.next_retry_at)}`:failed?'等待后台重新尝试':'';
+      const progress=taskProgress(job);
+      return `<details class="task-item ${failed?'failed':''}"><summary><div><div class="task-item-title">${escapeHtml(job.title||`TMDB ${job.tmdb_id||'未知'}`)}${owner}</div><div class="task-item-sub">${episode?`${escapeHtml(episode)} · `:''}更新于 ${escapeHtml(formatTaskTime(job.updated_at))}</div></div><span class="task-state">${escapeHtml(job.state_label||job.state)}</span></summary><div class="task-body">${!failed?`<div class="task-progress" aria-label="处理进度 ${progress}%"><span style="width:${progress}%"></span></div>`:''}${failed?`<div class="task-error"><strong>失败原因：</strong>${escapeHtml(job.last_error||'未记录具体原因')}</div>`:`<div class="task-detail">${escapeHtml(job.detail||job.state_label||'任务正在继续处理')}</div>`}<div class="task-meta">${failed?`${escapeHtml(retry)} · `:''}已尝试 ${Number(job.attempt_count||0)} 次 · ${escapeHtml(job.destination==='p115'?'115网盘':job.destination||'目标网盘')} · TMDB ${Number(job.tmdb_id||0)}<br>创建：${escapeHtml(formatTaskTime(job.created_at))}</div>${job.follow_id?`<button class="btn btn-small task-timeline-button" type="button" data-task-timeline="${Number(job.follow_id)}">查看完整处理链</button><div class="task-timeline" data-task-timeline-root="${Number(job.follow_id)}"></div>`:''}</div></details>`;
+    }
+    function openTaskDialog(kind) {
+      const failed=kind==='failed';
+      const jobs=failed?(activityData.failed_jobs||[]):(activityData.active_jobs||[]);
+      $('taskDialogTitle').textContent=failed?'失败待重试':'处理中任务';
+      $('taskDialogHelp').textContent=failed?'点开任务查看失败原因、尝试次数和下次重试时间。':'点开任务查看当前步骤、处理进度和完整处理链。';
+      $('taskDialogList').innerHTML=jobs.length?jobs.map(renderTaskItem).join(''):`<div class="empty">当前没有${failed?'失败待重试':'正在处理'}的任务</div>`;
+      $('taskDialogList').querySelectorAll('[data-task-timeline]').forEach(button=>button.onclick=()=>loadTaskTimeline(Number(button.dataset.taskTimeline),button));
+      $('taskOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
+    }
+    function closeTaskDialog() {$('taskOverlay').classList.add('hidden');document.body.style.overflow='';}
+    async function loadTaskTimeline(followId,button) {
+      const root=button.nextElementSibling;button.disabled=true;button.textContent='正在读取…';
+      try {
+        const data=preview?{events:demoFollowEvents.filter(event=>Number(event.follow_id)===followId)}:await api(`/api/follows/${followId}/timeline`);
+        const labels={subscription:'订阅绑定',poll:'后台轮询',messages:'站内信',scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
+        const events=(data.events||[]).slice(0,30);
+        root.innerHTML=events.length?events.map(event=>`<div class="timeline-item ${escapeHtml(event.status)}"><strong>${escapeHtml(labels[event.stage]||event.stage)}</strong> · ${escapeHtml(event.message)}<div class="muted">${escapeHtml(formatTaskTime(event.created_at))}</div></div>`).join(''):'<div class="muted">还没有关联的处理步骤</div>';
+        button.textContent='已显示完整处理链';
+      } catch(error) {root.innerHTML=`<div class="task-error">处理链读取失败：${escapeHtml(error.message)}</div>`;button.disabled=false;button.textContent='重试读取处理链';}
     }
     async function loadHealth() {
       if(currentUser?.role!=='admin')return;
@@ -1187,27 +1298,90 @@
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(button.dataset.followDelete.split(',').map(Number),button));
       refreshFollowEmbyProgress(follows);
     }
+    async function loadHdhiveMessages() {
+      const root=$('hdhiveMessageList');root.innerHTML='<div class="empty">正在读取影巢更新通知…</div>';
+      try {
+        const data=preview?{messages:demoMessages,count:demoMessages.length}:await api('/api/admin/hdhive/messages?limit=60');
+        const statusLabels={pending:'待处理',failed:'处理失败',processed:'已完成扫描',acknowledged:'已触发处理'};
+        const messages=data.messages||[];$('hdhiveMessageCount').textContent=`最近 ${messages.length} 条`;
+        root.innerHTML=messages.length?messages.map(message=>{
+          const failed=message.status==='failed';const media=message.follow_title?`关联《${message.follow_title}》${message.display_name?` · ${message.display_name}`:''}`:message.tmdb_id?`关联 TMDB ${message.tmdb_id}`:'未匹配到现有追更';
+          const error=failed&&message.last_error?`<div class="task-error" style="margin-top:8px">处理失败：${escapeHtml(message.last_error)}</div>`:'';
+          return `<article class="message-card ${failed?'failed':''}"><div><div class="message-headline">${escapeHtml(message.headline||'影巢订阅有新资源更新')}</div><div class="message-content">${escapeHtml(message.content||media)}</div>${error}<div class="message-meta">${escapeHtml(media)} · 收到于 ${escapeHtml(formatTaskTime(message.remote_created_at||message.received_at))}${message.attempt_count?` · 已尝试 ${Number(message.attempt_count)} 次`:''}</div></div><div class="message-actions"><span class="message-status">${escapeHtml(statusLabels[message.status]||message.status)}</span>${message.follow_id?`<button class="btn btn-small" type="button" data-message-timeline="${Number(message.follow_id)}">查看后续处理</button>`:''}</div><div class="task-timeline" data-message-timeline-root="${Number(message.follow_id||0)}"></div></article>`;
+        }).join(''):'<div class="empty">尚未收到影巢资源更新通知</div>';
+        root.querySelectorAll('[data-message-timeline]').forEach(button=>button.onclick=()=>loadMessageTimeline(Number(button.dataset.messageTimeline),button));
+      } catch(error) {root.innerHTML=`<div class="empty">影巢更新通知读取失败：${escapeHtml(error.message)}</div>`;}
+    }
+    async function loadMessageTimeline(followId,button) {
+      const root=button.closest('.message-card').querySelector('[data-message-timeline-root]');button.disabled=true;button.textContent='正在读取…';
+      try {
+        const data=preview?{events:demoFollowEvents.filter(event=>Number(event.follow_id)===followId)}:await api(`/api/follows/${followId}/timeline`);
+        const labels={scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
+        const events=(data.events||[]).filter(event=>labels[event.stage]).slice(0,30);
+        root.innerHTML=events.length?`<div class="timeline-list">${events.map(event=>`<div class="timeline-item ${escapeHtml(event.status)}"><strong>${escapeHtml(labels[event.stage])}</strong> · ${escapeHtml(event.message)}<div class="muted">${escapeHtml(formatTaskTime(event.created_at))}</div></div>`).join('')}</div>`:'<div class="muted">这条通知尚未产生影片处理步骤</div>';
+        button.textContent='已显示后续处理';
+      } catch(error) {root.innerHTML=`<div class="task-error">后续处理读取失败：${escapeHtml(error.message)}</div>`;button.disabled=false;button.textContent='重试读取';}
+    }
+    function followEventEpisodeLabel(event) {
+      const detail=event.detail||{};
+      const episodes=(detail.episodes||detail.episode_numbers||[]).map(Number).filter(number=>number>0);
+      const season=Number(detail.season_number||0);
+      if(episodes.length)return `${season?`第${season}季 · `:''}第${compactEpisodeLabel(episodes)}集`;
+      const message=String(event.message||'');
+      const chinese=message.match(/第\s*([0-9、,，\-—~～至]+)\s*集/);
+      if(chinese)return `第${chinese[1].replace(/[，,]/g,'、')}集`;
+      const resourceTitle=String(detail.resource_title||'');
+      const code=resourceTitle.match(/S(\d{1,2})E(\d{1,4})/i);
+      return code?`第${Number(code[1])}季 · 第${Number(code[2])}集`:'整部资源';
+    }
+    function compactEpisodeLabel(values) {
+      const numbers=[...new Set(values.map(Number).filter(number=>number>0))].sort((a,b)=>a-b);
+      if(!numbers.length)return '';
+      const ranges=[];let start=numbers[0];let previous=numbers[0];
+      for(const number of numbers.slice(1)){if(number===previous+1){previous=number;continue;}ranges.push(start===previous?`${start}`:`${start}-${previous}`);start=previous=number;}
+      ranges.push(start===previous?`${start}`:`${start}-${previous}`);return ranges.join('、');
+    }
     async function loadFollowEvents() {
-      const root=$('followEventList');root.innerHTML='<div class="empty">正在读取管理日志…</div>';
+      const root=$('followEventList');root.innerHTML='<div class="empty">正在读取处理记录…</div>';
       const stage=$('followLogStage').value;const status=$('followLogStatus').value;const resourceStatus=$('followLogResourceStatus').value;
       try {
         const data=preview
-          ? {events:demoFollowEvents,summary:{success:3,failed:0,skipped:0,running:0}}
-          : await api(`/api/admin/hdhive/follow-events?limit=300&stage=${encodeURIComponent(stage)}&status=${encodeURIComponent(status)}&resource_status=${encodeURIComponent(resourceStatus)}`);
-        const summary=data.summary||{};
-        $('followLogSuccess').textContent=summary.success||0;$('followLogFailed').textContent=summary.failed||0;$('followLogSkipped').textContent=summary.skipped||0;$('followLogRunning').textContent=summary.running||0;
-        const stageLabels={subscription:'订阅绑定',poll:'后台轮询',messages:'站内信',scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
+          ? {events:demoFollowEvents}
+          : await api('/api/admin/hdhive/follow-events?limit=500');
+        const stageLabels={scan:'资源扫描',file_list:'文件识别',unlock:'资源解锁',transfer:'115转存',library:'Emby入库',complete:'处理结果'};
         const statusLabels={running:'开始执行',success:'成功',skipped:'无需处理',failed:'失败',info:'信息'};
-        const events=(data.events||[]).filter(event=>(!stage||event.stage===stage)&&(!status||event.status===status)&&(!resourceStatus||event.resource_status===resourceStatus));
-        root.innerHTML=events.length?events.map(event=>{
-          const time=new Date(event.created_at);const timeLabel=Number.isNaN(time.getTime())?event.created_at:time.toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'});
-          const owner=event.display_name?` · ${escapeHtml(event.display_name)}`:'';
-          const media=event.title?`${escapeHtml(event.title)}${owner}`:'系统后台';
-          const resourceStatusLabel=event.resource_status==='ongoing'?'未完结（追更中）':event.resource_status==='completed'?'已完结':'';
-          const metaParts=[];if(event.tmdb_id)metaParts.push(`TMDB ${event.tmdb_id}`);else if(event.cycle_id)metaParts.push(`检查批次 ${escapeHtml(event.cycle_id)}`);if(resourceStatusLabel)metaParts.push(resourceStatusLabel);const meta=metaParts.join(' · ');
-          return `<article class="follow-event ${escapeHtml(event.status)}"><div class="follow-event-time">${escapeHtml(timeLabel)}<br>${escapeHtml(statusLabels[event.status]||event.status)}</div><div><div class="follow-event-title">${media}</div><div class="follow-event-message">${escapeHtml(event.message)}</div>${meta?`<div class="follow-event-meta">${meta}</div>`:''}</div><span class="follow-event-stage">${escapeHtml(stageLabels[event.stage]||event.stage)}</span></article>`;
-        }).join(''):'<div class="empty">当前筛选条件下还没有管理日志</div>';
-      } catch(error) {root.innerHTML=`<div class="empty">管理日志读取失败：${escapeHtml(error.message)}</div>`;}
+        const concrete=(data.events||[]).filter(event=>event.title&&Number(event.tmdb_id||0)>0&&stageLabels[event.stage]);
+        const grouped=new Map();
+        concrete.forEach(event=>{
+          const key=`tmdb-${Number(event.tmdb_id)}`;
+          if(!grouped.has(key))grouped.set(key,[]);
+          grouped.get(key).push(event);
+        });
+        let groups=[...grouped.values()].map(items=>{
+          let visible=items.filter(event=>(!stage||event.stage===stage)&&(!status||event.status===status)&&(!resourceStatus||event.resource_status===resourceStatus));
+          if(!stage&&!status)visible=visible.filter(event=>event.status==='failed'||['unlock','transfer','library'].includes(event.stage)||(event.stage==='complete'&&event.status==='success'));
+          return {items,visible};
+        }).filter(group=>group.visible.length).sort((a,b)=>String(b.visible[0].created_at||'').localeCompare(String(a.visible[0].created_at||'')));
+        $('followLogCount').textContent=`共 ${groups.length} 个影片资源`;
+        root.innerHTML=groups.length?groups.map(({items,visible})=>{
+          const event=visible[0];const timeLabel=formatTaskTime(event.created_at);
+          const title=items.map(item=>String(item.title||'').trim()).filter(Boolean).sort((a,b)=>a.length-b.length)[0]||event.title;
+          const owners=[...new Set(items.map(item=>String(item.display_name||'').trim()).filter(Boolean))];
+          const ownerLabel=owners.length?`成员 ${owners.join('、')}`:'';
+          const resourceStatusLabel=items.some(item=>item.resource_status==='ongoing')?'追更中':items.some(item=>item.resource_status==='completed')?'已完结':'';
+          const stageCounts={};visible.forEach(item=>stageCounts[item.stage]=(stageCounts[item.stage]||0)+1);
+          const countLabel=['unlock','transfer','library','complete','file_list','scan'].filter(key=>stageCounts[key]).map(key=>`${stageLabels[key]} ${stageCounts[key]}`).join(' · ');
+          const meta=[`TMDB ${Number(event.tmdb_id)}`,ownerLabel,resourceStatusLabel,countLabel].filter(Boolean).join(' · ');
+          const stageOrder=['unlock','transfer','library','complete','file_list','scan'];
+          const stageGroups=stageOrder.filter(stageKey=>visible.some(item=>item.stage===stageKey)).map((stageKey,index)=>{
+            const records=visible.filter(item=>item.stage===stageKey);const successCount=records.filter(item=>item.status==='success').length;const failedCount=records.filter(item=>item.status==='failed').length;const runningCount=records.filter(item=>item.status==='running').length;
+            const summary=[`${records.length} 条`,successCount?`成功 ${successCount}`:'',failedCount?`失败 ${failedCount}`:'',runningCount?`处理中 ${runningCount}`:''].filter(Boolean).join(' · ');
+            const rows=records.map(record=>{const recordOwner=record.display_name?` · ${record.display_name}`:'';return `<div class="follow-step"><span class="follow-step-time">${escapeHtml(formatTaskTime(record.created_at))}</span><span class="follow-step-episode">${escapeHtml(followEventEpisodeLabel(record))}${escapeHtml(recordOwner)}</span><span>${escapeHtml(record.message)}<span class="follow-step-status">${escapeHtml(statusLabels[record.status]||record.status)}</span></span></div>`;}).join('');
+            return `<details class="follow-stage-group" ${index===0?'open':''}><summary><span>${escapeHtml(stageLabels[stageKey])}</span><span>${escapeHtml(summary)}</span></summary><div class="follow-stage-list">${rows}</div></details>`;
+          }).join('');
+          return `<details class="follow-event ${escapeHtml(event.status)}"><summary><div class="follow-event-time">最近更新<br>${escapeHtml(timeLabel)}</div><div><div class="follow-event-title">${escapeHtml(title)}</div><div class="follow-event-message">${escapeHtml(event.message)}</div><div class="follow-event-meta">${escapeHtml(meta)}</div></div></summary><div class="follow-event-steps">${stageGroups}</div></details>`;
+        }).join(''):'<div class="empty">当前没有需要关注的影片处理记录。例行后台检查不会显示在这里。</div>';
+      } catch(error) {root.innerHTML=`<div class="empty">处理记录读取失败：${escapeHtml(error.message)}</div>`;}
     }
     async function refreshFollowEmbyProgress(follows) {
       if(preview)return;
@@ -1570,7 +1744,11 @@
       }
     };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
-    $('followLogRefresh').onclick=loadFollowEvents;
+    $('activityJobsCard').onclick=()=>openTaskDialog('active');
+    $('activityFailedCard').onclick=()=>openTaskDialog('failed');
+    $('taskDialogClose').onclick=closeTaskDialog;
+    $('taskOverlay').onclick=event=>{if(event.target===$('taskOverlay'))closeTaskDialog();};
+    $('followLogRefresh').onclick=()=>{loadHdhiveMessages();loadFollowEvents();};
     $('refreshHealth').onclick=loadHealth;
     $('followLogStage').onchange=loadFollowEvents;
     $('followLogStatus').onchange=loadFollowEvents;
@@ -1584,7 +1762,7 @@
       document.querySelectorAll('[data-storage-content]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.storageContent!==button.dataset.storagePanel));
     });
     $('detailOverlay').onclick=event=>{if(event.target===$('detailOverlay'))closeDetails();};
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('detailOverlay').classList.contains('hidden'))closeDetails();});
+    document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if(!$('taskOverlay').classList.contains('hidden'))closeTaskDialog();else if(!$('detailOverlay').classList.contains('hidden'))closeDetails();});
     $('requestUserFilter').onchange=()=>renderAdminRequests(requestsCache);
     $('logoutButton').onclick=async()=>{if(preview)return toast('预览模式无需退出');await api('/api/logout',{method:'POST'});location.reload();};
     $('newUserForm').onsubmit=async event=>{event.preventDefault();if(preview){$('newUserCard').open=false;return toast('预览模式：成员账号创建成功');}try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({display_name:$('newDisplayName').value,username:$('newUsername').value,password:$('newPassword').value,storage_destination:$('newStorageDestination').value})});event.target.reset();$('newUserCard').open=false;toast('成员账号已创建');loadUsers();}catch(error){toast(error.message,true);}};

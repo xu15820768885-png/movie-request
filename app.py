@@ -7333,6 +7333,10 @@ def activity_summary(
         "" if user["role"] == "admin" else " AND user_id = ?"
     )
     values = () if user["role"] == "admin" else (int(user["id"]),)
+    processing_states = sorted(ACTIVE_JOB_STATES - {"failed"})
+    processing_marks = ",".join("?" for _ in processing_states)
+    job_owner_condition = "" if user["role"] == "admin" else "AND j.user_id = ? "
+    job_owner_values = () if user["role"] == "admin" else (int(user["id"]),)
     with db() as connection:
         request_rows = connection.execute(
             f"SELECT status, COUNT(*) AS count FROM movie_requests {request_filter} "
@@ -7355,6 +7359,20 @@ def activity_summary(
             + "ORDER BY updated_at DESC LIMIT 8",
             values,
         ).fetchall()
+        active_jobs = connection.execute(
+            "SELECT j.*, u.display_name FROM media_workflow_jobs j "
+            "LEFT JOIN users u ON u.id = j.user_id "
+            f"WHERE j.state IN ({processing_marks}) {job_owner_condition}"
+            "ORDER BY j.updated_at DESC LIMIT 100",
+            (*processing_states, *job_owner_values),
+        ).fetchall()
+        failed_jobs = connection.execute(
+            "SELECT j.*, u.display_name FROM media_workflow_jobs j "
+            "LEFT JOIN users u ON u.id = j.user_id "
+            f"WHERE j.state = 'failed' {job_owner_condition}"
+            "ORDER BY j.updated_at DESC LIMIT 100",
+            job_owner_values,
+        ).fetchall()
     request_counts = {str(row["status"]): int(row["count"]) for row in request_rows}
     job_counts = {str(row["state"]): int(row["count"]) for row in job_rows}
     return {
@@ -7364,9 +7382,13 @@ def activity_summary(
         ),
         "requests_completed": request_counts.get("available", 0),
         "follows_active": follow_count,
-        "jobs_active": sum(job_counts.get(state, 0) for state in ACTIVE_JOB_STATES),
+        # Failed work is actionable, but it is not currently processing. Keep the
+        # two overview cards disjoint so their counts have an obvious meaning.
+        "jobs_active": sum(job_counts.get(state, 0) for state in processing_states),
         "jobs_failed": job_counts.get("failed", 0),
         "recent_jobs": [serialize_workflow_job(row) for row in recent_jobs],
+        "active_jobs": [serialize_workflow_job(row) for row in active_jobs],
+        "failed_jobs": [serialize_workflow_job(row) for row in failed_jobs],
     }
 
 
@@ -8169,6 +8191,7 @@ def hdhive_follow_events(
                 "id": int(row["id"]),
                 "cycle_id": row["cycle_id"],
                 "follow_id": row["follow_id"],
+                "user_id": int(row["user_id"] or 0),
                 "display_name": row["display_name"] or "",
                 "tmdb_id": int(row["tmdb_id"] or 0),
                 "title": row["title"],
@@ -8186,6 +8209,105 @@ def hdhive_follow_events(
     summary = {key: 0 for key in allowed_statuses}
     summary.update({str(row["status"]): int(row["count"]) for row in summary_rows})
     return {"events": events, "summary": summary, "window_hours": 24}
+
+
+def hdhive_message_text(payload: Any, keys: set[str], depth: int = 0) -> str:
+    """Read a display field from known message keys without exposing raw JSON."""
+    if depth > 5:
+        return ""
+    if isinstance(payload, dict):
+        for raw_key, value in payload.items():
+            if str(raw_key or "").strip().lower() in keys and isinstance(
+                value, (str, int, float)
+            ):
+                text = str(value or "").strip()
+                if text:
+                    return text[:500]
+        for value in payload.values():
+            if isinstance(value, (dict, list, tuple)):
+                text = hdhive_message_text(value, keys, depth + 1)
+                if text:
+                    return text
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            text = hdhive_message_text(value, keys, depth + 1)
+            if text:
+                return text
+    return ""
+
+
+@APP.get("/api/admin/hdhive/messages")
+def hdhive_messages(
+    limit: int = 60,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    """Return useful HDHive update notices, not background polling heartbeats."""
+    require_admin(movie_session)
+    safe_limit = max(10, min(200, int(limit or 60)))
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM hdhive_message_log ORDER BY created_at DESC LIMIT ?",
+            (safe_limit,),
+        ).fetchall()
+        follows = connection.execute(
+            "SELECT f.id, f.user_id, f.tmdb_id, f.title, "
+            "f.hdhive_subscription_id, u.display_name FROM tv_follows f "
+            "LEFT JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
+            "ORDER BY f.id DESC"
+        ).fetchall()
+    by_subscription: dict[int, sqlite3.Row] = {}
+    by_tmdb: dict[int, sqlite3.Row] = {}
+    for follow in follows:
+        subscription_id = int(follow["hdhive_subscription_id"] or 0)
+        tmdb_id = int(follow["tmdb_id"] or 0)
+        if subscription_id and subscription_id not in by_subscription:
+            by_subscription[subscription_id] = follow
+        if tmdb_id and tmdb_id not in by_tmdb:
+            by_tmdb[tmdb_id] = follow
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            payload = {}
+        hints = message_target_hints(payload if isinstance(payload, dict) else {})
+        subscription_id = int(
+            row["subscription_id"]
+            or next(iter(hints["subscription_ids"]), 0)
+            or 0
+        )
+        tmdb_id = int(row["tmdb_id"] or next(iter(hints["tmdb_ids"]), 0) or 0)
+        follow = by_subscription.get(subscription_id) or by_tmdb.get(tmdb_id)
+        headline = hdhive_message_text(
+            payload, {"title", "subject", "headline", "notification_title"}
+        )
+        content = hdhive_message_text(
+            payload, {"content", "body", "message", "description", "summary"}
+        )
+        remote_created_at = hdhive_message_text(
+            payload,
+            {"created_at", "sent_at", "published_at", "event_time", "timestamp"},
+        )
+        messages.append(
+            {
+                "message_key": row["message_key"],
+                "event_type": row["event_type"],
+                "headline": headline or "影巢订阅有新资源更新",
+                "content": content,
+                "status": row["status"],
+                "last_error": row["last_error"],
+                "attempt_count": int(row["attempt_count"] or 0),
+                "next_retry_at": row["next_retry_at"],
+                "received_at": row["created_at"],
+                "remote_created_at": remote_created_at,
+                "subscription_id": subscription_id,
+                "tmdb_id": tmdb_id or int(follow["tmdb_id"] if follow else 0),
+                "follow_id": int(follow["id"] if follow else 0),
+                "follow_title": str(follow["title"] if follow else ""),
+                "display_name": str(follow["display_name"] if follow else ""),
+            }
+        )
+    return {"messages": messages, "count": len(messages)}
 
 
 @APP.patch("/api/admin/hdhive/config")
@@ -9191,8 +9313,11 @@ async def hdhive_transfer(
     event_detail = {
         "source": "hdhive",
         "resource_slug": slug,
+        "resource_title": str(payload.get("resource_title") or ""),
         "media_type": media_type,
         "resource_status": resource_status,
+        "season_number": int(title_spec["season_number"]),
+        "episode_numbers": selected_episode_numbers,
     }
     log_hdhive_follow_event(
         "unlock", "running", "正在解锁影巢资源",
@@ -9263,6 +9388,7 @@ async def hdhive_transfer(
             raise HTTPException(409, "这个资源中可识别的剧集都已存在")
         episode_links_filtered = selected_links != links
         selected_episode_numbers = sorted(selected_episodes)
+        event_detail["episode_numbers"] = selected_episode_numbers
 
     # Build idempotency from the episodes that will actually be submitted.
     # This lets a corrected E07-only attempt bypass an older bad E01-E07 job.
@@ -9556,7 +9682,7 @@ async def hdhive_transfer(
         "transfer", "success", f"影巢资源{message}",
         follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
         title=str(payload.get("title") or payload.get("resource_title") or ""),
-        detail=event_detail,
+        detail={**event_detail, "episode_numbers": selected_episode_numbers},
     )
     return {
         "ok": True,
@@ -9596,8 +9722,11 @@ async def dian_transfer(
     event_detail = {
         "source": "dian",
         "resource_key": resource_key,
+        "resource_title": str(payload.get("resource_title") or ""),
         "media_type": media_type,
         "resource_status": resource_status,
+        "season_number": int(title_spec["season_number"]),
+        "episode_numbers": selected_episode_numbers,
     }
     job = begin_workflow_job(
         user_id=int(user["id"]),
