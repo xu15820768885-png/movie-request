@@ -7773,6 +7773,58 @@ def serialize_workflow_job(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
+def group_wash_activity(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
+    """Merge the same media episode across family members into one wash item."""
+    grouped: dict[tuple[str, int, int, int], dict[str, Any]] = {}
+    for row in rows:
+        value = dict(row)
+        key = (
+            str(value.get("media_type") or "tv"),
+            int(value.get("tmdb_id") or 0),
+            int(value.get("season_number") or 1),
+            int(value.get("episode_number") or 0),
+        )
+        current = grouped.get(key)
+        if current is None:
+            current = {
+                "tmdb_id": key[1],
+                "media_type": key[0],
+                "title": str(value.get("title") or "未命名影片"),
+                "year": str(value.get("year") or ""),
+                "poster_url": tmdb_image_proxy_url(value.get("poster_path"), "w342"),
+                "season_number": key[2],
+                "episode_number": key[3],
+                "opened_at": str(value.get("opened_at") or ""),
+                "closes_at": str(value.get("closes_at") or ""),
+                "process_count": 0,
+                "last_file_size": 0,
+                "last_file_name": "",
+                "last_message": "",
+                "follower_names": [],
+            }
+            grouped[key] = current
+        opened_at = str(value.get("opened_at") or "")
+        closes_at = str(value.get("closes_at") or "")
+        if opened_at and (not current["opened_at"] or opened_at < current["opened_at"]):
+            current["opened_at"] = opened_at
+        if closes_at and closes_at > current["closes_at"]:
+            current["closes_at"] = closes_at
+        current["process_count"] += int(value.get("process_count") or 0)
+        file_size = int(value.get("last_file_size") or 0)
+        if file_size >= int(current["last_file_size"]):
+            current["last_file_size"] = file_size
+            current["last_file_name"] = str(value.get("last_file_name") or "")
+            current["last_message"] = str(value.get("last_message") or "")
+        name = str(value.get("display_name") or "家人")
+        if name not in current["follower_names"]:
+            current["follower_names"].append(name)
+    for item in grouped.values():
+        item["last_file_size_label"] = resource_size_label(item["last_file_size"])
+        item["display_name"] = "、".join(item["follower_names"])
+        item["follower_count"] = len(item["follower_names"])
+    return sorted(grouped.values(), key=lambda item: item["closes_at"])
+
+
 def reset_workflow_job_record(job_id: int) -> bool:
     """Cancel a non-terminal job so the same resource may be processed again."""
     timestamp = now_iso()
@@ -7790,6 +7842,11 @@ def reset_workflow_job_record(job_id: int) -> bool:
             "last_error = '', next_retry_at = '', completed_at = ?, updated_at = ? "
             "WHERE id = ?",
             (timestamp, timestamp, int(job_id)),
+        )
+        connection.execute(
+            "UPDATE p115_offline_monitors SET status = 'cancelled', updated_at = ? "
+            "WHERE workflow_job_id = ? AND status = 'pending'",
+            (timestamp, int(job_id)),
         )
     return True
 
@@ -7830,9 +7887,6 @@ def activity_summary(
     user = require_user(movie_session)
     request_filter = "" if user["role"] == "admin" else "WHERE user_id = ?"
     job_filter = "" if user["role"] == "admin" else "WHERE user_id = ?"
-    follow_filter = "WHERE active = 1" + (
-        "" if user["role"] == "admin" else " AND user_id = ?"
-    )
     values = () if user["role"] == "admin" else (int(user["id"]),)
     processing_states = sorted(ACTIVE_JOB_STATES - {"failed"})
     processing_marks = ",".join("?" for _ in processing_states)
@@ -7849,11 +7903,6 @@ def activity_summary(
             "GROUP BY state",
             values,
         ).fetchall()
-        follow_count = int(
-            connection.execute(
-                f"SELECT COUNT(*) FROM tv_follows {follow_filter}", values
-            ).fetchone()[0]
-        )
         recent_jobs = connection.execute(
             "SELECT * FROM media_workflow_jobs "
             + ("" if user["role"] == "admin" else "WHERE user_id = ? ")
@@ -7896,15 +7945,32 @@ def activity_summary(
             + "ORDER BY f.updated_at DESC LIMIT 100",
             values,
         ).fetchall()
+        active_wash_rows = connection.execute(
+            "SELECT w.*, f.tmdb_id, f.media_type, f.title, f.year, f.poster_path, "
+            "u.display_name FROM hdhive_wash_episodes w "
+            "JOIN tv_follows f ON f.id = w.follow_id "
+            "JOIN users u ON u.id = f.user_id "
+            "WHERE f.active = 1 AND w.locked_at = '' AND w.closes_at > ? "
+            + ("" if user["role"] == "admin" else "AND f.user_id = ? ")
+            + "ORDER BY w.closes_at ASC",
+            (now_iso(), *values),
+        ).fetchall()
     request_counts = {str(row["status"]): int(row["count"]) for row in request_rows}
     job_counts = {str(row["state"]): int(row["count"]) for row in job_rows}
+    grouped_follows = (
+        group_follow_items([serialize_follow(row) for row in active_follows])
+        if user["role"] == "admin"
+        else [serialize_follow(row) for row in active_follows]
+    )
+    active_washes = group_wash_activity(active_wash_rows)
     return {
         "requests_active": sum(
             request_counts.get(status, 0)
             for status in ("pending", "approved", "searching")
         ),
         "requests_completed": request_counts.get("available", 0),
-        "follows_active": follow_count,
+        "follows_active": len(grouped_follows),
+        "washes_active": len(active_washes),
         # Failed work is actionable, but it is not currently processing. Keep the
         # two overview cards disjoint so their counts have an obvious meaning.
         "jobs_active": sum(job_counts.get(state, 0) for state in processing_states),
@@ -7914,11 +7980,8 @@ def activity_summary(
         "failed_jobs": [serialize_workflow_job(row) for row in failed_jobs],
         "active_requests": [serialize_request(row) for row in active_requests],
         "completed_requests": [serialize_request(row) for row in completed_requests],
-        "active_follows": (
-            group_follow_items([serialize_follow(row) for row in active_follows])
-            if user["role"] == "admin"
-            else [serialize_follow(row) for row in active_follows]
-        ),
+        "active_follows": grouped_follows,
+        "active_washes": active_washes,
     }
 
 
@@ -7943,6 +8006,11 @@ def reset_stale_workflow_jobs(
     marks = ",".join("?" for _ in states)
     timestamp = now_iso()
     with db() as connection:
+        stale_rows = connection.execute(
+            "SELECT id FROM media_workflow_jobs "
+            f"WHERE state IN ({marks}) AND updated_at < ?",
+            (*states, cutoff),
+        ).fetchall()
         cursor = connection.execute(
             "UPDATE media_workflow_jobs SET state = 'cancelled', "
             "detail = '管理员批量重置停滞任务；后续可重新处理这个资源', "
@@ -7950,10 +8018,51 @@ def reset_stale_workflow_jobs(
             f"WHERE state IN ({marks}) AND updated_at < ?",
             (timestamp, timestamp, *states, cutoff),
         )
+        if stale_rows:
+            stale_ids = [int(row["id"]) for row in stale_rows]
+            id_marks = ",".join("?" for _ in stale_ids)
+            connection.execute(
+                "UPDATE p115_offline_monitors SET status = 'cancelled', updated_at = ? "
+                f"WHERE status = 'pending' AND workflow_job_id IN ({id_marks})",
+                (timestamp, *stale_ids),
+            )
     return {
         "ok": True,
         "reset_count": int(cursor.rowcount or 0),
         "message": f"已重置 {int(cursor.rowcount or 0)} 个停滞任务",
+    }
+
+
+@APP.post("/api/admin/workflow-jobs/reset-failed")
+def reset_failed_workflow_jobs(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    timestamp = now_iso()
+    with db() as connection:
+        failed_rows = connection.execute(
+            "SELECT id FROM media_workflow_jobs WHERE state = 'failed'"
+        ).fetchall()
+        cursor = connection.execute(
+            "UPDATE media_workflow_jobs SET state = 'cancelled', "
+            "detail = '管理员批量重置失败任务；后续可重新处理这些资源', "
+            "last_error = '', next_retry_at = '', completed_at = ?, updated_at = ? "
+            "WHERE state = 'failed'",
+            (timestamp, timestamp),
+        )
+        if failed_rows:
+            failed_ids = [int(row["id"]) for row in failed_rows]
+            marks = ",".join("?" for _ in failed_ids)
+            connection.execute(
+                "UPDATE p115_offline_monitors SET status = 'cancelled', updated_at = ? "
+                f"WHERE status = 'pending' AND workflow_job_id IN ({marks})",
+                (timestamp, *failed_ids),
+            )
+    count = int(cursor.rowcount or 0)
+    return {
+        "ok": True,
+        "reset_count": count,
+        "message": f"已重置 {count} 个失败任务，可重新选择资源处理",
     }
 
 
@@ -8439,16 +8548,19 @@ def media_details(
     media_type: str,
     tmdb_id: int,
     movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
 ) -> dict[str, Any]:
     user = require_user(movie_session)
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片信息无效")
+    tmdb_options = {"force_refresh": True} if refresh else {}
     data = tmdb_get(
         f"/{media_type}/{tmdb_id}",
         {
             "language": "zh-CN",
             "append_to_response": "credits,videos,recommendations",
         },
+        **tmdb_options,
     )
     if int(data.get("id") or 0) != tmdb_id:
         raise HTTPException(404, "TMDB 没有找到这部影片")

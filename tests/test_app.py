@@ -179,6 +179,64 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["failed_jobs"][0]["last_error"], "目标目录没有变化")
         self.assertEqual(result["failed_jobs"][0]["episode_numbers"], [37])
 
+    def test_activity_groups_family_follows_and_lists_active_wash_details(self):
+        opened_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        closes_at = (datetime.now(timezone.utc) + timedelta(hours=22)).isoformat()
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            admin_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+            member_id = int(
+                connection.execute(
+                    "INSERT INTO users(username, display_name, password_hash, role, created_at) "
+                    "VALUES('member', '停停', ?, 'member', ?)",
+                    (app.hash_password("password123"), timestamp),
+                ).lastrowid
+            )
+            follow_ids = []
+            for user_id, display_name in ((admin_id, '管理员'), (member_id, '停停')):
+                follow_id = int(
+                    connection.execute(
+                        "INSERT INTO tv_follows(user_id, tmdb_id, title, year, poster_path, "
+                        "current_emby_episode, active, created_at, updated_at) "
+                        "VALUES(?, 301418, '现在不是外遇的问题', '2026', '/poster.jpg', 7, 1, ?, ?)",
+                        (user_id, timestamp, timestamp),
+                    ).lastrowid
+                )
+                follow_ids.append(follow_id)
+                connection.execute(
+                    "INSERT INTO hdhive_wash_episodes(follow_id, season_number, episode_number, "
+                    "opened_at, closes_at, process_count, last_file_name, last_file_size, "
+                    "last_message, updated_at) VALUES(?, 1, 7, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        follow_id,
+                        opened_at,
+                        closes_at,
+                        2 if display_name == '管理员' else 1,
+                        '现在不是外遇的问题.S01E07.mkv',
+                        3 * 1024**3,
+                        '已选择更大版本',
+                        timestamp,
+                    ),
+                )
+
+        result = app.activity_summary(self.token)
+
+        self.assertEqual(result["follows_active"], 1)
+        self.assertEqual(result["active_follows"][0]["follower_count"], 2)
+        self.assertEqual(result["washes_active"], 1)
+        wash = result["active_washes"][0]
+        self.assertEqual(wash["episode_number"], 7)
+        self.assertEqual(wash["process_count"], 3)
+        self.assertEqual(wash["last_file_size"], 3 * 1024**3)
+        self.assertEqual(wash["last_file_size_label"], "3 GB")
+        self.assertEqual(wash["follower_count"], 2)
+        self.assertEqual(wash["opened_at"], opened_at)
+        self.assertEqual(wash["closes_at"], closes_at)
+
     def test_admin_can_reset_one_job_and_reprocess_same_resource(self):
         with app.db() as connection:
             user_id = int(
@@ -214,6 +272,39 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(restarted["state"], "unlocking")
         self.assertEqual(int(restarted["id"]), int(job["id"]))
+
+    def test_admin_can_reset_all_failed_jobs(self):
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+        for index in range(2):
+            job = app.begin_workflow_job(
+                user_id=user_id,
+                destination="p115",
+                source="hdhive",
+                resource_key=f"failed-reset-{index}",
+                tmdb_id=301418 + index,
+                media_type="tv",
+                title=f"失败资源 {index}",
+                season_number=1,
+                episode_numbers=[7],
+            )
+            app.fail_workflow_job(int(job["id"]), "测试失败", retry_seconds=300)
+
+        result = app.reset_failed_workflow_jobs(self.token)
+
+        self.assertEqual(result["reset_count"], 2)
+        with app.db() as connection:
+            states = {
+                str(row["state"])
+                for row in connection.execute(
+                    "SELECT state FROM media_workflow_jobs"
+                ).fetchall()
+            }
+        self.assertEqual(states, {"cancelled"})
 
     def test_admin_can_reset_all_stale_processing_jobs(self):
         with app.db() as connection:
@@ -704,6 +795,27 @@ class MovieRequestTests(unittest.TestCase):
                 result = app.media_details("tv", 101172, self.token)
         self.assertEqual(result["latest_episode_label"], "更新至第233集")
         self.assertNotIn("emby_episode_label", result)
+
+    def test_tv_details_can_force_refresh_tmdb_metadata(self):
+        details = {
+            "id": 301418,
+            "name": "现在不是外遇的问题",
+            "status": "Returning Series",
+            "last_episode_to_air": {"season_number": 1, "episode_number": 7},
+            "next_episode_to_air": None,
+            "credits": {"cast": [], "crew": []},
+            "videos": {"results": []},
+            "recommendations": {"results": []},
+        }
+        with patch.object(app, "tmdb_get", return_value=details) as tmdb:
+            result = app.media_details("tv", 301418, self.token, refresh=True)
+
+        tmdb.assert_called_once_with(
+            "/tv/301418",
+            {"language": "zh-CN", "append_to_response": "credits,videos,recommendations"},
+            force_refresh=True,
+        )
+        self.assertEqual(result["latest_episode_label"], "更新至第7集")
 
     def test_tmdb_chart_filters_people_and_normalizes_media(self):
         payload = {

@@ -602,10 +602,10 @@
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
       <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。</div>
       <section id="activityOverview" class="activity-overview" aria-label="映单处理概览">
-        <button id="activityRequestsCard" class="activity-card" type="button"><span>处理中需求</span><strong id="activityRequests">0</strong></button>
+        <button id="activityWashesCard" class="activity-card" type="button"><span>洗版中</span><strong id="activityWashes">0</strong></button>
         <button id="activityFollowsCard" class="activity-card" type="button"><span>活跃追更</span><strong id="activityFollows">0</strong></button>
         <button id="activityJobsCard" class="activity-card" type="button"><span>处理中任务</span><strong id="activityJobs">0</strong></button>
-        <button id="activityFailedCard" class="activity-card alert" type="button"><span>失败待重试</span><strong id="activityFailed">0</strong></button>
+        <button id="activityFailedCard" class="activity-card alert" type="button"><span>失败任务</span><strong id="activityFailed">0</strong></button>
         <button id="activityCompletedCard" class="activity-card" type="button"><span>历史已入库</span><strong id="activityCompleted">0</strong></button>
       </section>
 
@@ -841,7 +841,7 @@
     let searchController = null;
     let searchSequence = 0;
     let requestsLoadPromise = null;
-    let activityData = {active_jobs:[],failed_jobs:[],active_requests:[],completed_requests:[],active_follows:[]};
+    let activityData = {active_jobs:[],failed_jobs:[],active_washes:[],active_requests:[],completed_requests:[],active_follows:[]};
     let currentTaskDialogKind = '';
     const detailCache = new Map();
     const resourceCache = new Map();
@@ -947,9 +947,9 @@
     async function loadActivity() {
       if(!currentUser)return;
       try {
-        const data=preview?{requests_active:2,follows_active:1,jobs_active:1,jobs_failed:1,requests_completed:1,active_jobs:[demoJobs[0]],failed_jobs:[demoJobs[1]],active_requests:demoRequests.filter(item=>item.status!=='available'),completed_requests:demoRequests.filter(item=>item.status==='available'),active_follows:demoFollows}:await api('/api/activity');
+        const data=preview?{washes_active:1,follows_active:1,jobs_active:1,jobs_failed:1,requests_completed:1,active_jobs:[demoJobs[0]],failed_jobs:[demoJobs[1]],active_washes:[{tmdb_id:101172,media_type:'tv',title:'吞噬星空',year:'2020',poster_url:'',season_number:1,episode_number:233,opened_at:new Date(Date.now()-3600000).toISOString(),closes_at:new Date(Date.now()+47*3600000).toISOString(),process_count:2,last_file_size_label:'1.8 GB',last_file_name:'S01E233.2160p.mkv',display_name:'妈妈'}],active_requests:demoRequests.filter(item=>item.status!=='available'),completed_requests:demoRequests.filter(item=>item.status==='available'),active_follows:demoFollows}:await api('/api/activity');
         activityData=data;
-        $('activityRequests').textContent=data.requests_active||0;
+        $('activityWashes').textContent=data.washes_active||0;
         $('activityFollows').textContent=data.follows_active||0;
         $('activityJobs').textContent=data.jobs_active||0;
         $('activityFailed').textContent=data.jobs_failed||0;
@@ -974,7 +974,7 @@
       const failed=job.state==='failed';
       const owner=job.display_name?` · ${escapeHtml(job.display_name)}`:'';
       const episode=taskEpisodeLabel(job);
-      const retry=failed&&job.next_retry_at?`下次重试：${formatTaskTime(job.next_retry_at)}`:failed?'等待后台重新尝试':'';
+      const retry=failed&&job.next_retry_at?`原计划重试：${formatTaskTime(job.next_retry_at)}（已停止）`:failed?'任务已停止':'';
       const progress=taskProgress(job);
       const reset=currentUser?.role==='admin'?`<button class="btn btn-danger btn-small" type="button" data-reset-job="${Number(job.id)}">重置任务</button>`:'';
       return `<details class="task-item ${failed?'failed':''}"><summary><div><div class="task-item-title">${escapeHtml(job.title||`TMDB ${job.tmdb_id||'未知'}`)}${owner}</div><div class="task-item-sub">${episode?`${escapeHtml(episode)} · `:''}更新于 ${escapeHtml(formatTaskTime(job.updated_at))}</div></div><span class="task-state">${escapeHtml(job.state_label||job.state)}</span></summary><div class="task-body">${!failed?`<div class="task-progress" aria-label="处理进度 ${progress}%"><span style="width:${progress}%"></span></div>`:''}${failed?`<div class="task-error"><strong>失败原因：</strong>${escapeHtml(job.last_error||'未记录具体原因')}</div>`:`<div class="task-detail">${escapeHtml(job.detail||job.state_label||'任务正在继续处理')}</div>`}<div class="task-meta">${failed?`${escapeHtml(retry)} · `:''}已尝试 ${Number(job.attempt_count||0)} 次 · ${escapeHtml(job.destination==='p115'?'115网盘':job.destination||'目标网盘')} · TMDB ${Number(job.tmdb_id||0)}<br>创建：${escapeHtml(formatTaskTime(job.created_at))}</div><div class="inline-actions">${job.follow_id?`<button class="btn btn-small task-timeline-button" type="button" data-task-timeline="${Number(job.follow_id)}">查看完整处理链</button>`:''}${reset}</div>${job.follow_id?`<div class="task-timeline" data-task-timeline-root="${Number(job.follow_id)}"></div>`:''}</div></details>`;
@@ -986,17 +986,25 @@
       const state=follow?'追更中':escapeHtml(item.status_name||statusOptions[item.status]||item.status);
       return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title||'未命名影片')} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${detail}${follow&&owner?owner:''}</div>${item.admin_note?`<div class="request-note">${escapeHtml(item.admin_note)}</div>`:''}</div><span class="badge badge-${follow?'approved':escapeHtml(item.status)}">${state}</span></article>`;
     }
+    function renderWashItem(item) {
+      const episode=`第${Number(item.season_number||1)}季 · 第${Number(item.episode_number||0)}集`;
+      const owner=item.display_name?` · ${escapeHtml(item.display_name)}`:'';
+      return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title||'未命名影片')} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${escapeHtml(episode)}${owner}</div><div class="request-note">开始：${escapeHtml(formatTaskTime(item.opened_at))}<br>预计结束：${escapeHtml(formatTaskTime(item.closes_at))}</div><div class="request-meta">已洗版 ${Number(item.process_count||0)} 次 · 当前资源 ${escapeHtml(item.last_file_size_label||'大小未知')}${item.last_file_name?`<br>${escapeHtml(item.last_file_name)}`:''}</div></div><span class="badge badge-searching">洗版中</span></article>`;
+    }
     function openTaskDialog(kind) {
       currentTaskDialogKind=kind;
       const failed=kind==='failed';
-      const mediaKinds={requests:['处理中需求','这里显示尚未入库的求片需求。','active_requests'],follows:['活跃追更','这里显示当前所有成员正在追更的影片。','active_follows'],completed:['历史已入库','这里显示已经完成入库的求片记录。','completed_requests']};
+      const mediaKinds={follows:['活跃追更','同一影片有多个成员追更时只计算和显示一次。','active_follows'],completed:['历史已入库','这里显示已经完成入库的求片记录。','completed_requests']};
       const media=mediaKinds[kind];
       const jobs=failed?(activityData.failed_jobs||[]):kind==='active'?(activityData.active_jobs||[]):[];
-      $('taskDialogTitle').textContent=media?media[0]:failed?'失败待重试':'处理中任务';
-      $('taskDialogHelp').textContent=media?media[1]:failed?'点开任务查看失败原因、尝试次数和下次重试时间。':'点开任务查看当前步骤、处理进度和完整处理链；卡住时可以重置后重新处理。';
-      if(media){const items=activityData[media[2]]||[];$('taskDialogList').innerHTML=items.length?items.map(item=>renderActivityMedia(item,kind)).join(''):'<div class="empty">当前没有对应记录</div>';}
-      else $('taskDialogList').innerHTML=jobs.length?jobs.map(renderTaskItem).join(''):`<div class="empty">当前没有${failed?'失败待重试':'正在处理'}的任务</div>`;
-      $('taskDialogResetStale').classList.toggle('hidden',kind!=='active'||currentUser?.role!=='admin');
+      $('taskDialogTitle').textContent=kind==='washes'?'洗版中的资源':media?media[0]:failed?'失败任务':'处理中任务';
+      $('taskDialogHelp').textContent=kind==='washes'?'显示每集洗版窗口的开始、预计结束、处理次数和当前资源大小。':media?media[1]:failed?'这些任务已经停止，不会自动重复提交；可单独重置或全部重置后重新选择资源。':'点开任务查看当前步骤、处理进度和完整处理链；卡住时可以重置后重新处理。';
+      if(kind==='washes'){const items=activityData.active_washes||[];$('taskDialogList').innerHTML=items.length?items.map(renderWashItem).join(''):'<div class="empty">当前没有正在洗版的资源</div>';}
+      else if(media){const items=activityData[media[2]]||[];$('taskDialogList').innerHTML=items.length?items.map(item=>renderActivityMedia(item,kind)).join(''):'<div class="empty">当前没有对应记录</div>';}
+      else $('taskDialogList').innerHTML=jobs.length?jobs.map(renderTaskItem).join(''):`<div class="empty">当前没有${failed?'失败':'正在处理'}的任务</div>`;
+      const bulkReset=currentUser?.role==='admin'&&(kind==='active'||kind==='failed');
+      $('taskDialogResetStale').classList.toggle('hidden',!bulkReset);
+      $('taskDialogResetStale').textContent=kind==='failed'?'重置全部失败任务':'重置全部停滞任务';
       $('taskDialogList').querySelectorAll('[data-task-timeline]').forEach(button=>button.onclick=()=>loadTaskTimeline(Number(button.dataset.taskTimeline),button));
       $('taskDialogList').querySelectorAll('[data-reset-job]').forEach(button=>button.onclick=()=>resetWorkflowJob(Number(button.dataset.resetJob),button));
       $('taskOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
@@ -1008,9 +1016,16 @@
       catch(error){toast(error.message,true);button.disabled=false;}
     }
     async function resetStaleWorkflowJobs() {
+      if(currentTaskDialogKind==='failed')return resetFailedWorkflowJobs();
       if(!confirm('确认重置全部超过 6 小时没有更新的处理中任务？'))return;
       const button=$('taskDialogResetStale');button.disabled=true;
       try {const data=preview?{message:'已重置 1 个停滞任务'}:await api('/api/admin/workflow-jobs/reset-stale',{method:'POST'});toast(data.message);await loadActivity();openTaskDialog('active');}
+      catch(error){toast(error.message,true);} finally {button.disabled=false;}
+    }
+    async function resetFailedWorkflowJobs() {
+      if(!confirm('确认重置全部失败任务？重置后可重新选择对应资源处理。'))return;
+      const button=$('taskDialogResetStale');button.disabled=true;
+      try {const data=preview?{message:'已重置 2 个失败任务，可重新选择资源处理'}:await api('/api/admin/workflow-jobs/reset-failed',{method:'POST'});toast(data.message);await loadActivity();openTaskDialog('failed');}
       catch(error){toast(error.message,true);} finally {button.disabled=false;}
     }
     function closeTaskDialog() {$('taskOverlay').classList.add('hidden');document.body.style.overflow='';}
@@ -1099,6 +1114,9 @@
         if(loadId!==detailLoadSequence)return;
         currentDetail=detail;renderDetails(detail);focusResources();return;
       }
+      const cachedMetadata=detailCache.get(requestedKey)||detailCache.get(tmdbKey);
+      const metadataFresh=Date.now()-Number(cachedMetadata?._tmdb_refreshed_at||0)<300000;
+      const refreshMetadata=Boolean(resolved.media_type==='tv'&&!metadataFresh);
       const cachedResources=resourceCache.get(tmdbKey)||{};
       currentDetail={
         ...currentDetail,
@@ -1121,15 +1139,15 @@
           detailCache.set(requestedKey,currentDetail);detailCache.set(tmdbKey,currentDetail);renderCurrentDetail();
         }).catch(()=>{if(loadId===detailLoadSequence&&currentDetail){currentDetail={...currentDetail,emby_progress_loading:false};renderCurrentDetail();}});
       }
-      const cachedDetail=detailCache.get(requestedKey)||detailCache.get(tmdbKey);
+      const cachedDetail=refreshMetadata?null:cachedMetadata;
       if(cachedDetail){
         currentDetail={...currentDetail,...cachedDetail,hdhive_resources:currentDetail.hdhive_resources,hdhive_loading:currentDetail.hdhive_loading,dian_resources:currentDetail.dian_resources,dian_loading:currentDetail.dian_loading,details_loading:false,details_error:''};
         renderCurrentDetail();focusResources();
       } else {
         try {
-          const detailResult=await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}`);
+          const detailResult=await api(`/api/details/${resolved.media_type}/${resolved.tmdb_id}${refreshMetadata?'?refresh=true':''}`);
           if(loadId!==detailLoadSequence)return;
-          currentDetail={...currentDetail,...detailResult,details_loading:false,details_error:''};
+          currentDetail={...currentDetail,...detailResult,_tmdb_refreshed_at:Date.now(),details_loading:false,details_error:''};
           detailCache.set(requestedKey,currentDetail);detailCache.set(tmdbKey,currentDetail);renderCurrentDetail();focusResources();
         } catch(error) {
           if(loadId!==detailLoadSequence)return;
@@ -1169,9 +1187,9 @@
       const item={...currentDetail};
       currentDetail={...currentDetail,details_loading:true,details_error:''};renderCurrentDetail();
       try {
-        const result=await api(`/api/details/${item.media_type}/${item.tmdb_id}`);
+        const result=await api(`/api/details/${item.media_type}/${item.tmdb_id}?refresh=true`);
         if(!currentDetail||Number(currentDetail.tmdb_id)!==Number(item.tmdb_id))return;
-        currentDetail={...currentDetail,...result,details_loading:false,details_error:''};
+        currentDetail={...currentDetail,...result,_tmdb_refreshed_at:Date.now(),details_loading:false,details_error:''};
         detailCache.set(`tmdb:${item.media_type}:${item.tmdb_id}`,currentDetail);
         renderCurrentDetail();
       } catch(error) {
@@ -1202,7 +1220,7 @@
       const length=item.media_type==='movie'?(item.runtime?`${item.runtime} 分钟`:'时长未知'):(item.number_of_seasons?`${item.number_of_seasons} 季 · ${item.number_of_episodes} 集`:item.episode_runtime?`单集约 ${item.episode_runtime} 分钟`:'集数未知');
       const facts=[item.media_type==='movie'?'电影':'剧集',item.year||'年份未知',`★ ${item.rating||0}`,...(item.series_status_label?[item.series_status_label]:[]),length,...(item.genres||[])];
       const detailsNotice=item.details_error?`<div class="load-error"><span>TMDB 资料暂时不可用：${escapeHtml(item.details_error)}。现有片名、简介和资源搜索仍可继续使用。</span><button class="btn btn-small" type="button" data-retry-details>重新加载资料</button></div>`:'';
-      const episodeProgress=item.media_type==='tv'?`<section class="episode-progress"><div class="episode-progress-item accent"><div class="episode-progress-name">官方播出进度</div><div class="episode-progress-value">${escapeHtml(item.latest_episode_label||'暂时未知')}</div></div><div class="episode-progress-item"><div class="episode-progress-name">Emby 本地进度</div><div class="episode-progress-value">${escapeHtml(item.emby_progress_loading?'正在后台检查…':item.emby_episode_label||(item.in_library?'已入库，集数待识别':'尚未入库'))}</div></div><div class="episode-progress-item"><div class="episode-progress-name">下一集计划</div><div class="episode-progress-value">${escapeHtml(item.next_episode_air_date?`${item.next_episode_label||'下一集'} · ${formatEpisodeAirDate(item.next_episode_air_date)}`:(item.series_status==='ongoing'?'待公布':'暂无更新'))}</div></div></section>`:'';
+      const episodeProgress=item.media_type==='tv'?`<section class="episode-progress"><div class="episode-progress-item accent"><div class="episode-progress-name">官方播出进度</div><div class="episode-progress-value">${escapeHtml(item.details_loading?'正在刷新 TMDB…':item.latest_episode_label||'暂时未知')}</div></div><div class="episode-progress-item"><div class="episode-progress-name">Emby 本地进度</div><div class="episode-progress-value">${escapeHtml(item.emby_progress_loading?'正在后台检查…':item.emby_episode_label||(item.in_library?'已入库，集数待识别':'尚未入库'))}</div></div><div class="episode-progress-item"><div class="episode-progress-name">下一集计划</div><div class="episode-progress-value">${escapeHtml(item.details_loading?'正在刷新 TMDB…':item.next_episode_air_date?`${item.next_episode_label||'下一集'} · ${formatEpisodeAirDate(item.next_episode_air_date)}`:(item.series_status==='ongoing'?'待公布':'暂无更新'))}</div></div></section>`:'';
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
       const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="" loading="lazy" decoding="async">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
       const hdhiveResources=(item.hdhive_resources||[]).map((resource,index)=>({...resource,_sourceIndex:index})).sort((a,b)=>{
@@ -1819,7 +1837,7 @@
       }
     };
     document.querySelectorAll('.tab').forEach(tab=>tab.onclick=()=>switchView(tab.dataset.view));
-    $('activityRequestsCard').onclick=()=>openTaskDialog('requests');
+    $('activityWashesCard').onclick=()=>openTaskDialog('washes');
     $('activityFollowsCard').onclick=()=>openTaskDialog('follows');
     $('activityJobsCard').onclick=()=>openTaskDialog('active');
     $('activityFailedCard').onclick=()=>openTaskDialog('failed');
