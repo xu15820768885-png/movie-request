@@ -1241,6 +1241,25 @@ def response_summary(payload: dict[str, Any]) -> str:
     return json.dumps(summary, ensure_ascii=False) if summary else "无状态字段"
 
 
+def p115_error_detail(payload: dict[str, Any], fallback: str) -> str:
+    message = response_message(payload, fallback).strip() or fallback
+    summary = response_summary(payload)
+    if summary == "无状态字段" or summary in message:
+        return message
+    return f"{message}；115返回：{summary}"
+
+
+def p115_receive_was_duplicate(payload: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("error", "error_msg", "message", "msg")
+    ).lower()
+    return any(
+        marker in text
+        for marker in ("已接收", "接收过", "已存在", "重复", "already", "duplicate")
+    )
+
+
 def p115_call(label: str, method: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
     try:
         result = method(*args, **kwargs)
@@ -1459,6 +1478,88 @@ def p115_share_item_sha1(item: dict[str, Any]) -> str:
         if re.fullmatch(r"[0-9a-f]{40}", value):
             return value
     return ""
+
+
+def p115_item_parent_id(item: dict[str, Any]) -> str:
+    return str(
+        item.get("pid")
+        or item.get("parent_id")
+        or item.get("cid")
+        or item.get("file_parent_id")
+        or ""
+    )
+
+
+def recover_duplicate_p115_receive(
+    client: Any,
+    target_cid: str,
+    selected: list[dict[str, Any]],
+    before_files: set[Any],
+) -> tuple[bool, str]:
+    """Copy previously received matching files into the configured target."""
+    recovered: list[dict[str, Any]] = []
+    for source_item in selected:
+        source_name = p115_share_item_name(source_item)
+        source_sha1 = p115_share_item_sha1(source_item)
+        source_size = p115_share_item_size(source_item)
+        search_value = source_sha1 or source_name
+        if not search_value:
+            return False, "115报告资源已接收，但无法识别分享文件名称"
+        result = p115_call(
+            "搜索115中已接收文件失败",
+            client.fs_search,
+            {
+                "search_value": search_value,
+                "limit": 100,
+                "show_dir": 0,
+                "fc": 2,
+            },
+        )
+        if not response_ok(result):
+            return False, p115_error_detail(result, "无法搜索115中已接收文件")
+        candidates = extract_share_items(result)
+        matched = None
+        for candidate in candidates:
+            candidate_sha1 = p115_share_item_sha1(candidate)
+            candidate_name = p115_share_item_name(candidate)
+            candidate_size = p115_share_item_size(candidate)
+            if source_sha1 and candidate_sha1 == source_sha1:
+                matched = candidate
+                break
+            if (
+                source_name
+                and candidate_name == source_name
+                and (not source_size or candidate_size == source_size)
+            ):
+                matched = candidate
+                break
+        if not matched:
+            return False, f"115报告已接收，但全盘未找到对应文件：{source_name}"
+        recovered.append(matched)
+
+    to_copy = [
+        item for item in recovered
+        if p115_item_parent_id(item) != str(target_cid)
+    ]
+    if not to_copy:
+        return True, "对应文件已经位于115目标目录"
+    for item in to_copy:
+        file_id = p115_share_item_id(item)
+        if not file_id:
+            return False, "找到已接收文件，但115未返回可复制的文件ID"
+        copied = p115_call(
+            "复制115中已接收文件失败",
+            client.fs_copy,
+            {"fid": file_id, "pid": target_cid},
+        )
+        if not response_ok(copied):
+            return False, p115_error_detail(copied, "无法复制已接收文件到目标目录")
+    if not wait_for_p115_change(
+        lambda: p115_folder_snapshot(client, target_cid),
+        before_files,
+    ):
+        return False, "已找到并复制115中的同一文件，但目标目录仍未显示变化"
+    return True, "已从115中找回接收过的文件并复制到目标目录"
 
 
 def pansave_proxy(proxy_url: str) -> Optional[dict[str, Any]]:
@@ -6333,15 +6434,38 @@ def auto_wash_hdhive_follow(
                 {"file_id": ",".join(selected_ids), "cid": target_cid},
                 share_url=share_url,
             )
+            receive_confirmed = False
             if not response_ok(received):
-                fail_workflow_job(job_id, "115拒绝接收", retry_seconds=900)
+                rejection = p115_error_detail(received, "115拒绝接收")
+                if p115_receive_was_duplicate(received):
+                    receive_confirmed, recovery = recover_duplicate_p115_receive(
+                        client, target_cid, selected, before_files
+                    )
+                    rejection = f"{rejection}；{recovery}"
+                if not receive_confirmed:
+                    fail_workflow_job(job_id, rejection, retry_seconds=900)
+                    log_hdhive_follow_event(
+                        "transfer", "failed",
+                        f"115拒绝接收第{selected_label}集：{rejection}",
+                        follow=follow, cycle_id=cycle_id,
+                        detail={
+                            "resource_slug": slug,
+                            "episodes": sorted(selected_episodes),
+                            "p115_response": response_summary(received),
+                        },
+                    )
+                    continue
                 log_hdhive_follow_event(
-                    "transfer", "failed", f"115拒绝接收第{selected_label}集",
+                    "transfer", "success",
+                    f"第{selected_label}集曾被115接收，已找回并放入目标目录",
                     follow=follow, cycle_id=cycle_id,
-                    detail={"resource_slug": slug},
+                    detail={
+                        "resource_slug": slug,
+                        "episodes": sorted(selected_episodes),
+                        "duplicate_recovered": True,
+                    },
                 )
-                continue
-            if not wait_for_p115_change(
+            if not receive_confirmed and not wait_for_p115_change(
                 lambda: p115_folder_snapshot(client, target_cid), before_files
             ):
                 log_hdhive_follow_event(
@@ -6363,9 +6487,18 @@ def auto_wash_hdhive_follow(
                 changed = response_ok(received) and wait_for_p115_change(
                     lambda: p115_folder_snapshot(client, target_cid), before_files
                 )
+                recovery_detail = ""
+                if not changed and p115_receive_was_duplicate(received):
+                    changed, recovery_detail = recover_duplicate_p115_receive(
+                        client, target_cid, selected, before_files
+                    )
                 if not changed:
+                    rejection = p115_error_detail(
+                        received, "115两次受理后目标目录仍没有新增文件"
+                    )
                     failure = (
-                        "115两次受理后目标目录仍没有新增文件；"
+                        f"{rejection}"
+                        f"{'；' + recovery_detail if recovery_detail else ''}；"
                         "已安排15分钟后重新处理"
                     )
                     fail_workflow_job(job_id, failure, retry_seconds=900)

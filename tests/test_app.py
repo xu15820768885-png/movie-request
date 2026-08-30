@@ -1873,6 +1873,56 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(app.p115_share_item_sha1(items[1]), sha1.lower())
         self.assertEqual(app.p115_share_item_size(items[1]), 1024)
 
+    def test_duplicate_115_receive_recovers_existing_file_to_target(self):
+        sha1 = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+
+        class FakeP115:
+            def fs_search(self, payload):
+                self.search_payload = payload
+                return {
+                    "state": True,
+                    "data": {
+                        "list": [{
+                            "fid": "existing-156",
+                            "cid": "old-folder",
+                            "n": "仙逆.S01E156.mkv",
+                            "sha": sha1,
+                            "s": "123456",
+                        }]
+                    },
+                }
+
+            def fs_copy(self, payload):
+                self.copy_payload = payload
+                return {"state": True}
+
+        client = FakeP115()
+        selected = [{
+            "_share_id": "share-156",
+            "_share_name": "仙逆.S01E156.mkv",
+            "sha": sha1,
+            "s": "123456",
+        }]
+        with patch.object(app, "wait_for_p115_change", return_value=True):
+            recovered, detail = app.recover_duplicate_p115_receive(
+                client, "target-folder", selected, {"before"}
+            )
+
+        self.assertTrue(recovered)
+        self.assertIn("找回", detail)
+        self.assertEqual(client.search_payload["search_value"], sha1.lower())
+        self.assertEqual(
+            client.copy_payload,
+            {"fid": "existing-156", "pid": "target-folder"},
+        )
+
+    def test_p115_rejection_keeps_real_error_code_and_message(self):
+        payload = {"state": False, "errno": 1001, "error": "文件已经接收过"}
+        detail = app.p115_error_detail(payload, "115拒绝接收")
+        self.assertIn("文件已经接收过", detail)
+        self.assertIn('"errno": 1001', detail)
+        self.assertTrue(app.p115_receive_was_duplicate(payload))
+
     def test_pansave_proxy_supports_http_and_socks(self):
         self.assertEqual(
             app.pansave_proxy("http://user:pass@127.0.0.1:7890"),
