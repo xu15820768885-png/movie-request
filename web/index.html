@@ -208,8 +208,13 @@
     .follow-log-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
     .follow-log-toolbar label { min-width: 160px; }
     .follow-log-count { margin-left: auto; align-self: center; color: var(--muted); font-size: 11px; }
-    .message-inbox { margin-bottom:16px; }
-    .message-inbox-head { display:flex; justify-content:space-between; gap:12px; align-items:end; margin-bottom:10px; }
+    .message-inbox { margin-top:16px; }
+    .message-inbox > summary { display:flex; justify-content:space-between; gap:12px; align-items:center; list-style:none; cursor:pointer; }
+    .message-inbox > summary::-webkit-details-marker { display:none; }
+    .message-inbox > summary::after { content:'展开'; color:var(--orange-2); font-size:11px; font-weight:800; }
+    .message-inbox[open] > summary::after { content:'收起'; }
+    .message-inbox[open] > summary { margin-bottom:14px; }
+    .message-inbox-head { display:flex; justify-content:space-between; gap:12px; align-items:end; flex:1; }
     .message-inbox-head h3 { margin:0 0 4px; font-size:15px; }
     .message-list { display:grid; gap:8px; }
     .message-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:14px; padding:14px 15px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
@@ -227,16 +232,18 @@
     .follow-event.failed { border-left-color: var(--red); }
     .follow-event.skipped { border-left-color: var(--yellow); }
     .follow-event.running { border-left-color: var(--blue); }
-    .follow-event > summary { display: grid; grid-template-columns: 138px minmax(0,1fr) auto; gap: 16px; align-items: start; padding: 15px 16px; list-style: none; cursor: pointer; }
+    .follow-event > summary { display: grid; grid-template-columns: 68px 138px minmax(0,1fr) auto; gap: 16px; align-items: center; padding: 12px 16px; list-style: none; cursor: pointer; }
     .follow-event > summary::-webkit-details-marker { display: none; }
     .follow-event > summary::after { content: '查看资源记录'; color: var(--orange-2); font-size: 10px; font-weight: 800; white-space: nowrap; }
     .follow-event[open] > summary::after { content: '收起记录'; }
     .follow-event-time { color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .follow-event-poster { width:68px; height:98px; object-fit:cover; border-radius:10px; background:var(--panel-soft); box-shadow:0 8px 20px rgba(0,0,0,.2); }
+    .follow-event-poster.empty { display:grid; place-items:center; color:var(--orange-2); font-size:22px; font-weight:900; }
     .follow-event-title { font-weight: 800; font-size: 13px; }
     .follow-event-message { margin-top: 5px; color: #d6d1ca; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
     .follow-event-meta { margin-top: 5px; color: var(--muted); font-size: 10px; }
     .follow-event-stage { padding: 5px 8px; border-radius: 999px; color: var(--muted); background: var(--panel-soft); font-size: 10px; white-space: nowrap; }
-    .follow-event-steps { display: grid; gap: 8px; padding: 0 16px 16px 170px; }
+    .follow-event-steps { display: grid; gap: 8px; padding: 0 16px 16px 254px; }
     .follow-stage-group { border:1px solid rgba(53,49,44,.72); border-radius:10px; background:rgba(0,0,0,.1); overflow:hidden; }
     .follow-stage-group > summary { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; list-style:none; cursor:pointer; color:var(--cream); font-size:11px; font-weight:850; }
     .follow-stage-group > summary::-webkit-details-marker { display:none; }
@@ -536,8 +543,9 @@
       .follow-log-count { margin-left:0; }
       .message-card { grid-template-columns:1fr; }
       .message-actions { justify-items:start; }
-      .follow-event > summary { grid-template-columns:1fr auto; gap:8px; }
-      .follow-event-time { grid-column:1 / -1; }
+      .follow-event > summary { grid-template-columns:52px 1fr auto; gap:10px; }
+      .follow-event-poster { width:52px; height:76px; grid-row:1 / span 2; }
+      .follow-event-time { grid-column:2 / -1; }
       .follow-event-steps { padding:0 12px 12px; }
       .follow-step { grid-template-columns:1fr; gap:4px; }
     }
@@ -612,10 +620,6 @@
       <section id="followView" class="view hidden"><div class="section-head"><div><h2>我的追更</h2><span id="followHelp">查看影巢原生追更、115自动洗版窗口和 Emby 入库进度</span></div></div><div id="followList" class="follow-grid"></div></section>
       <section id="followLogView" class="view hidden">
         <div class="section-head"><div><h2>处理记录</h2><span>默认只看具体影片的处理结果；点开一条记录可查看识别、解锁、转存和入库步骤</span></div><button id="followLogRefresh" class="btn btn-small" type="button">刷新记录</button></div>
-        <section class="message-inbox">
-          <div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">显示影巢实际推送的站内信内容，以及它触发的处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div>
-          <div id="hdhiveMessageList" class="message-list"><div class="empty">正在读取影巢更新通知…</div></div>
-        </section>
         <div class="panel">
           <div class="follow-log-toolbar">
             <label>处理步骤<select id="followLogStage"><option value="">全部步骤</option><option value="scan">资源扫描</option><option value="file_list">文件识别</option><option value="unlock">资源解锁</option><option value="transfer">115转存</option><option value="library">Emby入库</option><option value="complete">处理结果</option></select></label>
@@ -625,6 +629,10 @@
           </div>
           <div id="followEventList" class="follow-event-list"><div class="empty">正在读取处理记录…</div></div>
         </div>
+        <details id="hdhiveMessageInbox" class="message-inbox panel">
+          <summary><div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">不常用，展开后查看影巢实际推送的站内信及处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div></summary>
+          <div id="hdhiveMessageList" class="message-list"><div class="empty">展开后读取影巢更新通知</div></div>
+        </details>
       </section>
       <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
       <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>入库后保留为历史记录，不再直接删除</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，会自动标记“已入库”并保留记录。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
@@ -836,7 +844,7 @@
       {id:1,user_id:2,display_name:'妈妈',tmdb_id:101172,title:'吞噬星空',year:'2020',poster_url:'',baseline_episode:232,baseline_label:'已从第232集继续',last_seen_episode:232,last_message:'影巢原生订阅已开启，等待第233集资源',active:true,hdhive_subscribed:true,hdhive_subscription_id:9001}
     ];
     const demoFollowEvents = [
-      {id:5,cycle_id:'manual-1',title:'繁花',display_name:'妈妈',tmdb_id:119543,stage:'unlock',status:'success',resource_status:'completed',message:'影巢资源解锁成功，正在提交到网盘',created_at:new Date().toISOString()},
+      {id:5,cycle_id:'manual-1',title:'沙丘2',display_name:'妈妈',tmdb_id:693134,poster_url:'https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg',stage:'unlock',status:'success',resource_status:'completed',message:'影巢资源解锁成功，正在提交到网盘',created_at:new Date().toISOString()},
       {id:6,cycle_id:'cycle-2',follow_id:2,title:'吞噬星空',display_name:'爸爸',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第234集',detail:{season_number:1,episode_numbers:[234]},created_at:new Date(Date.now()-10000).toISOString()},
       {id:4,cycle_id:'cycle-1',follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'transfer',status:'success',resource_status:'ongoing',message:'第233集已确认转存到115，等待 PanSave 整理与 Emby 入库',detail:{season_number:1,episode_numbers:[233]},created_at:new Date().toISOString()},
       {id:3,cycle_id:'cycle-1',follow_id:1,title:'吞噬星空',display_name:'妈妈',tmdb_id:101172,stage:'unlock',status:'success',resource_status:'ongoing',message:'资源解锁成功，正在检查115分享中的第233集',detail:{season_number:1,episode_numbers:[233]},created_at:new Date(Date.now()-30000).toISOString()},
@@ -915,7 +923,7 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog'){loadHdhiveMessages();loadFollowEvents();} if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='followLog')loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
     }
     async function loadActivity() {
       if(!currentUser)return;
@@ -1298,12 +1306,13 @@
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(button.dataset.followDelete.split(',').map(Number),button));
       refreshFollowEmbyProgress(follows);
     }
+    let hdhiveMessagesLoaded=false;
     async function loadHdhiveMessages() {
       const root=$('hdhiveMessageList');root.innerHTML='<div class="empty">正在读取影巢更新通知…</div>';
       try {
         const data=preview?{messages:demoMessages,count:demoMessages.length}:await api('/api/admin/hdhive/messages?limit=60');
         const statusLabels={pending:'待处理',failed:'处理失败',processed:'已完成扫描',acknowledged:'已触发处理'};
-        const messages=data.messages||[];$('hdhiveMessageCount').textContent=`最近 ${messages.length} 条`;
+        const messages=data.messages||[];hdhiveMessagesLoaded=true;$('hdhiveMessageCount').textContent=`最近 ${messages.length} 条`;
         root.innerHTML=messages.length?messages.map(message=>{
           const failed=message.status==='failed';const media=message.follow_title?`关联《${message.follow_title}》${message.display_name?` · ${message.display_name}`:''}`:message.tmdb_id?`关联 TMDB ${message.tmdb_id}`:'未匹配到现有追更';
           const error=failed&&message.last_error?`<div class="task-error" style="margin-top:8px">处理失败：${escapeHtml(message.last_error)}</div>`:'';
@@ -1379,7 +1388,9 @@
             const rows=records.map(record=>{const recordOwner=record.display_name?` · ${record.display_name}`:'';return `<div class="follow-step"><span class="follow-step-time">${escapeHtml(formatTaskTime(record.created_at))}</span><span class="follow-step-episode">${escapeHtml(followEventEpisodeLabel(record))}${escapeHtml(recordOwner)}</span><span>${escapeHtml(record.message)}<span class="follow-step-status">${escapeHtml(statusLabels[record.status]||record.status)}</span></span></div>`;}).join('');
             return `<details class="follow-stage-group" ${index===0?'open':''}><summary><span>${escapeHtml(stageLabels[stageKey])}</span><span>${escapeHtml(summary)}</span></summary><div class="follow-stage-list">${rows}</div></details>`;
           }).join('');
-          return `<details class="follow-event ${escapeHtml(event.status)}"><summary><div class="follow-event-time">最近更新<br>${escapeHtml(timeLabel)}</div><div><div class="follow-event-title">${escapeHtml(title)}</div><div class="follow-event-message">${escapeHtml(event.message)}</div><div class="follow-event-meta">${escapeHtml(meta)}</div></div></summary><div class="follow-event-steps">${stageGroups}</div></details>`;
+          const posterUrl=event.poster_url||(demoMovies.find(movie=>Number(movie.tmdb_id)===Number(event.tmdb_id))||{}).poster_url||'';
+          const poster=posterUrl?`<img class="follow-event-poster" src="${escapeHtml(posterUrl)}" alt="${escapeHtml(title)}海报" loading="lazy" decoding="async">`:'<div class="follow-event-poster empty">映</div>';
+          return `<details class="follow-event ${escapeHtml(event.status)}"><summary>${poster}<div class="follow-event-time">最近更新<br>${escapeHtml(timeLabel)}</div><div><div class="follow-event-title">${escapeHtml(title)}</div><div class="follow-event-message">${escapeHtml(event.message)}</div><div class="follow-event-meta">${escapeHtml(meta)}</div></div></summary><div class="follow-event-steps">${stageGroups}</div></details>`;
         }).join(''):'<div class="empty">当前没有需要关注的影片处理记录。例行后台检查不会显示在这里。</div>';
       } catch(error) {root.innerHTML=`<div class="empty">处理记录读取失败：${escapeHtml(error.message)}</div>`;}
     }
@@ -1748,7 +1759,8 @@
     $('activityFailedCard').onclick=()=>openTaskDialog('failed');
     $('taskDialogClose').onclick=closeTaskDialog;
     $('taskOverlay').onclick=event=>{if(event.target===$('taskOverlay'))closeTaskDialog();};
-    $('followLogRefresh').onclick=()=>{loadHdhiveMessages();loadFollowEvents();};
+    $('followLogRefresh').onclick=()=>{loadFollowEvents();if($('hdhiveMessageInbox').open){hdhiveMessagesLoaded=false;loadHdhiveMessages();}};
+    $('hdhiveMessageInbox').ontoggle=()=>{if($('hdhiveMessageInbox').open&&!hdhiveMessagesLoaded)loadHdhiveMessages();};
     $('refreshHealth').onclick=loadHealth;
     $('followLogStage').onchange=loadFollowEvents;
     $('followLogStatus').onchange=loadFollowEvents;

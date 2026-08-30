@@ -1510,8 +1510,8 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             ).fetchone()[0]
             follow_id = connection.execute(
                 "INSERT INTO tv_follows("
-                "user_id, tmdb_id, title, created_at, updated_at"
-                ") VALUES(?, 223911, '仙逆', ?, ?)",
+                "user_id, tmdb_id, title, poster_path, created_at, updated_at"
+                ") VALUES(?, 223911, '仙逆', '/xiani.jpg', ?, ?)",
                 (user_id, app.now_iso(), app.now_iso()),
             ).lastrowid
         app.log_hdhive_follow_event(
@@ -1524,6 +1524,8 @@ class HDHiveFollowRouteTests(unittest.TestCase):
 
         self.assertEqual(len(result["events"]), 1)
         self.assertEqual(result["events"][0]["title"], "仙逆")
+        self.assertEqual(result["events"][0]["poster_path"], "/xiani.jpg")
+        self.assertIn("/api/tmdb/image/w342/xiani.jpg", result["events"][0]["poster_url"])
         self.assertEqual(result["events"][0]["resource_status"], "ongoing")
         self.assertEqual(result["events"][0]["detail"]["resource_count"], 8)
         self.assertEqual(result["summary"]["success"], 1)

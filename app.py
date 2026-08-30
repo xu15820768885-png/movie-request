@@ -1327,12 +1327,18 @@ def p115_offline_snapshot(client: Any) -> set[tuple[str, str, str]]:
     }
 
 
-def wait_for_p115_change(snapshot: Any, before: set[Any]) -> bool:
-    for _ in range(4):
+def wait_for_p115_change(
+    snapshot: Any,
+    before: set[Any],
+    attempts: int = 10,
+    interval_seconds: float = 1.5,
+) -> bool:
+    """Allow for 115's eventual consistency before deciding nothing changed."""
+    for _ in range(max(1, int(attempts))):
         after = snapshot()
         if after - before:
             return True
-        time.sleep(0.5)
+        time.sleep(max(0.0, float(interval_seconds)))
     return False
 
 
@@ -4489,7 +4495,7 @@ def complete_workflow_jobs_from_library(
         rows = connection.execute(
             f"SELECT * FROM media_workflow_jobs WHERE destination = ? "
             f"AND tmdb_id IN ({marks}) AND state IN ("
-            f"'submitted', 'transferred', 'organizing', 'waiting_library')",
+            f"'submitted', 'transferred', 'organizing', 'waiting_library', 'failed')",
             (current, *sorted(library_tmdb_ids)),
         ).fetchall()
     completed = 0
@@ -4497,11 +4503,42 @@ def complete_workflow_jobs_from_library(
     for row in rows:
         episodes = episode_numbers_from_json(row["episode_numbers_json"])
         if str(row["media_type"] or "") == "tv":
+            season_number = int(row["season_number"] or 0)
+            if not episodes:
+                with db() as connection:
+                    transfer_rows = connection.execute(
+                        "SELECT season_number, episode_number FROM resource_transfer_log "
+                        "WHERE destination = ? AND user_id = ? AND tmdb_id = ? "
+                        "AND source = ? AND resource_key = ? "
+                        "AND status IN ('submitted', 'success') AND episode_number > 0 "
+                        "ORDER BY id",
+                        (
+                            current,
+                            int(row["user_id"]),
+                            int(row["tmdb_id"]),
+                            str(row["source"] or ""),
+                            str(row["resource_key"] or ""),
+                        ),
+                    ).fetchall()
+                recovered_seasons = {
+                    int(item["season_number"] or 0) for item in transfer_rows
+                    if int(item["season_number"] or 0) > 0
+                }
+                recovered_episodes = {
+                    int(item["episode_number"] or 0) for item in transfer_rows
+                    if int(item["episode_number"] or 0) > 0
+                }
+                if recovered_episodes and len(recovered_seasons) == 1:
+                    season_number = next(iter(recovered_seasons))
+                    episodes = sorted(recovered_episodes)
+                    update_workflow_job_episodes(
+                        int(row["id"]), season_number, episodes
+                    )
             # A series-level TMDB match only proves that the show exists in
             # Emby. It does not prove an unknown episode/package was ingested.
             if not episodes:
                 continue
-            if int(row["season_number"] or 0) <= 0:
+            if season_number <= 0:
                 continue
             tmdb_id = int(row["tmdb_id"])
             if tmdb_id not in progress_cache:
@@ -4514,7 +4551,7 @@ def complete_workflow_jobs_from_library(
             by_season = progress_cache[tmdb_id].get("emby_episode_numbers") or {}
             present = {
                 int(value)
-                for value in by_season.get(str(int(row["season_number"] or 1)), [])
+                for value in by_season.get(str(season_number), [])
                 if int(value) > 0
             }
             if not set(episodes).issubset(present):
@@ -6307,14 +6344,41 @@ def auto_wash_hdhive_follow(
             if not wait_for_p115_change(
                 lambda: p115_folder_snapshot(client, target_cid), before_files
             ):
-                fail_workflow_job(job_id, "115目标目录未发生变化", retry_seconds=900)
                 log_hdhive_follow_event(
-                    "transfer", "failed",
-                    f"115已受理第{selected_label}集，但未确认目标目录发生变化",
+                    "transfer", "running",
+                    f"115首次受理后目录未变化，正在重新提交第{selected_label}集",
                     follow=follow, cycle_id=cycle_id,
-                    detail={"resource_slug": slug},
+                    detail={
+                        "resource_slug": slug,
+                        "episodes": sorted(selected_episodes),
+                        "confirmation_retry": True,
+                    },
                 )
-                continue
+                received = p115_call(
+                    "重新接收115分享失败",
+                    client.share_receive,
+                    {"file_id": ",".join(selected_ids), "cid": target_cid},
+                    share_url=share_url,
+                )
+                changed = response_ok(received) and wait_for_p115_change(
+                    lambda: p115_folder_snapshot(client, target_cid), before_files
+                )
+                if not changed:
+                    failure = (
+                        "115两次受理后目标目录仍没有新增文件；"
+                        "已安排15分钟后重新处理"
+                    )
+                    fail_workflow_job(job_id, failure, retry_seconds=900)
+                    log_hdhive_follow_event(
+                        "transfer", "failed", failure,
+                        follow=follow, cycle_id=cycle_id,
+                        detail={
+                            "resource_slug": slug,
+                            "episodes": sorted(selected_episodes),
+                            "confirmation_attempts": 2,
+                        },
+                    )
+                    continue
         except HTTPException as error:
             fail_workflow_job(job_id, error.detail, retry_seconds=900)
             log_hdhive_follow_event(
@@ -8170,8 +8234,14 @@ def hdhive_follow_events(
     safe_limit = max(20, min(500, int(limit or 200)))
     with db() as connection:
         rows = connection.execute(
-            "SELECT e.*, u.display_name FROM hdhive_follow_events e "
+            "SELECT e.*, u.display_name, "
+            "COALESCE(NULLIF(f.poster_path, ''), ("
+            "SELECT NULLIF(r.poster_path, '') FROM movie_requests r "
+            "WHERE r.tmdb_id = e.tmdb_id AND r.poster_path != '' "
+            "ORDER BY r.id DESC LIMIT 1"
+            "), '') AS poster_path FROM hdhive_follow_events e "
             "LEFT JOIN users u ON u.id = e.user_id "
+            "LEFT JOIN tv_follows f ON f.id = e.follow_id "
             f"{where} ORDER BY e.id DESC LIMIT ?",
             (*values, safe_limit),
         ).fetchall()
@@ -8195,6 +8265,8 @@ def hdhive_follow_events(
                 "display_name": row["display_name"] or "",
                 "tmdb_id": int(row["tmdb_id"] or 0),
                 "title": row["title"],
+                "poster_path": str(row["poster_path"] or ""),
+                "poster_url": tmdb_image_proxy_url(row["poster_path"], "w342"),
                 "stage": row["stage"],
                 "status": row["status"],
                 "message": row["message"],

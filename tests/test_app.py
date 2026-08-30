@@ -2461,6 +2461,50 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(completed["state"], "ingested")
         self.assertTrue(completed["completed_at"])
 
+    def test_emby_reconciles_failed_job_and_recovers_missing_episode_metadata(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-recovered-156",
+            tmdb_id=223911,
+            media_type="tv",
+            title="仙逆",
+        )
+        app.fail_workflow_job(int(job["id"]), "115目录当时未变化", retry_seconds=900)
+        app.record_transfer(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-recovered-156",
+            tmdb_id=223911,
+            transfer_scope="manual",
+            status="submitted",
+            detail="115已受理",
+            season_number=1,
+            episode_numbers=[156],
+        )
+
+        with patch.object(
+            app,
+            "destination_episode_progress",
+            return_value={"emby_episode_numbers": {"1": list(range(1, 157))}},
+        ):
+            self.assertEqual(
+                app.complete_workflow_jobs_from_library("p115", {223911}), 1
+            )
+
+        with app.db() as connection:
+            completed = connection.execute(
+                "SELECT state, season_number, episode_numbers_json, last_error "
+                "FROM media_workflow_jobs WHERE id = ?",
+                (job["id"],),
+            ).fetchone()
+        self.assertEqual(completed["state"], "ingested")
+        self.assertEqual(completed["season_number"], 1)
+        self.assertEqual(app.episode_numbers_from_json(completed["episode_numbers_json"]), [156])
+        self.assertEqual(completed["last_error"], "")
+
     def test_emby_library_monitor_baselines_then_notifies_new_media(self):
         baseline = [
             {
