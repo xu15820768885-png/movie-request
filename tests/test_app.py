@@ -77,6 +77,66 @@ class MovieRequestTests(unittest.TestCase):
         self.assertTrue(app.verify_password("hello123", encoded))
         self.assertFalse(app.verify_password("wrong123", encoded))
 
+    def test_ed2k_expected_file_extracts_size_and_episode(self):
+        files = app.offline_expected_files([
+            "ed2k://|file|仙逆.S01E156.2160p.mkv|123456789|ABCDEF|/"
+        ])
+        self.assertEqual(files[0]["name"], "仙逆.S01E156.2160p.mkv")
+        self.assertEqual(files[0]["size"], 123456789)
+        self.assertEqual(files[0]["season_number"], 1)
+        self.assertEqual(files[0]["episode_numbers"], [156])
+
+    def test_p123_delivery_mode_and_staging_folder_are_saved(self):
+        asyncio.run(app.update_settings(FakeRequest({
+            "p123_delivery_mode": "p115",
+            "p123_staging_cid": "7788",
+            "p123_staging_name": "CD2中转",
+        }), self.token))
+        settings = app.get_settings(self.token)
+        self.assertEqual(settings["p123_delivery_mode"], "p115")
+        self.assertEqual(settings["p123_staging_cid"], "7788")
+        self.assertEqual(settings["p123_staging_name"], "CD2中转")
+
+    def test_offline_monitor_completes_only_after_expected_file_lands(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'admin'"
+            ).fetchone()[0]
+        job = app.begin_workflow_job(
+            user_id=user_id, destination="p115", source="hdhive",
+            resource_key="ed2k-156", tmdb_id=223911, media_type="tv",
+            title="仙逆", season_number=1, episode_numbers=[156], scope="manual",
+        )
+        link = "ed2k://|file|仙逆.S01E156.mkv|1234|ABCDEF|/"
+        app.record_transfer(
+            user_id=user_id, source="hdhive", resource_key="ed2k-156",
+            tmdb_id=223911, transfer_scope="manual", status="submitted",
+            detail="已提交", season_number=1, episode_numbers=[156],
+        )
+        app.register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]), user_id=user_id, follow_id=None,
+            destination="p115", source="hdhive", resource_key="ed2k-156",
+            tmdb_id=223911, media_type="tv", season_number=1,
+            episode_numbers=[156], title="仙逆", target_cid="99", links=[link],
+        )
+        with patch.object(app, "p115_client", return_value=object()):
+            with patch.object(
+                app, "p115_folder_snapshot",
+                return_value={("fid", "仙逆.S01E156.mkv", "1234")},
+            ):
+                result = app.p115_offline_monitor_once()
+        self.assertEqual(result["completed"], 1)
+        with app.db() as connection:
+            monitor = connection.execute(
+                "SELECT status FROM p115_offline_monitors WHERE workflow_job_id = ?",
+                (int(job["id"]),),
+            ).fetchone()
+            workflow = connection.execute(
+                "SELECT state FROM media_workflow_jobs WHERE id = ?", (int(job["id"]),)
+            ).fetchone()
+        self.assertEqual(monitor["status"], "completed")
+        self.assertEqual(workflow["state"], "waiting_library")
+
     def test_activity_separates_processing_and_failed_jobs_with_details(self):
         with app.db() as connection:
             user_id = int(

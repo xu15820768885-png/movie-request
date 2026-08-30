@@ -576,6 +576,30 @@ def init_db() -> None:
                 ON media_workflow_jobs(state, next_retry_at, updated_at);
             CREATE INDEX IF NOT EXISTS media_workflow_job_follow_idx
                 ON media_workflow_jobs(follow_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS p115_offline_monitors (
+                workflow_job_id INTEGER PRIMARY KEY
+                    REFERENCES media_workflow_jobs(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                follow_id INTEGER REFERENCES tv_follows(id) ON DELETE SET NULL,
+                destination TEXT NOT NULL DEFAULT 'p115',
+                source TEXT NOT NULL,
+                resource_key TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                media_type TEXT NOT NULL DEFAULT '',
+                season_number INTEGER NOT NULL DEFAULT 0,
+                episode_numbers_json TEXT NOT NULL DEFAULT '[]',
+                title TEXT NOT NULL DEFAULT '',
+                target_cid TEXT NOT NULL DEFAULT '0',
+                links_json TEXT NOT NULL DEFAULT '[]',
+                expected_files_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS p115_offline_monitor_status_idx
+                ON p115_offline_monitors(status, updated_at);
             CREATE TABLE IF NOT EXISTS notification_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 dedupe_key TEXT NOT NULL DEFAULT '',
@@ -2330,6 +2354,138 @@ def select_missing_episode_transfer_links(
     return selected, missing
 
 
+def offline_expected_files(
+    links: Iterable[str], fallback_season: int = 1
+) -> list[dict[str, Any]]:
+    """Extract stable filename/size evidence from ED2K URLs."""
+    expected: list[dict[str, Any]] = []
+    for link in links:
+        value = unquote(str(link or "").strip())
+        if not value.lower().startswith("ed2k://|file|"):
+            continue
+        parts = value.split("|")
+        if len(parts) < 5:
+            continue
+        name = parts[2].strip()
+        try:
+            size = max(0, int(parts[3]))
+        except (TypeError, ValueError):
+            size = 0
+        parsed = parse_episode_spec(name)
+        seasons = [
+            int(item) for item in parsed.get("season_numbers") or [] if int(item) > 0
+        ]
+        episodes = [
+            int(item) for item in parsed.get("episode_numbers") or [] if int(item) > 0
+        ]
+        expected.append({
+            "name": name,
+            "size": size,
+            "season_number": seasons[0] if len(set(seasons)) == 1 else fallback_season,
+            "episode_numbers": sorted(set(episodes)),
+        })
+    return expected
+
+
+def register_p115_offline_monitor(
+    *,
+    workflow_job_id: int,
+    user_id: int,
+    follow_id: Optional[int],
+    destination: str,
+    source: str,
+    resource_key: str,
+    tmdb_id: int,
+    media_type: str,
+    season_number: int,
+    episode_numbers: Iterable[int],
+    title: str,
+    target_cid: str,
+    links: Iterable[str],
+) -> None:
+    link_list = [str(link) for link in links if str(link).strip()]
+    expected = offline_expected_files(link_list, max(1, int(season_number or 1)))
+    timestamp = now_iso()
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO p115_offline_monitors("
+            "workflow_job_id, user_id, follow_id, destination, source, resource_key, "
+            "tmdb_id, media_type, season_number, episode_numbers_json, title, "
+            "target_cid, links_json, expected_files_json, status, created_at, updated_at"
+            ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) "
+            "ON CONFLICT(workflow_job_id) DO UPDATE SET follow_id = excluded.follow_id, "
+            "target_cid = excluded.target_cid, links_json = excluded.links_json, "
+            "expected_files_json = excluded.expected_files_json, status = 'pending', "
+            "last_error = '', updated_at = excluded.updated_at",
+            (
+                int(workflow_job_id), int(user_id), follow_id,
+                storage_destination(destination), source, resource_key, int(tmdb_id or 0),
+                media_type, int(season_number or 0),
+                episode_numbers_json(episode_numbers), title, str(target_cid or "0"),
+                json.dumps(link_list, ensure_ascii=False),
+                json.dumps(expected, ensure_ascii=False), timestamp, timestamp,
+            ),
+        )
+    if follow_id and expected:
+        seed_offline_wash_baseline(int(follow_id), expected)
+
+
+def seed_offline_wash_baseline(
+    follow_id: int, expected_files: Iterable[dict[str, Any]]
+) -> None:
+    config = hdhive_wash_config()
+    timestamp = datetime.now(timezone.utc)
+    closes_at = (timestamp + timedelta(hours=config["window_hours"])).isoformat()
+    with db() as connection:
+        for item in expected_files:
+            file_name = str(item.get("name") or "")
+            file_size = max(0, int(item.get("size") or 0))
+            season = max(1, int(item.get("season_number") or 1))
+            for episode in item.get("episode_numbers") or []:
+                episode = int(episode or 0)
+                if episode <= 0:
+                    continue
+                connection.execute(
+                    "INSERT INTO hdhive_wash_episodes("
+                    "follow_id, season_number, episode_number, opened_at, closes_at, "
+                    "last_file_name, last_file_size, last_message, updated_at"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(follow_id, season_number, episode_number) DO UPDATE SET "
+                    "last_file_name = CASE WHEN excluded.last_file_size >= last_file_size "
+                    "THEN excluded.last_file_name ELSE last_file_name END, "
+                    "last_file_size = MAX(last_file_size, excluded.last_file_size), "
+                    "last_message = excluded.last_message, updated_at = excluded.updated_at",
+                    (
+                        int(follow_id), season, episode, timestamp.isoformat(), closes_at,
+                        file_name, file_size, "已用ED2K版本建立洗版大小基线",
+                        timestamp.isoformat(),
+                    ),
+                )
+
+
+def attach_pending_offline_monitors_to_follow(
+    follow_id: int, user_id: int, tmdb_id: int
+) -> None:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT workflow_job_id, expected_files_json FROM p115_offline_monitors "
+            "WHERE user_id = ? AND tmdb_id = ? AND status IN ('pending', 'completed')",
+            (int(user_id), int(tmdb_id)),
+        ).fetchall()
+        connection.execute(
+            "UPDATE p115_offline_monitors SET follow_id = ?, updated_at = ? "
+            "WHERE user_id = ? AND tmdb_id = ? AND status IN ('pending', 'completed')",
+            (int(follow_id), now_iso(), int(user_id), int(tmdb_id)),
+        )
+    for row in rows:
+        try:
+            expected = json.loads(row["expected_files_json"] or "[]")
+        except (TypeError, ValueError):
+            expected = []
+        if isinstance(expected, list):
+            seed_offline_wash_baseline(follow_id, expected)
+
+
 def compact_episode_numbers(numbers: set[int]) -> str:
     ordered = sorted(number for number in numbers if number > 0)
     if not ordered:
@@ -3605,6 +3761,25 @@ def emby_api_url(base_url: str, path: str) -> str:
 
 def storage_destination(value: Any) -> str:
     return "p123" if str(value or "") == "p123" else "p115"
+
+
+def p123_delivery_settings() -> dict[str, str]:
+    with db() as connection:
+        mode = setting(connection, "p123_delivery_mode") or "telegram"
+        if mode not in ("telegram", "p115"):
+            mode = "telegram"
+        return {
+            "mode": mode,
+            "target_cid": setting(connection, "p123_staging_cid") or "0",
+            "target_name": setting(connection, "p123_staging_name") or "根目录",
+        }
+
+
+def uses_p115_delivery(user: dict[str, Any]) -> bool:
+    return (
+        storage_destination(user.get("storage_destination")) == "p115"
+        or p123_delivery_settings()["mode"] == "p115"
+    )
 
 
 def emby_credentials(destination: str = "p115") -> tuple[str, str]:
@@ -6141,6 +6316,10 @@ def hdhive_wash_candidate_allowed(
             )
             process_count = 0
         else:
+            baseline_size = int(row["last_file_size"] or 0)
+            candidate_size = int(candidate.get("file_size") or 0)
+            if baseline_size > 0 and candidate_size > 0 and candidate_size <= baseline_size:
+                return False
             if row["locked_at"]:
                 return False
             closes_at_value = datetime.fromisoformat(str(row["closes_at"]))
@@ -7388,6 +7567,105 @@ def hdhive_follow_loop() -> None:
         time.sleep(60)
 
 
+def p115_offline_monitor_once() -> dict[str, int]:
+    with db() as connection:
+        monitors = connection.execute(
+            "SELECT * FROM p115_offline_monitors WHERE status = 'pending' "
+            "ORDER BY updated_at LIMIT 50"
+        ).fetchall()
+    if not monitors:
+        return {"checked": 0, "completed": 0, "failed": 0}
+    client = p115_client()
+    checked = completed = failed = 0
+    snapshots: dict[str, set[tuple[str, str, str]]] = {}
+    for monitor in monitors:
+        checked += 1
+        monitor_id = int(monitor["workflow_job_id"])
+        try:
+            expected = json.loads(monitor["expected_files_json"] or "[]")
+        except (TypeError, ValueError):
+            expected = []
+        if not isinstance(expected, list) or not expected:
+            with db() as connection:
+                connection.execute(
+                    "UPDATE p115_offline_monitors SET last_error = ?, updated_at = ? "
+                    "WHERE workflow_job_id = ?",
+                    ("离线链接没有可核验的ED2K文件名，继续等待入库确认", now_iso(), monitor_id),
+                )
+            continue
+        target_cid = str(monitor["target_cid"] or "0")
+        try:
+            if target_cid not in snapshots:
+                snapshots[target_cid] = p115_folder_snapshot(client, target_cid)
+            snapshot = snapshots[target_cid]
+            files = {name: int(size or 0) for _fid, name, size in snapshot if name}
+            landed = all(
+                str(item.get("name") or "") in files
+                and (
+                    int(item.get("size") or 0) <= 0
+                    or files[str(item.get("name") or "")] >= int(item.get("size") or 0)
+                )
+                for item in expected
+            )
+            if not landed:
+                with db() as connection:
+                    connection.execute(
+                        "UPDATE p115_offline_monitors SET last_error = '', updated_at = ? "
+                        "WHERE workflow_job_id = ?",
+                        (now_iso(), monitor_id),
+                    )
+                continue
+            timestamp = now_iso()
+            detail = "已确认ED2K文件写入115目标目录"
+            with db() as connection:
+                connection.execute(
+                    "UPDATE p115_offline_monitors SET status = 'completed', "
+                    "last_error = '', completed_at = ?, updated_at = ? "
+                    "WHERE workflow_job_id = ?",
+                    (timestamp, timestamp, monitor_id),
+                )
+                connection.execute(
+                    "UPDATE resource_transfer_log SET status = 'success', detail = ?, "
+                    "updated_at = ? WHERE user_id = ? AND destination = ? AND source = ? "
+                    "AND resource_key = ? AND transfer_scope = 'manual' "
+                    "AND status = 'submitted'",
+                    (
+                        detail, timestamp, int(monitor["user_id"]),
+                        str(monitor["destination"]), str(monitor["source"]),
+                        str(monitor["resource_key"]),
+                    ),
+                )
+            update_workflow_job(monitor_id, "waiting_library", detail)
+            if monitor["follow_id"]:
+                seed_offline_wash_baseline(int(monitor["follow_id"]), expected)
+            log_hdhive_follow_event(
+                "transfer", "success", detail,
+                follow_id=monitor["follow_id"], user_id=int(monitor["user_id"]),
+                tmdb_id=int(monitor["tmdb_id"] or 0), title=str(monitor["title"] or ""),
+                detail={"target_cid": target_cid, "workflow_job_id": monitor_id},
+            )
+            completed += 1
+        except Exception as error:
+            with db() as connection:
+                connection.execute(
+                    "UPDATE p115_offline_monitors SET last_error = ?, updated_at = ? "
+                    "WHERE workflow_job_id = ?",
+                    (str(error)[:500], now_iso(), monitor_id),
+                )
+            failed += 1
+    return {"checked": checked, "completed": completed, "failed": failed}
+
+
+def p115_offline_monitor_loop() -> None:
+    while True:
+        try:
+            result = p115_offline_monitor_once()
+            update_worker_health("p115_offline_monitor", "ok", detail=result)
+        except Exception as error:
+            update_worker_health("p115_offline_monitor", "error", error=str(error))
+        time.sleep(60)
+
+
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
@@ -7406,6 +7684,11 @@ def startup() -> None:
     ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
+    Thread(
+        target=p115_offline_monitor_loop,
+        name="p115-offline-monitor",
+        daemon=True,
+    ).start()
 
 
 @APP.get("/")
@@ -9261,7 +9544,10 @@ async def create_follow(
                 )
             )
             if user["storage_destination"] == "p123"
-            else has_manual_transfer(tmdb_id, destination="p115")
+            else (
+                has_manual_transfer(tmdb_id, int(user["id"]), "p115")
+                or has_initial_media_submission(tmdb_id, int(user["id"]), "p115")
+            )
         )
     ):
         raise HTTPException(409, "请先手动转存初始版本，再开启影巢追更")
@@ -9338,6 +9624,9 @@ async def create_follow(
             "WHERE f.user_id = ? AND f.tmdb_id = ?",
             (user["id"], tmdb_id),
         ).fetchone()
+    attach_pending_offline_monitors_to_follow(
+        int(row["id"]), int(user["id"]), tmdb_id
+    )
     bind_error = ""
     if subscription_slug:
         try:
@@ -9721,7 +10010,7 @@ async def hdhive_transfer(
     selected_links = links
     episode_links_filtered = False
     if (
-        storage_destination(str(user["storage_destination"])) == "p115"
+        uses_p115_delivery(dict(user))
         and not is_115_share_url(share_url)
         and media_type == "tv"
         and wanted_episodes
@@ -9777,7 +10066,8 @@ async def hdhive_transfer(
         detail=event_detail,
     )
 
-    if user.get("storage_destination") == "p123":
+    delivery = p123_delivery_settings()
+    if user.get("storage_destination") == "p123" and delivery["mode"] == "telegram":
         result = await deliver_to_pansave(
             user=user,
             share_url=share_url,
@@ -9801,7 +10091,11 @@ async def hdhive_transfer(
 
     client = await asyncio.to_thread(p115_client)
     with db() as connection:
-        target_cid = setting(connection, "p115_target_cid") or "0"
+        target_cid = (
+            delivery["target_cid"]
+            if user.get("storage_destination") == "p123"
+            else setting(connection, "p115_target_cid") or "0"
+        )
         offline_retry_cleanup = (
             setting(connection, "p115_offline_retry_cleanup") != "0"
         )
@@ -9894,7 +10188,11 @@ async def hdhive_transfer(
         message = (
             "已保留原文件并重新加入115离线下载"
             if retried_completed_task
-            else "已加入115离线下载，完成后会出现在所选目录"
+            else (
+                "已加入115离线下载，完成后由CloudDrive2同步到123"
+                if user.get("storage_destination") == "p123"
+                else "已加入115离线下载，完成后会出现在所选目录"
+            )
         )
         if episode_links_filtered and selected_episode_numbers:
             message += (
@@ -9902,6 +10200,16 @@ async def hdhive_transfer(
                 f"{compact_episode_numbers(set(selected_episode_numbers))}集"
             )
         workflow_state = "submitted"
+        register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]), user_id=int(user["id"]),
+            follow_id=event_follow_id,
+            destination=str(user["storage_destination"]), source="hdhive",
+            resource_key=slug, tmdb_id=tmdb_id, media_type=media_type,
+            season_number=int(title_spec["season_number"]),
+            episode_numbers=selected_episode_numbers,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            target_cid=str(target_cid), links=selected_links,
+        )
     else:
         before_files = await asyncio.to_thread(
             p115_folder_snapshot,
@@ -10023,7 +10331,11 @@ async def hdhive_transfer(
                 set(selected_episode_numbers),
             )
         else:
-            message = "已转存"
+            message = (
+                "已转存到115中转目录，等待CloudDrive2同步到123"
+                if user.get("storage_destination") == "p123"
+                else "已转存"
+            )
         workflow_state = "waiting_library"
 
     record_transfer(
@@ -10155,7 +10467,8 @@ async def dian_transfer(
         title=str(payload.get("title") or payload.get("resource_title") or ""),
         detail=event_detail,
     )
-    if user.get("storage_destination") == "p123":
+    delivery = p123_delivery_settings()
+    if user.get("storage_destination") == "p123" and delivery["mode"] == "telegram":
         result = await deliver_to_pansave(
             user=user,
             share_url=share_url,
@@ -10179,7 +10492,11 @@ async def dian_transfer(
 
     client = await asyncio.to_thread(p115_client)
     with db() as connection:
-        target_cid = setting(connection, "p115_target_cid") or "0"
+        target_cid = (
+            delivery["target_cid"]
+            if user.get("storage_destination") == "p123"
+            else setting(connection, "p115_target_cid") or "0"
+        )
     if not is_115_share_url(share_url):
         before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
         if len(links) == 1:
@@ -10230,6 +10547,16 @@ async def dian_transfer(
         update_workflow_job(
             int(job["id"]), "submitted", f"已创建{len(links)}个115离线任务"
         )
+        register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]), user_id=int(user["id"]),
+            follow_id=event_follow_id,
+            destination=str(user["storage_destination"]), source="dian",
+            resource_key=resource_key, tmdb_id=tmdb_id, media_type=media_type,
+            season_number=int(title_spec["season_number"]),
+            episode_numbers=selected_episode_numbers,
+            title=str(payload.get("title") or payload.get("resource_title") or ""),
+            target_cid=str(target_cid), links=links,
+        )
         log_hdhive_follow_event(
             "transfer", "success", f"癫影资源已创建{len(links)}个115离线任务",
             follow_id=event_follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
@@ -10239,7 +10566,11 @@ async def dian_transfer(
         return {
             "ok": True,
             "mode": "offline",
-            "message": f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录",
+            "message": (
+                f"已加入115离线下载（{len(links)}个任务），完成后由CloudDrive2同步到123"
+                if user.get("storage_destination") == "p123"
+                else f"已加入115离线下载（{len(links)}个任务），完成后会出现在所选目录"
+            ),
             "job_id": int(job["id"]),
             "workflow_state": "submitted",
         }
@@ -10292,7 +10623,11 @@ async def dian_transfer(
         tmdb_id=tmdb_id,
         transfer_scope=transfer_scope,
         status="success",
-        detail="已转存",
+        detail=(
+            "已转存到115中转目录，等待CloudDrive2同步到123"
+            if user.get("storage_destination") == "p123"
+            else "已转存"
+        ),
         season_number=int(title_spec["season_number"]),
         episode_numbers=sorted(set(selected_episode_numbers)),
     )
@@ -10306,7 +10641,11 @@ async def dian_transfer(
     return {
         "ok": True,
         "mode": "share",
-        "message": "已转存",
+        "message": (
+            "已转存到115中转目录，等待CloudDrive2同步到123"
+            if user.get("storage_destination") == "p123"
+            else "已转存"
+        ),
         "job_id": int(job["id"]),
         "workflow_state": "waiting_library",
     }
@@ -10575,6 +10914,9 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
+        p123_delivery_mode = setting(connection, "p123_delivery_mode") or "telegram"
+        p123_staging_cid = setting(connection, "p123_staging_cid") or "0"
+        p123_staging_name = setting(connection, "p123_staging_name") or "根目录"
         pansave_api_id = setting(connection, "pansave_telegram_api_id")
         pansave_api_hash_cipher = setting(
             connection, "pansave_telegram_api_hash_cipher"
@@ -10643,6 +10985,9 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "p115_configured": p115_cookie_path().exists(),
         "p115_target_cid": p115_target_cid,
         "p115_target_name": p115_target_name,
+        "p123_delivery_mode": p123_delivery_mode,
+        "p123_staging_cid": p123_staging_cid,
+        "p123_staging_name": p123_staging_name,
         "pansave_configured": bool(
             pansave_api_id and pansave_api_hash_cipher and pansave_phone
         ),
@@ -10685,6 +11030,8 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             raise HTTPException(400, "签到时间格式无效") from error
     if payload.get("p115_app") and payload["p115_app"] not in P115_APPS:
         raise HTTPException(400, "不支持这个115设备身份")
+    if payload.get("p123_delivery_mode") not in (None, "", "telegram", "p115"):
+        raise HTTPException(400, "123交付方式无效")
     if payload.get("wecom_agent_id"):
         try:
             if int(str(payload["wecom_agent_id"])) <= 0:
@@ -10702,6 +11049,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "p115_target_cid", "p115_target_name",
+            "p123_delivery_mode", "p123_staging_cid", "p123_staging_name",
             "wecom_corp_id", "wecom_agent_id",
             "wecom_secret", "wecom_to_user", "wecom_api_base",
             "wecom_admin_userid", "wecom_callback_token",

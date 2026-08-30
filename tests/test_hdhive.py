@@ -868,7 +868,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         }
         with app.db() as connection:
             user_id = connection.execute(
-                "SELECT id FROM users WHERE username = 'admin'"
+                "SELECT id FROM users WHERE username = 'member'"
             ).fetchone()[0]
         app.record_transfer(
             user_id=user_id,

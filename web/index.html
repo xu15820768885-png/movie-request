@@ -714,14 +714,25 @@
               <div id="folderPicker" class="folder-picker hidden"></div>
             </section>
             <form id="pansaveForm" class="panel stack storage-panel hidden" data-storage-content="pansave">
-              <div class="storage-panel-head"><h3>123 投递</h3><p>使用 Telegram 用户账号把解锁链接单向发送给123机器人。</p></div>
-              <div class="section-head" style="margin:0"><span>连接资料</span><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
-              <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label></div>
-              <div class="inline"><label>123 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label><label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890"></label></div>
-              <label>Telegram API Hash<input id="pansaveApiHash" autocomplete="off" placeholder="已保存值会直接显示"></label>
-              <div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div>
-              <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="one-time-code"></label></div>
-              <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
+              <div class="storage-panel-head"><h3>123 投递</h3><p>选择直接发给 Telegram 机器人，或先转存到115后由 CloudDrive2 同步到123。</p></div>
+              <label>交付方式<select id="p123DeliveryMode"><option value="telegram">发送给 Telegram 机器人</option><option value="p115">转存到115中转文件夹</option></select></label>
+              <div class="integration-actions"><button id="saveP123Delivery" class="btn btn-primary" type="button">保存交付方式</button></div>
+              <section id="p123StagingSettings" class="stack hidden">
+                <div class="integration-label">CloudDrive2 监听的115中转目录</div>
+                <div id="p123StagingPath" class="folder-path">115网盘 / 根目录</div>
+                <div class="integration-actions"><button id="p123FolderSelect" class="btn" type="button">选择115中转文件夹</button></div>
+                <div id="p123FolderPicker" class="folder-picker hidden"></div>
+                <div class="checkin-result">这里只负责把资源写入115；CloudDrive2 的115→123同步规则仍由你现有的 CD2 配置执行。</div>
+              </section>
+              <section id="p123TelegramSettings" class="stack">
+                <div class="section-head" style="margin:0"><span>Telegram 连接资料</span><button id="pansaveTest" class="btn btn-small" type="button">检查连接</button></div>
+                <div class="inline"><label>Telegram API ID<input id="pansaveApiId" inputmode="numeric" placeholder="在 my.telegram.org 获取"></label><label>Telegram 手机号<input id="pansavePhone" inputmode="tel" autocomplete="username" placeholder="例如：+8613800138000"></label></div>
+                <div class="inline"><label>123 机器人<input id="pansaveBotUsername" value="pansavenb_bot" placeholder="pansavenb_bot"></label><label>Telegram 代理（可选）<input id="pansaveProxy" placeholder="例如：http://192.168.31.129:7890"></label></div>
+                <label>Telegram API Hash<input id="pansaveApiHash" autocomplete="off" placeholder="已保存值会直接显示"></label>
+                <div class="integration-actions"><button class="btn btn-primary" type="submit">发送验证码</button></div>
+                <div id="pansaveVerifyPanel" class="inline hidden"><label>Telegram 验证码<input id="pansaveCode" inputmode="numeric" autocomplete="one-time-code"></label><label>两步验证密码（如已开启）<input id="pansavePassword" type="password" autocomplete="one-time-code"></label></div>
+                <div id="pansaveVerifyActions" class="integration-actions hidden"><button id="pansaveVerify" class="btn btn-primary" type="button">完成登录</button></div>
+              </section>
             </form>
           </div>
         </div>
@@ -1626,6 +1637,7 @@
         dian_base_url:'https://dian.example.com',dian_api_key:'preview_dian_api_key',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
         p115_target_cid:'123456',p115_target_name:'影视自动转存',
+        p123_delivery_mode:'telegram',p123_staging_cid:'223456',p123_staging_name:'CloudDrive2中转',
         pansave_configured:true,pansave_connected:true,pansave_telegram_api_id:'1234567',pansave_telegram_api_hash:'0123456789abcdef0123456789abcdef',pansave_telegram_phone:'+8613800138000',pansave_bot_username:'pansavenb_bot',pansave_telegram_proxy:'http://192.168.31.129:7890',
           p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
         };
@@ -1673,7 +1685,10 @@
       $('p115Status').textContent=settings.p115_logged_in?'已登录':settings.p115_configured?'登录已失效':'待扫码';
       $('p115LoginValue').textContent=settings.p115_logged_in?`${settings.p115_app_name||'115账号'} · 可用`:'尚未扫码或登录已失效';
       $('selectedFolderPath').textContent=settings.p115_target_name?`115网盘 / ${settings.p115_target_name}`:'尚未选择转存文件夹';
-      $('pansaveStatus').textContent=settings.pansave_connected?'已登录':settings.pansave_configured?'待验证码验证':'待配置';
+      $('p123DeliveryMode').value=settings.p123_delivery_mode||'telegram';
+      $('p123StagingPath').textContent=settings.p123_staging_name?`115网盘 / ${settings.p123_staging_name}`:'尚未选择115中转文件夹';
+      toggleP123DeliveryMode();
+      $('pansaveStatus').textContent=settings.p123_delivery_mode==='p115'?`115中转：${settings.p123_staging_name||'根目录'}`:settings.pansave_connected?'已登录':settings.pansave_configured?'待验证码验证':'待配置';
       $('pansaveApiId').value=settings.pansave_telegram_api_id||'';
       $('pansaveApiHash').value=settings.pansave_telegram_api_hash||'';
       $('pansavePhone').value=settings.pansave_telegram_phone||'';
@@ -1706,24 +1721,37 @@
       await Promise.all(['tmdb','hdhive','dian'].map(service=>testIntegration(service)));
       button.disabled=false;button.textContent='全部测速';
     }
-    function renderFolderPicker(items,cid='0',path='115网盘') {
-      const root=$('folderPicker');
+    function folderPickerIds(kind='p115') {
+      return kind==='p123'
+        ? {root:'p123FolderPicker',button:'p123FolderSelect',path:'p123StagingPath'}
+        : {root:'folderPicker',button:'folderSelectPreview',path:'selectedFolderPath'};
+    }
+    function renderFolderPicker(items,cid='0',path='115网盘',kind='p115') {
+      const ids=folderPickerIds(kind),root=$(ids.root);
       root.classList.remove('hidden');
       root.innerHTML=`<button class="folder-row selected" type="button" data-choose-cid="${escapeHtml(cid)}" data-choose-name="${escapeHtml(path.replace(/^115网盘\s*\/\s*/,'' )||'根目录')}"><span>✓ 使用当前目录：${escapeHtml(path)}</span></button>`+
         items.map(item=>`<button class="folder-row" type="button" data-open-cid="${escapeHtml(item.cid)}" data-open-name="${escapeHtml(item.name)}"><span>📁 ${escapeHtml(item.name)}</span><span>进入 ›</span></button>`).join('');
-      root.querySelectorAll('[data-open-cid]').forEach(button=>button.onclick=()=>loadFolders(button.dataset.openCid,`${path} / ${button.dataset.openName}`));
-      root.querySelectorAll('[data-choose-cid]').forEach(button=>button.onclick=()=>saveTargetFolder(button.dataset.chooseCid,button.dataset.chooseName,path));
-      $('folderSelectPreview').textContent='收起文件夹';
+      root.querySelectorAll('[data-open-cid]').forEach(button=>button.onclick=()=>loadFolders(button.dataset.openCid,`${path} / ${button.dataset.openName}`,kind));
+      root.querySelectorAll('[data-choose-cid]').forEach(button=>button.onclick=()=>saveTargetFolder(button.dataset.chooseCid,button.dataset.chooseName,path,kind));
+      $(ids.button).textContent='收起文件夹';
     }
-    async function loadFolders(cid='0',path='115网盘') {
-      if(preview)return renderFolderPicker([{cid:'1001',name:'我的接收'},{cid:'1002',name:'家庭影视'},{cid:'1003',name:'电影'}],cid,path);
-      $('folderPicker').classList.remove('hidden');$('folderPicker').innerHTML='<div class="muted" style="padding:12px">正在读取目录…</div>';
-      try {const result=await api(`/api/admin/p115/folders?cid=${encodeURIComponent(cid)}`);renderFolderPicker(result.folders||[],cid,path);}
-      catch(error){$('folderPicker').innerHTML=`<div class="muted" style="padding:12px">${escapeHtml(error.message)}</div>`;toast(error.message,true);}
+    async function loadFolders(cid='0',path='115网盘',kind='p115') {
+      const ids=folderPickerIds(kind),root=$(ids.root);
+      if(preview)return renderFolderPicker([{cid:'1001',name:'我的接收'},{cid:'1002',name:'家庭影视'},{cid:'1003',name:'电影'}],cid,path,kind);
+      root.classList.remove('hidden');root.innerHTML='<div class="muted" style="padding:12px">正在读取目录…</div>';
+      try {const result=await api(`/api/admin/p115/folders?cid=${encodeURIComponent(cid)}`);renderFolderPicker(result.folders||[],cid,path,kind);}
+      catch(error){root.innerHTML=`<div class="muted" style="padding:12px">${escapeHtml(error.message)}</div>`;toast(error.message,true);}
     }
-    async function saveTargetFolder(cid,name,path) {
-      if(!preview)await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p115_target_cid:String(cid),p115_target_name:name})});
-      $('selectedFolderPath').textContent=path;$('folderPicker').classList.add('hidden');$('folderSelectPreview').textContent='选择转存文件夹';toast(`已选择：${path}`);
+    async function saveTargetFolder(cid,name,path,kind='p115') {
+      const ids=folderPickerIds(kind);
+      const payload=kind==='p123'?{p123_staging_cid:String(cid),p123_staging_name:name}:{p115_target_cid:String(cid),p115_target_name:name};
+      if(!preview)await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify(payload)});
+      $(ids.path).textContent=path;$(ids.root).classList.add('hidden');$(ids.button).textContent=kind==='p123'?'选择115中转文件夹':'选择转存文件夹';toast(`已选择：${path}`);
+    }
+    function toggleP123DeliveryMode(){
+      const staging=$('p123DeliveryMode').value==='p115';
+      $('p123StagingSettings').classList.toggle('hidden',!staging);
+      $('p123TelegramSettings').classList.toggle('hidden',staging);
     }
     let qrPollTimer=null;
     async function startQrLogin() {
@@ -1831,6 +1859,8 @@
     $('pansaveForm').onsubmit=async event=>{event.preventDefault();if(preview){$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');return toast('预览模式：Telegram 验证码已发送');}try{const result=await api('/api/admin/pansave/login/start',{method:'POST',body:JSON.stringify({api_id:$('pansaveApiId').value,api_hash:$('pansaveApiHash').value,phone:$('pansavePhone').value,bot_username:$('pansaveBotUsername').value,proxy_url:$('pansaveProxy').value})});$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');toast(result.message);}catch(error){toast(error.message,true);}};
     $('pansaveVerify').onclick=async()=>{if(preview){$('pansaveStatus').textContent='已登录';return toast('预览模式：Telegram 用户账号已登录');}try{const result=await api('/api/admin/pansave/login/verify',{method:'POST',body:JSON.stringify({code:$('pansaveCode').value,password:$('pansavePassword').value})});$('pansaveCode').value='';$('pansavePassword').value='';$('pansaveVerifyPanel').classList.add('hidden');$('pansaveVerifyActions').classList.add('hidden');toast(result.message);loadIntegrations();}catch(error){toast(error.message,true);}};
     $('pansaveTest').onclick=async()=>{if(preview)return toast('Telegram 会话正常，已找到 @pansavenb_bot');try{const result=await api('/api/admin/pansave/test',{method:'POST'});toast(result.message);}catch(error){toast(error.message,true);}};
+    $('p123DeliveryMode').onchange=toggleP123DeliveryMode;
+    $('saveP123Delivery').onclick=async()=>{const mode=$('p123DeliveryMode').value;if(preview){toggleP123DeliveryMode();return toast('预览模式：123交付方式已保存');}try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({p123_delivery_mode:mode})});toast(mode==='p115'?'已改为115中转后由CloudDrive2同步':'已改为发送给Telegram机器人');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：影巢追更与洗版设置已保存');try{await api('/api/admin/hdhive/config',{method:'PATCH',body:JSON.stringify({client_id:$('hdhiveClientId').value,app_secret:$('hdhiveAppSecret').value,redirect_uri:$('hdhiveRedirectUri').value,proxy_url:$('hdhiveProxyUrl').value,scopes:$('hdhiveScopes').value,poll_enabled:$('hdhivePollEnabled').checked,poll_interval:Number($('hdhivePollInterval').value),auto_transfer:$('hdhiveAutoTransfer').checked,offline_retry_cleanup:$('hdhiveOfflineRetryCleanup').checked,wash_window_hours:Number($('hdhiveWashWindow').value),wash_after_emby:$('hdhiveWashAfterEmby').checked,reprocess_changed:$('hdhiveReprocessChanged').checked,max_episode_transfers:Number($('hdhiveMaxTransfers').value),lock_after_window:$('hdhiveLockAfterWindow').checked,signin_enabled:$('hdhiveSigninEnabled').checked,signin_time:$('hdhiveSigninTime').value,signin_mode:$('hdhiveSigninMode').value})});toast('影巢配置已加密保存');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('hdhiveAuthorize').onclick=async()=>{if(preview)return toast('审核通过并填写凭证后，这里会打开影巢授权页');try{const result=await api('/api/admin/hdhive/oauth/start',{method:'POST'});location.href=result.authorize_url;}catch(error){toast(error.message,true);}};
     $('hdhiveDisconnect').onclick=async()=>{if(!confirm('确定断开影巢 OAuth 授权吗？已有配置不会删除。'))return;if(preview)return toast('预览模式：已模拟断开授权');try{await api('/api/admin/hdhive/disconnect',{method:'POST'});toast('影巢授权已断开');loadIntegrations();}catch(error){toast(error.message,true);}};
@@ -1838,6 +1868,7 @@
     $('dianCheckinPreview').onclick=async()=>{if(preview){$('checkinResult').textContent='刚刚签到成功 · 运气签到';return toast('癫影签到成功');}try{const result=await api('/api/admin/dian-signin',{method:'POST',body:JSON.stringify({mode:$('dianSigninMode').value})});$('checkinResult').textContent='刚刚签到成功';toast(result.message||'癫影签到成功');loadIntegrations();}catch(error){toast(error.message,true);}};
     $('qrLoginPreview').onclick=startQrLogin;
     $('folderSelectPreview').onclick=()=>{$('folderPicker').classList.contains('hidden')?loadFolders():($('folderPicker').classList.add('hidden'),$('folderSelectPreview').textContent='选择转存文件夹');};
+    $('p123FolderSelect').onclick=()=>{$('p123FolderPicker').classList.contains('hidden')?loadFolders('0','115网盘','p123'):($('p123FolderPicker').classList.add('hidden'),$('p123FolderSelect').textContent='选择115中转文件夹');};
 
     async function init() {
       if(preview){
