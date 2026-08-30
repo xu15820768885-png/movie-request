@@ -3939,7 +3939,10 @@ def emby_series_episode_progress(
             emby_api_url(base_url, f"/Shows/{quote(series_id, safe='')}/Episodes"),
             headers=headers,
             params={
-                "Fields": "ParentIndexNumber,IndexNumber,IsMissing,LocationType",
+                "Fields": (
+                    "ParentIndexNumber,IndexNumber,IsMissing,LocationType,"
+                    "Path,MediaSources,Size"
+                ),
                 "IsMissing": "false",
                 "StartIndex": 0,
                 "Limit": 10000,
@@ -3950,6 +3953,7 @@ def emby_series_episode_progress(
         latest_season = 0
         latest_episode = 0
         episode_numbers_by_season: dict[int, set[int]] = {}
+        episode_files_by_season: dict[int, dict[int, dict[str, Any]]] = {}
         for episode in episodes_response.json().get("Items", []):
             if episode.get("IsMissing") is True or episode.get("LocationType") == "Virtual":
                 continue
@@ -3959,6 +3963,26 @@ def emby_series_episode_progress(
                 episode_numbers_by_season.setdefault(season_number, set()).add(
                     episode_number
                 )
+                media_sources = episode.get("MediaSources") or []
+                source_sizes = [
+                    int(source.get("Size") or 0)
+                    for source in media_sources
+                    if isinstance(source, dict)
+                ]
+                file_size = max([int(episode.get("Size") or 0), *source_sizes])
+                file_path = str(episode.get("Path") or "")
+                file_name = Path(file_path).name or str(episode.get("Name") or "")
+                if file_size > 0:
+                    current_file = episode_files_by_season.setdefault(
+                        season_number, {}
+                    ).get(episode_number)
+                    if not current_file or file_size > int(
+                        current_file.get("file_size") or 0
+                    ):
+                        episode_files_by_season[season_number][episode_number] = {
+                            "file_name": file_name,
+                            "file_size": file_size,
+                        }
             if episode_number > 0 and (season_number, episode_number) > (
                 latest_season,
                 latest_episode,
@@ -3980,12 +4004,71 @@ def emby_series_episode_progress(
                 str(season): sorted(numbers)
                 for season, numbers in sorted(episode_numbers_by_season.items())
             },
+            "emby_episode_files": {
+                str(season): {
+                    str(episode): value
+                    for episode, value in sorted(files.items())
+                }
+                for season, files in sorted(episode_files_by_season.items())
+            },
         }
         with CACHE_LOCK:
             EMBY_EPISODE_CACHE[cache_key] = (now + 300, dict(result))
         return result
     except (requests.RequestException, ValueError, TypeError):
         return {}
+
+
+def sync_wash_sizes_from_emby(
+    destination: str,
+    tmdb_id: int,
+    progress: dict[str, Any],
+) -> int:
+    """Use Emby's real episode file size as the current wash baseline."""
+
+    episode_files = progress.get("emby_episode_files") or {}
+    if not isinstance(episode_files, dict) or not episode_files:
+        return 0
+    timestamp = now_iso()
+    updated = 0
+    with db() as connection:
+        follow_rows = connection.execute(
+            "SELECT f.id FROM tv_follows f JOIN users u ON u.id = f.user_id "
+            "WHERE f.active = 1 AND f.tmdb_id = ? AND "
+            "CASE WHEN u.storage_destination = 'p123' THEN 'p123' ELSE 'p115' END = ?",
+            (int(tmdb_id), storage_destination(destination)),
+        ).fetchall()
+        for follow_row in follow_rows:
+            follow_id = int(follow_row["id"])
+            for season_value, episodes in episode_files.items():
+                if not isinstance(episodes, dict):
+                    continue
+                season = int(season_value or 0)
+                for episode_value, file_info in episodes.items():
+                    if not isinstance(file_info, dict):
+                        continue
+                    episode = int(episode_value or 0)
+                    file_size = int(file_info.get("file_size") or 0)
+                    file_name = str(file_info.get("file_name") or "")
+                    if season <= 0 or episode <= 0 or file_size <= 0:
+                        continue
+                    cursor = connection.execute(
+                        "UPDATE hdhive_wash_episodes SET last_file_name = ?, "
+                        "last_file_size = ?, last_message = 'Emby已确认当前入库版本', "
+                        "updated_at = ? WHERE follow_id = ? AND season_number = ? "
+                        "AND episode_number = ? AND ? >= last_file_size",
+                        (
+                            file_name,
+                            file_size,
+                            timestamp,
+                            follow_id,
+                            season,
+                            episode,
+                            file_size,
+                        ),
+                    )
+                    updated += int(cursor.rowcount or 0)
+    return updated
 
 
 def emby_library_tmdb_ids(
@@ -8644,17 +8727,25 @@ def media_details(
 def emby_episode_progress(
     tmdb_id: int,
     movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
 ) -> dict[str, Any]:
     user = require_user(movie_session)
     if tmdb_id <= 0:
         raise HTTPException(400, "剧集编号无效")
     destination = user["storage_destination"]
-    library_ids = destination_emby_ids(destination, prefer_cached=True)
+    library_ids = destination_emby_ids(
+        destination,
+        force=refresh,
+        prefer_cached=not refresh,
+    )
     progress = destination_episode_progress(
         destination,
         tmdb_id,
         known_in_library=tmdb_id in library_ids,
+        force=refresh,
     )
+    if progress:
+        sync_wash_sizes_from_emby(destination, tmdb_id, progress)
     return {
         "in_library": bool(progress.get("emby_latest_episode_number")),
         "emby_latest_season_number": 0,
@@ -9555,6 +9646,15 @@ def follows_emby_progress(
                     progress_by_id[follow_id] = future.result()
                 except Exception:
                     progress_by_id[follow_id] = {}
+
+        synced_resources: set[tuple[str, int]] = set()
+        for follow_id, destination, tmdb_id in jobs:
+            resource_key = (destination, tmdb_id)
+            progress = progress_by_id.get(follow_id, {})
+            if resource_key in synced_resources or not progress:
+                continue
+            sync_wash_sizes_from_emby(destination, tmdb_id, progress)
+            synced_resources.add(resource_key)
 
     refreshed_at = now_iso()
     items: list[dict[str, Any]] = []

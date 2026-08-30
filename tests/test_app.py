@@ -507,7 +507,12 @@ class MovieRequestTests(unittest.TestCase):
                 {
                     "Items": [
                         {"ParentIndexNumber": 1, "IndexNumber": 232},
-                        {"ParentIndexNumber": 1, "IndexNumber": 233},
+                        {
+                            "ParentIndexNumber": 1,
+                            "IndexNumber": 233,
+                            "Path": "/media/Swallowed.Star.S01E233.mkv",
+                            "MediaSources": [{"Size": 1_360_000_000}],
+                        },
                         {
                             "ParentIndexNumber": 1,
                             "IndexNumber": 234,
@@ -523,6 +528,13 @@ class MovieRequestTests(unittest.TestCase):
         self.assertEqual(result["emby_latest_episode_number"], 233)
         self.assertEqual(result["emby_episode_label"], "已入库至第233集")
         self.assertEqual(result["emby_episode_numbers"], {"1": [232, 233]})
+        self.assertEqual(
+            result["emby_episode_files"]["1"]["233"],
+            {
+                "file_name": "Swallowed.Star.S01E233.mkv",
+                "file_size": 1_360_000_000,
+            },
+        )
         self.assertEqual(get.call_count, 2)
         self.assertEqual(
             get.call_args_list[0].kwargs["params"]["AnyProviderIdEquals"],
@@ -600,6 +612,144 @@ class MovieRequestTests(unittest.TestCase):
             known_in_library=True,
             force=False,
         )
+
+    def test_emby_episode_progress_force_refreshes_and_syncs_wash_size(self):
+        progress_result = {
+            "emby_latest_season_number": 1,
+            "emby_latest_episode_number": 7,
+            "emby_episode_label": "已入库至第7集",
+            "emby_episode_files": {
+                "1": {"7": {"file_name": "S01E07.mkv", "file_size": 1_360_000_000}}
+            },
+        }
+        with patch.object(app, "destination_emby_ids", return_value={301418}) as library:
+            with patch.object(
+                app, "destination_episode_progress", return_value=progress_result
+            ) as progress:
+                with patch.object(app, "sync_wash_sizes_from_emby") as sync:
+                    result = app.emby_episode_progress(
+                        301418, self.token, refresh=True
+                    )
+
+        self.assertEqual(result["emby_latest_episode_number"], 7)
+        library.assert_called_once_with(
+            "p115", force=True, prefer_cached=False
+        )
+        progress.assert_called_once_with(
+            "p115", 301418, known_in_library=True, force=True
+        )
+        sync.assert_called_once_with("p115", 301418, progress_result)
+
+    def test_follow_list_refresh_also_syncs_wash_size(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+            follow_id = int(
+                connection.execute(
+                    "INSERT INTO tv_follows(user_id, tmdb_id, title, active, "
+                    "created_at, updated_at) VALUES(?, 301418, '现在不是外遇的问题', 1, ?, ?)",
+                    (user_id, timestamp, timestamp),
+                ).lastrowid
+            )
+        progress_result = {
+            "emby_latest_season_number": 1,
+            "emby_latest_episode_number": 7,
+            "emby_episode_files": {
+                "1": {"7": {"file_name": "S01E07.mkv", "file_size": 1_360_000_000}}
+            },
+        }
+        with patch.object(app, "destination_emby_ids", return_value={301418}):
+            with patch.object(
+                app, "destination_episode_progress", return_value=progress_result
+            ):
+                with patch.object(app, "sync_wash_sizes_from_emby") as sync:
+                    result = app.follows_emby_progress(self.token)
+
+        self.assertEqual(result["progress"][0]["follow_id"], follow_id)
+        self.assertEqual(result["progress"][0]["current_emby_episode"], 7)
+        sync.assert_called_once_with("p115", 301418, progress_result)
+
+    def test_emby_file_size_advances_wash_baseline(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            user_id = int(
+                connection.execute(
+                    "SELECT id FROM users WHERE username = 'admin'"
+                ).fetchone()[0]
+            )
+            follow_id = int(
+                connection.execute(
+                    "INSERT INTO tv_follows(user_id, tmdb_id, title, active, "
+                    "created_at, updated_at) VALUES(?, 301418, '现在不是外遇的问题', 1, ?, ?)",
+                    (user_id, timestamp, timestamp),
+                ).lastrowid
+            )
+            connection.execute(
+                "INSERT INTO hdhive_wash_episodes(follow_id, season_number, "
+                "episode_number, opened_at, closes_at, last_file_name, "
+                "last_file_size, updated_at) VALUES(?, 1, 7, ?, ?, 'old.mkv', "
+                "1170000000, ?)",
+                (
+                    follow_id,
+                    timestamp,
+                    (datetime.now(timezone.utc) + timedelta(hours=20)).isoformat(),
+                    timestamp,
+                ),
+            )
+
+        updated = app.sync_wash_sizes_from_emby(
+            "p115",
+            301418,
+            {
+                "emby_episode_files": {
+                    "1": {
+                        "7": {
+                            "file_name": "Now.Not.Cheating.S01E07.mkv",
+                            "file_size": 1_360_000_000,
+                        }
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(updated, 1)
+        with app.db() as connection:
+            wash = connection.execute(
+                "SELECT last_file_name, last_file_size, last_message "
+                "FROM hdhive_wash_episodes WHERE follow_id = ?",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(wash["last_file_name"], "Now.Not.Cheating.S01E07.mkv")
+        self.assertEqual(wash["last_file_size"], 1_360_000_000)
+        self.assertEqual(wash["last_message"], "Emby已确认当前入库版本")
+
+        regressed = app.sync_wash_sizes_from_emby(
+            "p115",
+            301418,
+            {
+                "emby_episode_files": {
+                    "1": {
+                        "7": {
+                            "file_name": "smaller-old-copy.mkv",
+                            "file_size": 1_200_000_000,
+                        }
+                    }
+                }
+            },
+        )
+        self.assertEqual(regressed, 0)
+        with app.db() as connection:
+            wash = connection.execute(
+                "SELECT last_file_name, last_file_size FROM hdhive_wash_episodes "
+                "WHERE follow_id = ?",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(wash["last_file_name"], "Now.Not.Cheating.S01E07.mkv")
+        self.assertEqual(wash["last_file_size"], 1_360_000_000)
 
     def test_emby_episode_progress_explicitly_clears_removed_series(self):
         with patch.object(app, "emby_library_tmdb_ids", return_value=set()) as library:
