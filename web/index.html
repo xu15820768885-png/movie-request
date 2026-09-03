@@ -358,6 +358,10 @@
     .detail-block p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
     .detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
     .detail-actions .btn { min-width: 150px; }
+    .request-callout { display: flex; justify-content: space-between; gap: 18px; align-items: center; margin-top: 22px; padding: 17px 18px; border: 1px solid rgba(255,119,69,.7); border-radius: 15px; background: linear-gradient(120deg,rgba(255,119,69,.2),rgba(255,183,112,.08)); box-shadow: 0 0 0 3px rgba(255,119,69,.05); }
+    .request-callout strong { display: block; margin-bottom: 5px; color: #fff3e5; }
+    .request-callout span { color: #cfc4b9; font-size: 12px; line-height: 1.6; }
+    .request-callout .btn { flex: 0 0 auto; min-width: 190px; }
     .dian-section { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
     .dian-head { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 12px; }
     .dian-head h3 { margin: 0 0 5px; font-size: 17px; }
@@ -508,6 +512,8 @@
       .detail-columns { grid-template-columns: 1fr; gap: 10px; }
       .detail-actions { display: grid; grid-template-columns: 1fr; }
       .detail-actions .btn { width: 100%; min-height: 44px; }
+      .request-callout { display: grid; }
+      .request-callout .btn { width: 100%; min-width: 0; }
       .dian-head { display: block; }
       .dian-source { margin-top: 6px; }
       .resource-card { grid-template-columns: 1fr; gap: 12px; }
@@ -588,7 +594,7 @@
     </div>
     <main class="shell">
       <section id="familyHero" class="hero">
-        <div class="hero-copy"><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">想看什么，搜一下</h1><p id="heroText">认准海报和年份再提交，请求会直接送到片库管理员。</p></div>
+        <div class="hero-copy"><div class="eyebrow">PRIVATE WATCHLIST</div><h1 id="heroTitle">求片或追更，搜一下</h1><p id="heroText">认准海报和年份再提交，求片、缺集和追更需求都会直接送到片库管理员。</p></div>
         <aside id="siteNotice" class="site-notice hidden" aria-live="polite">
           <div class="notice-head"><div class="notice-kicker">重要提醒</div><button id="editNoticeButton" class="btn btn-ghost notice-edit hidden" type="button">编辑</button></div>
           <div id="siteNoticeText" class="notice-text"></div>
@@ -600,10 +606,10 @@
         <div class="hero-stamp">精准匹配影片资料<br>每条需求都有唯一影片编号</div>
       </section>
       <form id="searchForm" class="search-box"><input id="searchInput" placeholder="试试输入：星际穿越、繁花、权力的游戏…" autocomplete="off"><button id="searchButton" class="btn btn-primary" type="submit">搜索影片</button></form>
-      <div id="searchTip" class="search-tip">只显示已准确匹配的电影和剧集；已在当前账号对应 Emby 的资源会标记“已入库”。</div>
+      <div id="searchTip" class="search-tip">搜索剧集后可直接提交“追更/缺集需求”；管理员会在后台收到并用 PT 处理。</div>
       <section id="activityOverview" class="activity-overview" aria-label="映单处理概览">
-        <button id="activityWashesCard" class="activity-card" type="button"><span>洗版中</span><strong id="activityWashes">0</strong></button>
-        <button id="activityFollowsCard" class="activity-card" type="button"><span>活跃追更</span><strong id="activityFollows">0</strong></button>
+        <button id="activityWashesCard" class="activity-card hidden" type="button"><span>洗版中</span><strong id="activityWashes">0</strong></button>
+        <button id="activityFollowsCard" class="activity-card hidden" type="button"><span>活跃追更</span><strong id="activityFollows">0</strong></button>
         <button id="activityJobsCard" class="activity-card" type="button"><span>处理中任务</span><strong id="activityJobs">0</strong></button>
         <button id="activityFailedCard" class="activity-card alert" type="button"><span>失败任务</span><strong id="activityFailed">0</strong></button>
         <button id="activityCompletedCard" class="activity-card" type="button"><span>历史已入库</span><strong id="activityCompleted">0</strong></button>
@@ -613,8 +619,8 @@
         <button id="discoverTab" class="tab active" data-view="discover">找片</button>
         <button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button>
         <button id="followLogTab" class="tab hidden" data-view="followLog">管理日志</button>
-        <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
-        <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
+        <button id="mineTab" class="tab" data-view="mine">我的求片/追更 <span id="mineCount"></span></button>
+        <button id="adminTab" class="tab hidden" data-view="admin">管理求片/追更 <span id="adminCount"></span></button>
         <button id="storageTab" class="tab hidden" data-view="storage">资源和网盘</button>
         <button id="familyTab" class="tab hidden" data-view="family">成员账号</button>
         <button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button>
@@ -636,17 +642,17 @@
           </div>
           <div id="followEventList" class="follow-event-list"><div class="empty">正在读取处理记录…</div></div>
         </div>
-        <details id="hdhiveMessageInbox" class="message-inbox panel">
+        <details id="hdhiveMessageInbox" class="message-inbox panel hidden">
           <summary><div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">不常用，展开后查看影巢实际推送的站内信及处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div></summary>
           <div id="hdhiveMessageList" class="message-list"><div class="empty">展开后读取影巢更新通知</div></div>
         </details>
       </section>
-      <section id="mineView" class="view hidden"><div class="section-head"><h2>我的请求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
-      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片请求</h2><span>入库后保留为历史记录，不再直接删除</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">“已收到”表示你确认了请求；“寻找中”表示正在找资源。资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，会自动标记“已入库”并保留记录。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
+      <section id="mineView" class="view hidden"><div class="section-head"><h2>我的求片/追更需求</h2><span>进度和管理员回复都会显示在这里</span></div><div id="mineRequests" class="request-list"></div></section>
+      <section id="adminView" class="view hidden"><div class="section-head"><div><h2>成员求片/追更需求</h2><span>收到剧集需求后可用 PT 持续追更；入库后保留为历史记录</span></div><select id="requestUserFilter" class="member-filter" aria-label="按成员筛选"><option value="">全部成员</option></select></div><div class="admin-grid"><div id="adminRequests" class="panel"></div><aside class="panel"><h3>处理说明</h3><div class="muted" style="font-size:12px;line-height:1.8">电影按求片处理；剧集需求包含缺集和追更。收到后可用 PT 追更；资源进入成员账号对应的115 Emby或123 Emby并匹配到 TMDB ID 后，会自动标记“已入库”并保留记录。</div><button id="embySync" class="btn" style="width:100%;margin-top:14px">立即检查 Emby</button></aside></div></section>
       <section id="storageView" class="view hidden">
         <div class="section-head"><div><h2>资源和网盘</h2><span>按服务分类配置，状态和测速集中查看</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
         <div class="integration-status">
-          <div class="status-card"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
+          <div class="status-card hidden"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>癫影 OpenAPI</div><div id="dianStatus" class="status-value">待配置</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>115 账号</div><div id="p115Status" class="status-value">待扫码</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>123 投递</div><div id="pansaveStatus" class="status-value">待配置</div></div>
@@ -655,7 +661,7 @@
           <nav class="settings-nav" aria-label="资源和网盘分类">
             <div class="settings-nav-title">资源分类</div>
             <button class="settings-nav-button active" type="button" data-storage-panel="overview">状态与测速</button>
-            <button class="settings-nav-button" type="button" data-storage-panel="hdhive">影巢</button>
+            <button class="settings-nav-button hidden" type="button" data-storage-panel="hdhive">影巢</button>
             <button class="settings-nav-button" type="button" data-storage-panel="dian">癫影</button>
             <button class="settings-nav-button" type="button" data-storage-panel="p115">115 网盘</button>
             <button class="settings-nav-button" type="button" data-storage-panel="pansave">123</button>
@@ -666,7 +672,7 @@
               <div class="section-head" style="margin:0"><div><h3>接口速度检测</h3><span>某一项失败不会影响另外两项</span></div><button id="testAllIntegrations" class="btn" type="button">全部测速</button></div>
               <div class="diagnostic-grid">
                 <div class="diagnostic-card"><strong>TMDB · NAS 出口</strong><div id="diagnosticTmdb" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="tmdb">单独重试</button></div>
-                <div class="diagnostic-card"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
+                <div class="diagnostic-card hidden"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
                 <div class="diagnostic-card"><strong>癫影 · OpenAPI</strong><div id="diagnosticDian" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="dian">单独重试</button></div>
               </div>
               <div class="section-head" style="margin-top:18px"><div><h3>后台运行健康</h3><span>查看轮询、通知和入库任务是否真正持续运行</span></div><button id="refreshHealth" class="btn btn-small" type="button">刷新状态</button></div>
@@ -738,7 +744,7 @@
         </div>
       </section>
       <section id="familyView" class="view hidden">
-        <div class="section-head"><div><h2>成员账号</h2><span>成员只看到自己的求片与追更；转存方式由管理员固定</span></div></div>
+        <div class="section-head"><div><h2>成员账号</h2><span>成员只看到自己的求片；转存方式由管理员固定</span></div></div>
         <div class="family-layout">
           <details id="newUserCard" class="panel member-create"><summary>新增成员账号</summary><form id="newUserForm" class="stack"><div class="member-create-grid"><label>显示名称<input id="newDisplayName" placeholder="例如：妈妈" required></label><label>登录账号<input id="newUsername" autocomplete="off" placeholder="例如：mama" required></label><label>初始密码<input id="newPassword" type="password" autocomplete="new-password" placeholder="至少 8 位" required></label><label>固定转存目标<select id="newStorageDestination"><option value="p115">115网盘</option><option value="p123">发送给123</option></select></label></div><div class="integration-actions"><button class="btn btn-primary" type="submit">创建账号</button></div></form></details>
           <div id="userList" class="panel"></div>
@@ -791,7 +797,7 @@
                 <label>Bot Token<input id="settingsTelegramToken" autocomplete="off" placeholder="已保存值会直接显示"></label>
                 <label>你的 Chat ID<input id="settingsTelegramChatId" placeholder="例如：123456789"></label>
                 <label>Telegram 代理地址<input id="settingsTelegramProxy" placeholder="例如：http://192.168.31.129:7890"></label>
-                <div class="muted" style="font-size:12px;line-height:1.6">菜单包含求片需求、完成情况、影巢账号、癫影账号和公告管理。</div>
+                <div class="muted" style="font-size:12px;line-height:1.6">菜单包含求片需求、完成情况、癫影账号和公告管理。</div>
               </div>
               <div class="settings-save"><button class="btn btn-primary" type="submit">保存 Telegram 设置</button><button id="telegramTest" class="btn" type="button">测试 Telegram 并更新菜单</button></div>
             </section>
@@ -834,7 +840,9 @@
     let requestsCache = [];
     let currentDetail = null;
     let detailLoadSequence = 0;
-    let activeResourceProvider = 'hdhive';
+    let activeResourceProvider = 'archive';
+    let archiveResourceFilter = 'all';
+    let archiveResourcesExpanded = false;
     let hdhiveResourceFilter = 'all';
     let hdhiveResourcesExpanded = false;
     let dianResourcesExpanded = false;
@@ -931,12 +939,11 @@
     function showApp() {
       $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
-      const admin=currentUser.role==='admin'; ['adminTab','followLogTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      const admin=currentUser.role==='admin'; ['adminTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
-      $('followTab').classList.remove('hidden');
       $('familyHero').classList.remove('hidden'); $('searchForm').classList.remove('hidden'); $('searchTip').classList.remove('hidden');
-      $('heroTitle').textContent=admin?'查一查片库':'想看什么，搜一下';
-      $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份再提交，请求会直接送到片库管理员。';
+      $('heroTitle').textContent=admin?'查一查片库':'求片或追更，搜一下';
+      $('heroText').textContent=admin?'通过 TMDB 准确查找影片，同时确认 Emby 是否已经入库。':'认准海报和年份；求片、缺集和追更需求都会直接送到片库管理员。';
       $('editNoticeButton').onclick=editSiteNotice; $('cancelNoticeButton').onclick=closeNoticeEditor; $('noticeForm').onsubmit=saveSiteNotice;
       loadActivity();
     }
@@ -1044,10 +1051,10 @@
       if(currentUser?.role!=='admin')return;
       const root=$('workerHealth');
       try {
-        const data=preview?{pending_messages:0,pending_notifications:1,active_jobs:2,workers:[{worker:'hdhive_follow',status:'ok',last_success_at:new Date().toISOString(),last_error:''},{worker:'emby_sync',status:'ok',last_success_at:new Date().toISOString(),last_error:''},{worker:'notifications',status:'ok',last_success_at:new Date().toISOString(),last_error:''}]}:await api('/api/admin/health');
-        const names={hdhive_follow:'影巢追更',emby_sync:'Emby同步',notifications:'通知队列',telegram:'Telegram轮询',dian_signin:'癫影签到',workflow_recovery:'任务恢复'};
-        const workers=(data.workers||[]).map(worker=>`<div class="health-item"><strong>${escapeHtml(names[worker.worker]||worker.worker)} · ${worker.status==='ok'?'正常':worker.status==='error'?'异常':worker.status==='stale'?'已停止更新':worker.status==='idle'?'未配置':'运行中'}</strong><div class="muted">最近成功：${escapeHtml(worker.last_success_at?new Date(worker.last_success_at).toLocaleString('zh-CN',{hour12:false}):'尚无')}</div>${worker.last_error?`<div style="color:#ffc4c4">${escapeHtml(worker.last_error)}</div>`:''}</div>`).join('');
-        root.innerHTML=`<div class="health-item"><strong>待处理汇总</strong><div class="muted">站内信 ${data.pending_messages||0} · 通知 ${data.pending_notifications||0} · 工作流 ${data.active_jobs||0}</div></div>${workers}`;
+        const data=preview?{pending_notifications:1,active_jobs:2,workers:[{worker:'emby_sync',status:'ok',last_success_at:new Date().toISOString(),last_error:''},{worker:'notifications',status:'ok',last_success_at:new Date().toISOString(),last_error:''}]}:await api('/api/admin/health');
+        const names={emby_sync:'Emby同步',notifications:'通知队列',telegram:'Telegram轮询',dian_signin:'癫影签到',workflow_recovery:'任务恢复'};
+        const workers=(data.workers||[]).filter(worker=>worker.worker!=='hdhive_follow').map(worker=>`<div class="health-item"><strong>${escapeHtml(names[worker.worker]||worker.worker)} · ${worker.status==='ok'?'正常':worker.status==='error'?'异常':worker.status==='stale'?'已停止更新':worker.status==='idle'?'未配置':'运行中'}</strong><div class="muted">最近成功：${escapeHtml(worker.last_success_at?new Date(worker.last_success_at).toLocaleString('zh-CN',{hour12:false}):'尚无')}</div>${worker.last_error?`<div style="color:#ffc4c4">${escapeHtml(worker.last_error)}</div>`:''}</div>`).join('');
+        root.innerHTML=`<div class="health-item"><strong>待处理汇总</strong><div class="muted">通知 ${data.pending_notifications||0} · 工作流 ${data.active_jobs||0}</div></div>${workers}`;
       } catch(error){root.innerHTML=`<div class="health-item">后台健康状态读取失败：${escapeHtml(error.message)}</div>`;}
     }
     function isWatchableMedia(item) {
@@ -1061,7 +1068,7 @@
         const summary=[item.year||'年份未知',item.latest_episode_label||item.series_status_label||''].filter(Boolean).join(' · ');
         const check=item.in_library?'<span class="library-check" title="已在 Emby 片库">✓</span>':(item.rating?`<span class="rating">★ ${item.rating}</span>`:'');
         const libraryStatus=`<div class="poster-library-status ${item.in_library?'available':'missing'}">${item.in_library?'已入库':'未入库'}</div>`;
-        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索影巢和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy" decoding="async">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${libraryStatus}</article>`;
+        return `<article class="movie-card"><button class="poster poster-open" data-detail-index="${index}" title="搜索官组备份和癫影资源" aria-label="搜索《${escapeHtml(item.title)}》的资源">${item.poster_url?`<img src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报" loading="lazy" decoding="async">`:'<div class="poster-empty">映</div>'}<span class="media-type">${typeLabel}</span>${check}<div class="poster-caption"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(summary)}</span></div></button>${libraryStatus}</article>`;
       }).join('');
       root.querySelectorAll('[data-detail-index]').forEach(button=>button.onclick=()=>openDetails(items[Number(button.dataset.detailIndex)],true));
     }
@@ -1085,16 +1092,16 @@
       ];
     }
     function previewDetails(item) {
-      return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','动画','科幻'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?22:0,number_of_seasons:item.media_type==='tv'?1:0,number_of_episodes:item.media_type==='tv'?234:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',hdhive_resources:previewHDHiveResources(item),dian_resources:previewResources(item),recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
+      return {...item,backdrop_url:item.poster_url,genres:item.media_type==='movie'?['剧情','科幻','冒险']:['剧情','动画','科幻'],runtime:item.media_type==='movie'?148:0,episode_runtime:item.media_type==='tv'?22:0,number_of_seasons:item.media_type==='tv'?1:0,number_of_episodes:item.media_type==='tv'?234:0,tagline:'先看清楚，再决定要不要加入片单。',directors:['示例导演'],cast:[{name:'示例主演',character:'主要角色'},{name:'另一位主演',character:'重要角色'}],trailer_url:'',archive_resources:previewHDHiveResources(item).map((resource,index)=>({...resource,provider:'archive',archive_id:index+1})),dian_resources:previewResources(item),recommendations:demoMovies.filter(movie=>movie.tmdb_id!==item.tmdb_id).slice(0,4)};
     }
     async function openDetails(item,resourcesFirst=false) {
       const loadId=++detailLoadSequence;
       const focusResources=()=>{if(resourcesFirst)requestAnimationFrame(()=>{const section=$('detailResources');if(section)$('detailCard').scrollTop=Math.max(0,section.offsetTop-18);});};
-      activeResourceProvider='hdhive';
-      hdhiveResourceFilter='all';
-      hdhiveResourcesExpanded=false;
+      activeResourceProvider='archive';
+      archiveResourceFilter='all';
+      archiveResourcesExpanded=false;
       dianResourcesExpanded=false;
-      currentDetail={...item,genres:[],directors:[],cast:[],recommendations:[],hdhive_resources:[],dian_resources:[],hdhive_loading:true,dian_loading:true,emby_progress_loading:item.media_type==='tv',details_loading:true,details_error:''};
+      currentDetail={...item,genres:[],directors:[],cast:[],recommendations:[],archive_resources:[],dian_resources:[],archive_loading:true,dian_loading:true,emby_progress_loading:item.media_type==='tv',details_loading:true,details_error:''};
       $('detailOverlay').classList.remove('hidden'); document.body.style.overflow='hidden';
       renderDetails(currentDetail);
       focusResources();
@@ -1104,7 +1111,7 @@
         if(!preview&&item.source==='douban'){const match=await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`);resolved={...item,...match,source:'tmdb'};}
       } catch(error) {
         if(loadId!==detailLoadSequence)return;
-        currentDetail={...currentDetail,details_loading:false,details_error:error.message,hdhive_loading:false,dian_loading:false,hdhive_error:'需要先匹配 TMDB 影片',dian_error:'需要先匹配 TMDB 影片'};
+        currentDetail={...currentDetail,details_loading:false,details_error:error.message,archive_loading:false,dian_loading:false,archive_error:'需要先匹配 TMDB 影片',dian_error:'需要先匹配 TMDB 影片'};
         renderDetails(currentDetail);
         return;
       }
@@ -1124,9 +1131,9 @@
       currentDetail={
         ...currentDetail,
         ...resolved,
-        hdhive_resources:cachedResources.hdhive?.resources||[],
-        hdhive_error:'',
-        hdhive_loading:!cachedResources.hdhive?.loaded,
+        archive_resources:cachedResources.archive?.resources||[],
+        archive_error:'',
+        archive_loading:!cachedResources.archive?.loaded,
         dian_resources:cachedResources.dian?.resources||[],
         dian_error:'',
         dian_loading:!cachedResources.dian?.loaded,
@@ -1134,7 +1141,7 @@
         ...(embyFresh?cachedEmby.progress:{})
       };
       renderDetails(currentDetail);focusResources();
-      if(!cachedResources.hdhive?.loaded)loadDetailResource('hdhive',resolved,tmdbKey,loadId,false);
+      if(!cachedResources.archive?.loaded)loadDetailResource('archive',resolved,tmdbKey,loadId,false);
       if(!cachedResources.dian?.loaded)loadDetailResource('dian',resolved,tmdbKey,loadId,false);
       if(resolved.media_type==='tv'&&!embyFresh){
         api(`/api/emby/episode-progress/${resolved.tmdb_id}?refresh=true`).then(progress=>{
@@ -1147,7 +1154,7 @@
       }
       const cachedDetail=refreshMetadata?null:cachedMetadata;
       if(cachedDetail){
-        currentDetail={...currentDetail,...cachedDetail,hdhive_resources:currentDetail.hdhive_resources,hdhive_loading:currentDetail.hdhive_loading,dian_resources:currentDetail.dian_resources,dian_loading:currentDetail.dian_loading,...(embyFresh?cachedEmby.progress:{}),emby_progress_loading:resolved.media_type==='tv'&&!embyFresh,details_loading:false,details_error:''};
+        currentDetail={...currentDetail,...cachedDetail,archive_resources:currentDetail.archive_resources,archive_loading:currentDetail.archive_loading,dian_resources:currentDetail.dian_resources,dian_loading:currentDetail.dian_loading,...(embyFresh?cachedEmby.progress:{}),emby_progress_loading:resolved.media_type==='tv'&&!embyFresh,details_loading:false,details_error:''};
         renderCurrentDetail();focusResources();
       } else {
         try {
@@ -1229,7 +1236,7 @@
       const episodeProgress=item.media_type==='tv'?`<section class="episode-progress"><div class="episode-progress-item accent"><div class="episode-progress-name">官方播出进度</div><div class="episode-progress-value">${escapeHtml(item.details_loading?'正在刷新 TMDB…':item.latest_episode_label||'暂时未知')}</div></div><div class="episode-progress-item"><div class="episode-progress-name">Emby 本地进度</div><div class="episode-progress-value">${escapeHtml(item.emby_progress_loading?'正在刷新 Emby…':item.emby_episode_label||(item.in_library?'已入库，集数待识别':'尚未入库'))}</div></div><div class="episode-progress-item"><div class="episode-progress-name">下一集计划</div><div class="episode-progress-value">${escapeHtml(item.details_loading?'正在刷新 TMDB…':item.next_episode_air_date?`${item.next_episode_label||'下一集'} · ${formatEpisodeAirDate(item.next_episode_air_date)}`:(item.series_status==='ongoing'?'待公布':'暂无更新'))}</div></div></section>`:'';
       const cast=(item.cast||[]).map(person=>`${escapeHtml(person.name)}${person.character?`（${escapeHtml(person.character)}）`:''}`).join('、')||'TMDB 暂无演职员资料';
       const recommendations=(item.recommendations||[]).map((movie,index)=>`<button class="recommend-card" data-recommend="${index}">${movie.poster_url?`<img src="${escapeHtml(movie.poster_url)}" alt="" loading="lazy" decoding="async">`:'<div class="poster-empty" style="aspect-ratio:2/3">映</div>'}<span>${escapeHtml(movie.title)} · ${escapeHtml(movie.year||'')}</span></button>`).join('');
-      const hdhiveResources=(item.hdhive_resources||[]).map((resource,index)=>({...resource,_sourceIndex:index})).sort((a,b)=>{
+      const archiveResources=(item.archive_resources||[]).map((resource,index)=>({...resource,_sourceIndex:index})).sort((a,b)=>{
         const count=value=>Array.isArray(value.episode_numbers)?value.episode_numbers.length:0;
         const complete=value=>value.is_pack||count(value)>1?1:0;
         const size=value=>Number(value.size_bytes)||Number(String(value.size_gb||'').replace(/[^\d.]/g,''))||0;
@@ -1239,29 +1246,29 @@
       const resourceCards=(resources,provider)=>resources.map((resource,index)=>{
         const scope='manual';
         const actionLabel='转存此资源';
-        const official=provider==='hdhive'&&resource.is_official_group?'<span class="resource-tag accent">官组</span>':provider==='hdhive'&&resource.is_unlocked?'<span class="resource-tag accent">已解锁</span>':'';
+        const official=provider==='archive'&&resource.is_official_group?'<span class="resource-tag accent">官组备份</span>':'';
         const size=resource.size_label||formatResourceSize(resource.size_gb);
         const known=value=>value&&!/(未标明|未知|待解锁后确认|^-$)/.test(String(value));
         const subtitle=known(resource.subtitle_label)?resource.subtitle_label:(resource.chn_sub?'中文字幕':'');
         const tags=[official,resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:'',known(resource.res)?`<span class="resource-tag accent">${escapeHtml(resource.res)}</span>`:'',known(resource.codec)?`<span class="resource-tag">${escapeHtml(resource.codec)}</span>`:'',resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:'',size?`<span class="resource-tag resource-size" title="文件大小">文件大小 ${escapeHtml(size)}</span>`:'',subtitle?`<span class="resource-tag resource-subtitle">${escapeHtml(subtitle)}</span>`:''].join('');
         const meta=[known(resource.audio)?resource.audio:'',known(resource.source)?resource.source:'',known(resource.files)?resource.files:'',provider==='dian'&&known(resource.hot)?`热度 ${resource.hot}`:''].filter(Boolean).map(escapeHtml).join(' · ');
-        const sourceIndex=provider==='hdhive'?resource._sourceIndex:index;
+        const sourceIndex=provider==='archive'?resource._sourceIndex:index;
         return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${known(resource.episode_label)?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div>${tags?`<div class="resource-tags">${tags}</div>`:''}${meta?`<div class="resource-meta">${meta}</div>`:''}</div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${sourceIndex}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${sourceIndex}"></div></div></article>`;
       }).join('');
       const sourcePanel=(provider,label,resources,loading,error)=>{
         let visible=resources;
         let tools='';
-        if(provider==='hdhive'&&!loading){
+        if(provider==='archive'&&!loading){
           const episodeCount=resource=>Array.isArray(resource.episode_numbers)?resource.episode_numbers.length:0;
           const filters={all:'全部',complete:'整季/多集','4k':'4K',sub:'中文字幕'};
-          if(hdhiveResourceFilter==='complete')visible=resources.filter(resource=>resource.is_pack||episodeCount(resource)>1);
-          if(hdhiveResourceFilter==='4k')visible=resources.filter(resource=>/4k|2160|uhd/i.test(`${resource.res||''} ${resource.title||''}`));
-          if(hdhiveResourceFilter==='sub')visible=resources.filter(resource=>resource.chn_sub||/中|chs|cht/i.test(resource.subtitle_label||''));
-          const buttons=Object.entries(filters).map(([key,text])=>`<button class="resource-tool ${hdhiveResourceFilter===key?'active':''}" data-hdhive-filter="${key}">${text}</button>`).join('');
+          if(archiveResourceFilter==='complete')visible=resources.filter(resource=>resource.is_pack||episodeCount(resource)>1);
+          if(archiveResourceFilter==='4k')visible=resources.filter(resource=>/4k|2160|uhd/i.test(`${resource.res||''} ${resource.title||''}`));
+          if(archiveResourceFilter==='sub')visible=resources.filter(resource=>resource.chn_sub||/中|chs|cht/i.test(resource.subtitle_label||''));
+          const buttons=Object.entries(filters).map(([key,text])=>`<button class="resource-tool ${archiveResourceFilter===key?'active':''}" data-archive-filter="${key}">${text}</button>`).join('');
           tools=`<div class="resource-tools">${buttons}<span class="dian-source">推荐按集数完整度、集数和文件大小排序</span></div>`;
         }
         if(!loading){
-          const expanded=provider==='hdhive'?hdhiveResourcesExpanded:dianResourcesExpanded;
+          const expanded=provider==='archive'?archiveResourcesExpanded:dianResourcesExpanded;
           const hiddenCount=Math.max(0,visible.length-8);
           if(hiddenCount||expanded){
             tools+=`<div class="resource-tools"><button class="resource-tool resource-expand-tool" data-resource-expand="${provider}">${expanded?'↑ 收起多余资源':`↓ 展开其余 ${hiddenCount} 个资源`}</button></div>`;
@@ -1271,21 +1278,17 @@
         return `<section class="resource-panel ${activeResourceProvider===provider?'':'hidden'}" data-resource-panel="${provider}"><div class="resource-source-title"><h4>${label}${loading?' · 读取中':` · ${resources.length} 个`}</h4></div>${tools}${loading?'<div class="dian-source">后台独立读取中，不会等待另一个资源源。</div>':visible.length?`<div class="resource-list">${resourceCards(visible,provider)}</div>`:error?`<div class="load-error"><span>${escapeHtml(error)}</span><button class="btn btn-small" type="button" data-retry-resource="${provider}">单独重试${label}</button></div>`:`<div class="empty">${label}暂时没有匹配资源</div>`}</section>`;
       };
       const requestDisabled=item.media_type==='movie'&&item.in_library;
-      const requestShortcut=admin?'':`<button id="detailRequest" class="btn request-shortcut" ${requestDisabled?'disabled':''}>${requestDisabled?'已入库':'都不满意，提交求片'}</button>`;
-      const subscriptionResource=hdhiveResources.find(resource=>resource.slug);
-      const followAvailable=item.media_type==='tv'&&item.series_status==='ongoing';
-      const followReady=Boolean(item.in_library||item.has_manual_transfer);
-      const followLabel=item.hdhive_subscribed?'✓ 已追更':!followReady?'先转存，再追更':item.is_following?'重试追更':'下一步：开启追更';
-      const followShortcut=followAvailable?`<button id="detailFollow" class="btn request-shortcut ${followReady&&!item.hdhive_subscribed?'btn-primary':''}" ${item.hdhive_subscribed||!followReady||item.hdhive_loading||!subscriptionResource?'disabled':''}>${item.hdhive_loading?'追更资源读取中':!subscriptionResource?'暂无追更资源':followLabel}</button>`:'';
-      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">选择满意版本后，系统会按当前账号配置直转115或把链接发送给123。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'123':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='hdhive'?'active':''}" data-resource-provider="hdhive">影巢 · ${item.hdhive_loading?'读取中':hdhiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button>${followShortcut}${requestShortcut}</div>${sourcePanel('hdhive','影巢',hdhiveResources,item.hdhive_loading,item.hdhive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}</section>`:'';
-      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${detailsNotice}${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
+      const requestLabel=requestDisabled?'已入库':item.media_type==='tv'?'提交追更/缺集需求':'没有合适资源，提交求片';
+      const requestCallout=admin?'':`<section class="request-callout"><div><strong>${item.media_type==='tv'?'需要继续追更或补齐缺集？':'没有找到合适的版本？'}</strong><span>${item.media_type==='tv'?'提交后管理员会立即在后台收到，并改用 PT 持续追更。':'提交后管理员会在后台收到并继续找片。'}</span></div><button id="detailRequest" class="btn btn-primary request-shortcut" ${requestDisabled?'disabled':''}>${requestLabel}</button></section>`;
+      const resourceSection=(admin||!item.in_library||item.media_type==='tv')?`<section id="detailResources" class="dian-section"><div class="dian-head"><div><h3>可转存资源</h3><div class="dian-source">官组备份按 TMDB 片名、原名和年份匹配；选择后直转115或发送给123。</div></div><div class="dian-source">当前目标：${currentUser?.storage_destination==='p123'?'123':'115网盘'}</div></div><div class="resource-tabs"><button class="resource-tab ${activeResourceProvider==='archive'?'active':''}" data-resource-provider="archive">官组备份 · ${item.archive_loading?'读取中':archiveResources.length}</button><button class="resource-tab ${activeResourceProvider==='dian'?'active':''}" data-resource-provider="dian">癫影 · ${item.dian_loading?'读取中':dianResources.length}</button></div>${sourcePanel('archive','官组备份',archiveResources,item.archive_loading,item.archive_error)}${sourcePanel('dian','癫影',dianResources,item.dian_loading,item.dian_error)}</section>`:'';
+      $('detailCard').innerHTML=`<button class="detail-close" data-close-detail aria-label="关闭">×</button><section class="detail-hero"><div class="detail-main">${item.poster_url?`<img class="detail-poster" src="${escapeHtml(item.poster_url)}" alt="${escapeHtml(item.title)}海报">`:'<div class="detail-poster"></div>'}<div><h2 class="detail-title">${escapeHtml(item.title)}</h2>${item.original_title&&item.original_title!==item.title?`<div class="detail-original">${escapeHtml(item.original_title)}</div>`:''}<div class="detail-facts">${facts.map(fact=>`<span class="detail-fact">${escapeHtml(fact)}</span>`).join('')}</div>${item.details_loading?'<div class="dian-source" style="margin-top:10px">正在补充剧情和演职员资料…</div>':''}</div></div></section><div class="detail-content">${detailsNotice}${item.tagline?`<p class="detail-tagline">${escapeHtml(item.tagline)}</p>`:''}<p class="detail-overview">${escapeHtml(item.overview||'剧情简介正在加载。')}</p>${episodeProgress}<div class="detail-columns"><div class="detail-block"><h3>${item.media_type==='movie'?'导演':'主创'}</h3><p>${escapeHtml((item.directors||[]).join('、')||(item.details_loading?'正在加载…':'TMDB 暂无资料'))}</p></div><div class="detail-block"><h3>主要演员</h3><p>${item.details_loading?'正在加载…':cast}</p></div></div>${requestCallout}${resourceSection}<div class="detail-actions">${item.trailer_url?`<a class="btn" href="${escapeHtml(item.trailer_url)}" target="_blank" rel="noopener">观看预告片</a>`:''}</div>${recommendations?`<h3 class="recommend-title">相关推荐</h3><div class="recommend-grid">${recommendations}</div>`:''}</div>`;
       const hero=$('detailCard').querySelector('.detail-hero'); if(item.backdrop_url)hero.style.backgroundImage=`url("${item.backdrop_url}")`;
       bindDetailActions();
     }
     function bindDetailActions() {
       $('detailCard').querySelectorAll('[data-close-detail]').forEach(button=>button.onclick=closeDetails);
       $('detailCard').querySelectorAll('[data-recommend]').forEach(button=>button.onclick=()=>openDetails(currentDetail.recommendations[Number(button.dataset.recommend)]));
-      $('detailCard').querySelectorAll('[data-transfer-index]').forEach(button=>button.onclick=()=>{const provider=button.dataset.provider;const resources=provider==='hdhive'?currentDetail.hdhive_resources:currentDetail.dian_resources;previewTransfer(resources[Number(button.dataset.transferIndex)],button,provider);});
+      $('detailCard').querySelectorAll('[data-transfer-index]').forEach(button=>button.onclick=()=>{const provider=button.dataset.provider;const resources=provider==='archive'?currentDetail.archive_resources:currentDetail.dian_resources;previewTransfer(resources[Number(button.dataset.transferIndex)],button,provider);});
       $('detailCard').querySelectorAll('[data-retry-details]').forEach(button=>button.onclick=retryDetailMetadata);
       $('detailCard').querySelectorAll('[data-retry-resource]').forEach(button=>button.onclick=()=>loadDetailResource(button.dataset.retryResource,currentDetail,`tmdb:${currentDetail.media_type}:${currentDetail.tmdb_id}`,detailLoadSequence,true,true));
       $('detailCard').querySelectorAll('[data-resource-provider]').forEach(button=>button.onclick=()=>{
@@ -1293,36 +1296,35 @@
         $('detailCard').querySelectorAll('[data-resource-provider]').forEach(tab=>tab.classList.toggle('active',tab.dataset.resourceProvider===activeResourceProvider));
         $('detailCard').querySelectorAll('[data-resource-panel]').forEach(panel=>panel.classList.toggle('hidden',panel.dataset.resourcePanel!==activeResourceProvider));
       });
-      $('detailCard').querySelectorAll('[data-hdhive-filter]').forEach(button=>button.onclick=()=>{
-        hdhiveResourceFilter=button.dataset.hdhiveFilter;
-        hdhiveResourcesExpanded=false;
+      $('detailCard').querySelectorAll('[data-archive-filter]').forEach(button=>button.onclick=()=>{
+        archiveResourceFilter=button.dataset.archiveFilter;
+        archiveResourcesExpanded=false;
         renderDetails(currentDetail);
       });
       $('detailCard').querySelectorAll('[data-resource-expand]').forEach(button=>button.onclick=()=>{
-        if(button.dataset.resourceExpand==='hdhive')hdhiveResourcesExpanded=!hdhiveResourcesExpanded;
+        if(button.dataset.resourceExpand==='archive')archiveResourcesExpanded=!archiveResourcesExpanded;
         else dianResourcesExpanded=!dianResourcesExpanded;
         renderDetails(currentDetail);
       });
       const request=$('detailRequest'); if(request&&currentDetail)request.onclick=()=>submitRequest(currentDetail,request);
-      const follow=$('detailFollow'); if(follow&&currentDetail){const resource=(currentDetail.hdhive_resources||[]).find(item=>item.slug);follow.onclick=()=>createFollow(currentDetail,follow,null,'',resource);}
     }
     async function previewTransfer(resource,button,provider='dian') {
       const destination=currentUser?.storage_destination==='p123'?'p123':'p115';
-      if(preview){button.disabled=true;button.textContent='已加入转存';markInitialTransferComplete();return toast(`《${currentDetail.title}》已转存；未完结剧集现在可以开启追更`);}
+      if(preview){button.disabled=true;button.textContent='已加入转存';markInitialTransferComplete();return toast(`《${currentDetail.title}》已转存`);}
       const index=button.dataset.transferIndex;
       const scope='manual';
       const status=$('detailCard').querySelector(`[data-transfer-status="${provider}-${index}"]`);
       const originalLabel=button.textContent;
       button.disabled=true; button.textContent='转存中…';
-      if(status){status.className='resource-transfer-status';status.textContent=`正在连接${provider==='hdhive'?'影巢':'癫影'}并提交到${destination==='p123'?'123':'115'}…`;}
+      if(status){status.className='resource-transfer-status';status.textContent=`正在读取${provider==='archive'?'官组备份':'癫影'}并提交到${destination==='p123'?'123':'115'}…`;}
       try {
-        const result=provider==='hdhive'
-          ? await api('/api/hdhive/transfer',{method:'POST',body:JSON.stringify({slug:resource.slug,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,resource_status:currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?'ongoing':'completed',transfer_scope:scope})})
+        const result=provider==='archive'
+          ? await api('/api/archive/transfer',{method:'POST',body:JSON.stringify({archive_id:resource.archive_id,tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,transfer_scope:scope})})
           : await api('/api/dian/transfer',{method:'POST',body:JSON.stringify({share_id:resource.share_id,resource_id:resource.resource_id,dian_share_code:resource.dian_share_code||resource.share_code||resource.sharecode||resource.shareCode||'',tmdb_id:currentDetail.tmdb_id,media_type:currentDetail.media_type,title:currentDetail.title,resource_title:resource.title,resource_status:currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?'ongoing':'completed',transfer_scope:scope})});
         button.textContent=result.mode==='offline'?'离线下载中':result.mode==='pansave'?'已发送123':'已完成转存';
         if(status){status.className='resource-transfer-status success';status.textContent=result.message||'已转存';}
         markInitialTransferComplete();
-        toast(destination==='p123'?(result.message||'资源链接已发送给123'):currentDetail.media_type==='tv'&&currentDetail.series_status==='ongoing'?`${result.message||'已提交到 115'}；下一步可以开启追更`:(result.message||`《${currentDetail.title}》已提交到 115`));
+        toast(destination==='p123'?(result.message||'资源链接已发送给123'):(result.message||`《${currentDetail.title}》已提交到 115`));
       } catch(error) {
         button.disabled=false;button.textContent=originalLabel;
         if(status){status.className='resource-transfer-status error';status.textContent=error.message;}
@@ -1332,13 +1334,6 @@
     function markInitialTransferComplete() {
       if(!currentDetail)return;
       currentDetail.has_manual_transfer=true;
-      const follow=$('detailFollow');
-      const resource=(currentDetail.hdhive_resources||[]).find(item=>item.slug);
-      if(follow&&!currentDetail.hdhive_subscribed&&resource){
-        follow.disabled=false;
-        follow.classList.add('btn-primary');
-        follow.textContent='下一步：开启追更';
-      }
     }
     async function createFollow(item,button,items=null,title='匹配结果',resource=null) {
       if(!resource?.slug)return toast('影巢暂时没有可用于开启追更的资源',true);
@@ -1356,10 +1351,10 @@
     }
     function closeDetails() { detailLoadSequence++; $('detailOverlay').classList.add('hidden'); document.body.style.overflow=''; currentDetail=null; }
     async function submitRequest(item,button) {
-      if(preview){ toast(`已选择《${item.title}》，正式版会提交给管理员`); return; }
+      if(preview){ button.disabled=true;button.textContent='已提交';toast(`《${item.title}》的${item.media_type==='tv'?'追更/缺集':'求片'}需求已提交给管理员`);return; }
       button.disabled=true; button.textContent='提交中…';
-      try { await api('/api/requests',{method:'POST',body:JSON.stringify(item)}); button.textContent='已提交'; toast(`《${item.title}》已提交`); await loadRequests(); }
-      catch(error){ button.disabled=false; button.textContent='我想看'; toast(error.message,true); }
+      try { await api('/api/requests',{method:'POST',body:JSON.stringify(item)}); button.textContent='已提交'; toast(`《${item.title}》的${item.media_type==='tv'?'追更/缺集':'求片'}需求已提交`); await loadRequests(); }
+      catch(error){ button.disabled=false; button.textContent=item.media_type==='tv'?'提交追更/缺集需求':'提交求片'; toast(error.message,true); }
     }
     function requestRow(item) {
       const owner=currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:'';
@@ -1654,7 +1649,7 @@
       $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
     }
     async function loadIntegrations() {
-      let hdhive,settings;
+      let hdhive={},settings;
       if(preview){
         hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',app_secret:'preview_app_secret',scopes:'meta query unlock write vip subscription messages',authorized_scopes:['meta','query','unlock','write','vip','subscription','messages'],subscription_authorized:true,messages_authorized:true,reauthorization_required:false,redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_url:'http://203.0.113.10:7890',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:900,auto_transfer:true,wash_window_hours:48,wash_after_emby:true,reprocess_changed:true,max_episode_transfers:4,lock_after_window:true,pending_candidates:2,last_poll_at:'今天 15:35',last_message_title:'仙逆新增115资源',signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
         settings={
@@ -1666,7 +1661,7 @@
           p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
         };
       }else{
-        [hdhive,settings]=await Promise.all([api('/api/admin/hdhive/status'),api('/api/admin/integrations')]);
+        settings=await api('/api/admin/integrations');
       }
       $('hdhiveStatus').textContent=hdhive.status_label||'等待审核';
       $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成资源查询与转存配置';
@@ -1742,7 +1737,7 @@
     async function testAllIntegrations() {
       const button=$('testAllIntegrations');
       button.disabled=true;button.textContent='测速中…';
-      await Promise.all(['tmdb','hdhive','dian'].map(service=>testIntegration(service)));
+      await Promise.all(['tmdb','dian'].map(service=>testIntegration(service)));
       button.disabled=false;button.textContent='全部测速';
     }
     function folderPickerIds(kind='p115') {
@@ -1900,8 +1895,8 @@
           ? {id:2,username:'mama',display_name:'妈妈',role:'member',storage_destination:'p115'}
           : {id:1,username:'admin',display_name:'管理员',role:'admin',storage_destination:'p115'};
         $('previewRibbon').textContent = previewMode === 'member'
-          ? '成员端预览 · 可选癫影版本或继续求片'
-          : '管理员预览 · 癫影签到与 115 转存设置';
+          ? '成员端预览 · 可转存资源或提交求片/追更需求'
+          : '管理员预览 · 管理求片/追更与资源转存';
         $('previewRibbon').classList.remove('hidden');showApp();loadSiteNotice();
         if(currentUser.role==='admin')switchView('admin');else loadRequests();
         return;

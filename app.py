@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import hashlib
 import hmac
+import gzip
 import io
 import json
 import logging
@@ -10,6 +11,7 @@ import secrets
 import sqlite3
 import struct
 import time
+import unicodedata
 import base64
 import asyncio
 import copy
@@ -49,8 +51,10 @@ WEB_PATH = Path(__file__).parent / "web" / "index.html"
 LIBRARY_NOTIFICATION_FALLBACK_PATH = (
     Path(__file__).parent / "web" / "assets" / "library-notification-fallback.png"
 )
+OFFICIAL_GROUP_ARCHIVE_PATH = DATA_DIR / "official-group-resources.json.gz"
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
+HDHIVE_FEATURE_ENABLED = False
 # Native HDHive subscriptions are created on demand. Subscription messages are
 # consumed only when the granted OAuth token contains both required scopes.
 HDHIVE_MESSAGE_POLLING_ENABLED = True
@@ -92,6 +96,9 @@ RESOURCE_RESPONSE_CACHE: dict[tuple[str, str, str, int, int], tuple[float, dict[
 RESOURCE_REQUEST_LOCKS: dict[tuple[str, str, str, int, int], Lock] = {}
 RESOURCE_CACHE_SECONDS = 120
 RESOURCE_CACHE_MAX_ITEMS = 256
+OFFICIAL_GROUP_ARCHIVE_LOCK = Lock()
+OFFICIAL_GROUP_ARCHIVE_BY_ID: dict[int, dict[str, Any]] = {}
+OFFICIAL_GROUP_ARCHIVE_BY_TITLE: dict[tuple[str, str], list[int]] = {}
 HDHIVE_FILE_LIST_CACHE_SECONDS = 6 * 3600
 HDHIVE_INVALID_FILE_LIST_CACHE_SECONDS = 24 * 3600
 HDHIVE_TRANSIENT_FILE_LIST_CACHE_SECONDS = 15 * 60
@@ -133,7 +140,11 @@ async def movie_http_exception_handler(
     workflow_job_id = int(getattr(getattr(request, "state", None), "workflow_job_id", 0) or 0)
     if workflow_job_id:
         fail_workflow_job(workflow_job_id, error.detail)
-    if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
+    if request.url.path in (
+        "/api/hdhive/transfer",
+        "/api/dian/transfer",
+        "/api/archive/transfer",
+    ):
         user = session_user(request.cookies.get("movie_session"))
         processing_conflict = (
             int(error.status_code) == 409
@@ -928,6 +939,8 @@ def hdhive_save_tokens(tokens: TokenSet) -> None:
 
 
 def hdhive_client(require_authorized: bool = True) -> HDHiveOpenAPI:
+    if not HDHIVE_FEATURE_ENABLED:
+        raise HTTPException(410, "影巢服务已停用")
     with db() as connection:
         row = hdhive_oauth_row(connection)
         api_key = decrypt_secret(row["app_secret_cipher"])
@@ -1309,6 +1322,134 @@ def is_115_share_url(value: str) -> bool:
         )
         and parsed.path.startswith("/s/")
     )
+
+
+def official_group_title_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    text = re.sub(r"\s*\((?:19|20)\d{2}\)\s*$", "", text)
+    return re.sub(r"[^\w\u3400-\u9fff]+", "", text)
+
+
+def load_official_group_archive() -> None:
+    if OFFICIAL_GROUP_ARCHIVE_BY_ID:
+        return
+    with OFFICIAL_GROUP_ARCHIVE_LOCK:
+        if OFFICIAL_GROUP_ARCHIVE_BY_ID:
+            return
+        if not OFFICIAL_GROUP_ARCHIVE_PATH.exists():
+            LOGGER.warning(
+                "official group archive is missing: %s",
+                OFFICIAL_GROUP_ARCHIVE_PATH,
+            )
+            return
+        try:
+            with gzip.open(OFFICIAL_GROUP_ARCHIVE_PATH, "rt", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, ValueError) as error:
+            LOGGER.error("failed to load official group archive: %s", error)
+            return
+        for value in payload.get("resources", []):
+            if not isinstance(value, dict):
+                continue
+            record_id = int(value.get("id") or 0)
+            links = [
+                str(link).strip()
+                for link in value.get("links") or []
+                if str(link).strip()
+            ]
+            if record_id <= 0 or not links:
+                continue
+            record = {**value, "id": record_id, "links": links}
+            OFFICIAL_GROUP_ARCHIVE_BY_ID[record_id] = record
+            year = str(record.get("year") or "")[:4]
+            keys = {
+                official_group_title_key(record.get("title")),
+                official_group_title_key(record.get("media_title")),
+            }
+            for key in keys - {""}:
+                OFFICIAL_GROUP_ARCHIVE_BY_TITLE.setdefault((key, year), []).append(
+                    record_id
+                )
+
+
+def official_group_tmdb_titles(data: dict[str, Any]) -> set[str]:
+    values = {
+        data.get("title"),
+        data.get("name"),
+        data.get("original_title"),
+        data.get("original_name"),
+    }
+    alternatives = data.get("alternative_titles") or {}
+    for item in alternatives.get("results") or []:
+        if isinstance(item, dict):
+            values.add(item.get("title"))
+    translations = data.get("translations") or {}
+    for item in translations.get("translations") or []:
+        translated = item.get("data") if isinstance(item, dict) else None
+        if isinstance(translated, dict):
+            values.update((translated.get("title"), translated.get("name")))
+    return {official_group_title_key(value) for value in values if value}
+
+
+def official_group_records_for_tmdb(
+    media_type: str,
+    tmdb_id: int,
+) -> list[dict[str, Any]]:
+    load_official_group_archive()
+    if not OFFICIAL_GROUP_ARCHIVE_BY_ID:
+        return []
+    data = tmdb_get(
+        f"/{media_type}/{tmdb_id}",
+        {
+            "language": "zh-CN",
+            "append_to_response": "alternative_titles,translations",
+        },
+    )
+    date = str(data.get("release_date") or data.get("first_air_date") or "")
+    year = date[:4] if re.fullmatch(r"\d{4}.*", date) else ""
+    record_ids: list[int] = []
+    seen: set[int] = set()
+    for title_key in official_group_tmdb_titles(data):
+        for match_year in (year, ""):
+            for record_id in OFFICIAL_GROUP_ARCHIVE_BY_TITLE.get(
+                (title_key, match_year), []
+            ):
+                if record_id not in seen:
+                    seen.add(record_id)
+                    record_ids.append(record_id)
+    return [OFFICIAL_GROUP_ARCHIVE_BY_ID[record_id] for record_id in record_ids]
+
+
+def serialize_official_group_resource(record: dict[str, Any]) -> dict[str, Any]:
+    title = str(record.get("title") or record.get("media_title") or "历史资源")
+    note = str(record.get("note") or "").strip()
+    display_title = " · ".join(value for value in (title, note) if value)
+    parsed = parse_episode_spec(display_title)
+    item = canonical_resource(
+        {
+            "provider": "archive",
+            "resource_key": f"archive:{int(record['id'])}",
+            "title": display_title,
+            "res": "规格待确认",
+            "codec": "编码待确认",
+            "audio": "音轨待确认",
+            "subtitle": "字幕信息未知",
+            "source": "官组备份",
+            "files": parsed["episode_label"] or "标题未标明具体集数",
+            "episode_label": parsed["episode_label"],
+            "episode_numbers": parsed["episode_numbers"],
+            "season_number": parsed["season_number"],
+            "is_pack": parsed["is_pack"],
+            "safe_single_episode": parsed["safe_single_episode"],
+            "share_type_label": str(record.get("share_type") or "资源"),
+            "is_offline": str(record.get("share_type") or "") != "115",
+            "is_official_group": True,
+            "vip_free": True,
+        },
+        "archive",
+    )
+    item["archive_id"] = int(record["id"])
+    return item
 
 
 def extract_share_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5433,9 +5574,8 @@ def configure_telegram_menu() -> None:
         "setMyCommands",
         {
             "commands": [
-                {"command": "requests", "description": "求片需求"},
+                {"command": "requests", "description": "求片/追更需求"},
                 {"command": "completed", "description": "完成情况"},
-                {"command": "hdhive", "description": "影巢账号"},
                 {"command": "dian", "description": "癫影账号"},
                 {"command": "notice", "description": "发布片库公告"},
                 {"command": "clear_notice", "description": "清除片库公告"},
@@ -5720,7 +5860,7 @@ def wecom_menu_payload() -> dict[str, Any]:
             {
                 "name": "求片",
                 "sub_button": [
-                    {"type": "click", "name": "求片需求", "key": "requests"},
+                    {"type": "click", "name": "求片/追更", "key": "requests"},
                     {"type": "click", "name": "完成情况", "key": "completed"},
                 ],
             },
@@ -5734,7 +5874,6 @@ def wecom_menu_payload() -> dict[str, Any]:
             {
                 "name": "账号",
                 "sub_button": [
-                    {"type": "click", "name": "影巢账号", "key": "hdhive"},
                     {"type": "click", "name": "癫影账号", "key": "dian"},
                     {"type": "view", "name": "打开映单", "url": site_url},
                 ],
@@ -5772,12 +5911,12 @@ def telegram_request_summary(completed: bool) -> str:
                 "ORDER BY r.created_at DESC LIMIT 20"
             ).fetchall()
     if not rows:
-        return "✅ 暂无记录" if completed else "📭 暂无待处理的求片需求"
+        return "✅ 暂无记录" if completed else "📭 暂无待处理的求片/追更需求"
     if completed:
         lines = ["✅ 已入库 / 完成情况", ""]
         lines.extend(f"• {row['title']} ({row['year']}) · {row['display_name']}" for row in rows)
     else:
-        lines = ["🎬 求片需求", ""]
+        lines = ["🎬 求片/追更需求", ""]
         lines.extend(
             f"• {row['title']} ({row['year']}) · {row['display_name']} · {STATUS_NAMES.get(row['status'], row['status'])}"
             for row in rows
@@ -5900,16 +6039,11 @@ def handle_telegram_message(text: str) -> bool:
     command = first.split("@", 1)[0].lower()
     argument = argument.strip() if separator else ""
 
-    if text == "求片需求" or command == "/requests":
+    if text in ("求片需求", "求片/追更") or command == "/requests":
         send_telegram(telegram_request_summary(False))
     elif text == "完成情况" or command == "/completed":
         sync_emby_requests()
         send_telegram(telegram_request_summary(True))
-    elif text == "影巢账号" or command == "/hdhive":
-        try:
-            send_telegram(hdhive_account_summary())
-        except HTTPException as error:
-            send_telegram(f"❌ 影巢账号读取失败\n\n原因：{error.detail}")
     elif text == "癫影账号" or command == "/dian":
         send_telegram(dian_account_summary())
     elif command == "/notice":
@@ -5930,7 +6064,7 @@ def handle_telegram_message(text: str) -> bool:
         send_telegram("✅ 片库公告已清除")
     elif command in ("/start", "/menu"):
         send_telegram(
-            "请点击左下角“菜单”，可以查看求片需求、完成情况、影巢/癫影账号，"
+            "请点击左下角“菜单”，可以查看求片/追更需求、完成情况、癫影账号，"
             "或发布片库公告。"
         )
     elif not text.startswith("/"):
@@ -5983,11 +6117,6 @@ def handle_wecom_command(command: str, sender: str) -> bool:
     elif text in ("completed", "完成情况"):
         sync_emby_requests()
         send_wecom(telegram_request_summary(True), sender)
-    elif text in ("hdhive", "影巢账号"):
-        try:
-            send_wecom(hdhive_account_summary(), sender)
-        except HTTPException as error:
-            send_wecom(f"❌ 影巢账号读取失败\n\n原因：{error.detail}", sender)
     elif text in ("dian", "癫影账号"):
         send_wecom(dian_account_summary(), sender)
     elif text in ("notice", "发布公告"):
@@ -7766,7 +7895,8 @@ def startup() -> None:
         daemon=True,
     ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
-    Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
+    if HDHIVE_FEATURE_ENABLED:
+        Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
     Thread(
         target=p115_offline_monitor_loop,
         name="p115-offline-monitor",
@@ -8046,6 +8176,9 @@ def activity_summary(
         else [serialize_follow(row) for row in active_follows]
     )
     active_washes = group_wash_activity(active_wash_rows)
+    if not HDHIVE_FEATURE_ENABLED:
+        grouped_follows = []
+        active_washes = []
     return {
         "requests_active": sum(
             request_counts.get(status, 0)
@@ -8156,14 +8289,9 @@ def admin_health(
     require_admin(movie_session)
     with db() as connection:
         workers = connection.execute(
-            "SELECT * FROM worker_health ORDER BY worker"
+            "SELECT * FROM worker_health WHERE worker != 'hdhive_follow' "
+            "ORDER BY worker"
         ).fetchall()
-        pending_messages = int(
-            connection.execute(
-                "SELECT COUNT(*) FROM hdhive_message_log "
-                "WHERE status IN ('pending', 'failed', 'processed')"
-            ).fetchone()[0]
-        )
         pending_notifications = int(
             connection.execute(
                 "SELECT COUNT(*) FROM notification_outbox "
@@ -8179,10 +8307,8 @@ def admin_health(
         )
     return {
         "workers": [serialize_worker_health(row) for row in workers],
-        "pending_messages": pending_messages,
         "pending_notifications": pending_notifications,
         "active_jobs": active_jobs,
-        "hdhive": hdhive_public_status(),
     }
 
 
@@ -9382,6 +9508,8 @@ def hdhive_resources(
     refresh: bool = False,
 ) -> dict[str, Any]:
     require_user(movie_session)
+    if not HDHIVE_FEATURE_ENABLED:
+        raise HTTPException(410, "影巢服务已停用")
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片编号无效")
     if not refresh:
@@ -9405,6 +9533,38 @@ def hdhive_resources(
             "resources": normalize_supported_hdhive_resources(items),
             "meta": result.get("meta", {}),
         })
+
+
+@APP.get("/api/archive/resources/{media_type}/{tmdb_id}")
+def official_group_archive_resources(
+    media_type: str,
+    tmdb_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
+) -> dict[str, Any]:
+    require_user(movie_session)
+    if media_type not in ("movie", "tv") or tmdb_id <= 0:
+        raise HTTPException(400, "影片编号无效")
+    if not refresh:
+        cached = cached_resource_response("archive", media_type, tmdb_id)
+        if cached is not None:
+            return cached
+    with resource_request_lock("archive", media_type, tmdb_id):
+        if not refresh:
+            cached = cached_resource_response("archive", media_type, tmdb_id)
+            if cached is not None:
+                return cached
+        resources = [
+            serialize_official_group_resource(record)
+            for record in official_group_records_for_tmdb(media_type, tmdb_id)
+        ]
+        resources.sort(key=hdhive_resource_priority, reverse=True)
+        return cache_resource_response(
+            "archive",
+            media_type,
+            tmdb_id,
+            {"resources": resources, "meta": {"source": "official_group_backup"}},
+        )
 
 
 def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
@@ -10150,11 +10310,197 @@ def dian_resources(
         }, season)
 
 
+@APP.post("/api/archive/transfer")
+async def official_group_archive_transfer(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    archive_id = int(payload.get("archive_id") or 0)
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    media_type = str(payload.get("media_type") or "")
+    if archive_id <= 0 or tmdb_id <= 0 or media_type not in ("movie", "tv"):
+        raise HTTPException(400, "官组备份资源信息无效")
+    matching = await asyncio.to_thread(
+        official_group_records_for_tmdb,
+        media_type,
+        tmdb_id,
+    )
+    record = next((item for item in matching if int(item["id"]) == archive_id), None)
+    if not record:
+        raise HTTPException(404, "这条官组备份资源与当前 TMDB 影片不匹配")
+    links = [str(value).strip() for value in record.get("links") or [] if str(value).strip()]
+    if not links:
+        raise HTTPException(410, "这条官组备份资源没有可用链接")
+    share_type = str(record.get("share_type") or "")
+    if user.get("storage_destination") == "p123":
+        if share_type != "115" or not is_115_share_url(links[0]):
+            raise HTTPException(400, "123 转存目前只支持官组备份中的 115 分享")
+        return await deliver_to_pansave(
+            user=user,
+            share_url=links[0],
+            source="official_group_archive",
+            resource_key=f"archive:{archive_id}",
+            title=str(payload.get("title") or record.get("title") or ""),
+            tmdb_id=tmdb_id,
+        )
+
+    display_title = " · ".join(
+        value
+        for value in (
+            str(record.get("title") or record.get("media_title") or ""),
+            str(record.get("note") or "").strip(),
+        )
+        if value
+    )
+    episode = parse_episode_spec(display_title)
+    episode_numbers = [int(value) for value in episode["episode_numbers"]]
+    resource_key = f"archive:{archive_id}"
+    job = begin_workflow_job(
+        user_id=int(user["id"]),
+        destination=str(user["storage_destination"]),
+        source="official_group_archive",
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        media_type=media_type,
+        title=str(payload.get("title") or record.get("title") or ""),
+        season_number=int(episode["season_number"]),
+        episode_numbers=episode_numbers,
+        scope="manual",
+    )
+    attach_workflow_job_to_request(request, int(job["id"]))
+    client = await asyncio.to_thread(p115_client)
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+
+    if share_type == "115" and is_115_share_url(links[0]):
+        before_files = await asyncio.to_thread(
+            p115_folder_snapshot,
+            client,
+            target_cid,
+        )
+        snap = await asyncio.to_thread(
+            p115_call,
+            "读取115分享失败",
+            client.share_snap,
+            0,
+            share_url=links[0],
+        )
+        if not response_ok(snap):
+            raise HTTPException(502, response_message(snap, "无法读取115分享"))
+        selected_ids = [
+            p115_share_item_id(item)
+            for item in extract_share_items(snap)
+            if p115_share_item_id(item)
+        ]
+        if not selected_ids:
+            raise HTTPException(502, "115分享中没有找到可转存内容")
+        received = await asyncio.to_thread(
+            p115_call,
+            "接收115分享失败",
+            client.share_receive,
+            {"file_id": ",".join(selected_ids), "cid": target_cid},
+            share_url=links[0],
+        )
+        if not response_ok(received):
+            raise HTTPException(502, response_message(received, "115转存失败"))
+        changed = await asyncio.to_thread(
+            wait_for_p115_change,
+            lambda: p115_folder_snapshot(client, target_cid),
+            before_files,
+        )
+        if not changed:
+            raise HTTPException(502, "115接口没有把文件写入目标目录")
+        mode = "share"
+        message = "已转存"
+        workflow_state = "waiting_library"
+        transfer_status = "success"
+    else:
+        before_tasks = await asyncio.to_thread(p115_offline_snapshot, client)
+        if len(links) == 1:
+            queued = await asyncio.to_thread(
+                p115_call,
+                "提交115离线任务失败",
+                client.clouddownload_task_add_url,
+                {"url": links[0], "wp_path_id": target_cid},
+            )
+        else:
+            offline_payload = {
+                f"url[{index}]": link for index, link in enumerate(links)
+            }
+            offline_payload["wp_path_id"] = target_cid
+            queued = await asyncio.to_thread(
+                p115_call,
+                "提交115离线任务失败",
+                client.clouddownload_task_add_urls,
+                offline_payload,
+            )
+        if not response_ok(queued):
+            raise HTTPException(
+                502,
+                response_message(queued, "115离线任务提交失败"),
+            )
+        changed = await asyncio.to_thread(
+            wait_for_p115_change,
+            lambda: p115_offline_snapshot(client),
+            before_tasks,
+        )
+        if not changed:
+            raise HTTPException(502, "115接口没有创建云下载任务")
+        mode = "offline"
+        message = "已加入115离线下载，完成后会出现在所选目录"
+        workflow_state = "submitted"
+        transfer_status = "submitted"
+        register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]),
+            user_id=int(user["id"]),
+            follow_id=None,
+            destination=str(user["storage_destination"]),
+            source="official_group_archive",
+            resource_key=resource_key,
+            tmdb_id=tmdb_id,
+            media_type=media_type,
+            season_number=int(episode["season_number"]),
+            episode_numbers=episode_numbers,
+            title=str(payload.get("title") or record.get("title") or ""),
+            target_cid=str(target_cid),
+            links=links,
+        )
+
+    record_transfer(
+        user_id=int(user["id"]),
+        source="official_group_archive",
+        resource_key=resource_key,
+        tmdb_id=tmdb_id,
+        transfer_scope="manual",
+        status=transfer_status,
+        detail=message,
+        season_number=int(episode["season_number"]),
+        episode_numbers=episode_numbers,
+    )
+    update_workflow_job(int(job["id"]), workflow_state, message)
+    send_notifications_async(
+        f"☁️ 官组备份资源{'已加入离线下载' if mode == 'offline' else '转存成功'}\n\n"
+        f"{payload.get('title') or record.get('title') or '影片'} · "
+        f"{user['display_name']}\n{message}"
+    )
+    return {
+        "ok": True,
+        "mode": mode,
+        "message": message,
+        "job_id": int(job["id"]),
+        "workflow_state": workflow_state,
+    }
+
+
 @APP.post("/api/hdhive/transfer")
 async def hdhive_transfer(
     request: Request,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
+    if not HDHIVE_FEATURE_ENABLED:
+        raise HTTPException(410, "影巢服务已停用")
     user = require_user(movie_session)
     payload = await request.json()
     slug = str(payload.get("slug") or "").strip()
@@ -10931,8 +11277,9 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
         )
         request_id = cursor.lastrowid
     kind = "电影" if media_type == "movie" else "剧集"
+    request_kind = "追更/缺集需求" if media_type == "tv" else "求片需求"
     send_notifications_async(
-        f"🎬 新的求片需求\n\n{user['display_name']} 想看："
+        f"🎬 新的{request_kind}\n\n{user['display_name']} 想看："
         f"{title} ({str(date)[:4]})\n"
         f"类型：{kind}\nTMDB：{tmdb_id}"
     )

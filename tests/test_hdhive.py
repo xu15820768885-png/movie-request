@@ -43,6 +43,12 @@ class FakeRequest:
 
 
 class HDHiveFoundationTests(unittest.TestCase):
+    def setUp(self):
+        app.HDHIVE_FEATURE_ENABLED = True
+
+    def tearDown(self):
+        app.HDHIVE_FEATURE_ENABLED = False
+
     def test_episode_parser_handles_single_and_range(self):
         single = app.parse_episode_spec("吞噬星空.S01E233.2160p.WEB-DL")
         self.assertEqual(single["season_number"], 1)
@@ -579,6 +585,7 @@ class HDHiveFoundationTests(unittest.TestCase):
 
 class HDHiveFollowRouteTests(unittest.TestCase):
     def setUp(self):
+        app.HDHIVE_FEATURE_ENABLED = True
         self.temporary = tempfile.TemporaryDirectory()
         self.data_patch = patch.object(app, "DATA_DIR", Path(self.temporary.name))
         self.data_patch.start()
@@ -615,6 +622,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             )
 
     def tearDown(self):
+        app.HDHIVE_FEATURE_ENABLED = False
         self.data_patch.stop()
         self.temporary.cleanup()
 
