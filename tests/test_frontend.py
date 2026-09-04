@@ -22,18 +22,20 @@ class FrontendFeatureVisibilityTest(unittest.TestCase):
         self.assertNotIn("loadDetailResource('hdhive'", html)
         self.assertNotIn('data-resource-provider="hdhive"', html)
 
-    def test_official_group_archive_uses_existing_resource_cards(self):
+    def test_only_dian_resources_are_loaded_and_transferred(self):
         html = self.html
-        self.assertIn("loadDetailResource('archive'", html)
-        self.assertIn('data-resource-provider="archive"', html)
-        self.assertIn("/api/archive/transfer", html)
-        self.assertIn("archive_id:resource.archive_id", html)
-        self.assertIn("官组备份 · ${item.archive_loading", html)
+        self.assertIn("loadDetailResource('dian'", html)
+        self.assertIn("/api/dian/transfer", html)
+        self.assertIn("当前仅保留癫影资源", html)
+        self.assertNotIn("loadDetailResource('archive'", html)
+        self.assertNotIn('data-resource-provider="archive"', html)
+        self.assertNotIn("/api/archive/transfer", html)
+        self.assertNotIn("archive_id:resource.archive_id", html)
+        self.assertNotIn("官组备份", html)
         self.assertIn("const actionLabel='转存此资源'", html)
         self.assertIn("visible.length-8", html)
         self.assertIn("visible=visible.slice(0,8)", html)
         self.assertIn("resource-expand-tool", html)
-        self.assertIn("data-archive-filter", html)
         self.assertIn('class="resource-tag resource-size" title="文件大小"', html)
         self.assertIn('class="resource-tag resource-subtitle"', html)
 
