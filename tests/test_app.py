@@ -32,7 +32,6 @@ class FakeWebhookRequest:
 
 class MovieRequestTests(unittest.TestCase):
     def setUp(self):
-        app.HDHIVE_FEATURE_ENABLED = True
         with app.CACHE_LOCK:
             app.TMDB_RESPONSE_CACHE.clear()
             app.TMDB_REFRESHING.clear()
@@ -70,7 +69,6 @@ class MovieRequestTests(unittest.TestCase):
             app.set_setting(connection, "tmdb_token", "test-token")
 
     def tearDown(self):
-        app.HDHIVE_FEATURE_ENABLED = False
         self.db_patch.stop()
         self.temporary.cleanup()
 
@@ -837,7 +835,7 @@ class MovieRequestTests(unittest.TestCase):
         }
         with patch.object(app, "tmdb_get", return_value=canonical):
             with patch.object(app, "emby_library_tmdb_ids", return_value={223911}):
-                with patch.object(app, "send_notifications_async") as notify:
+                with patch.object(app, "send_telegram"):
                     result = asyncio.run(
                         app.create_request(
                             FakeRequest(
@@ -854,7 +852,6 @@ class MovieRequestTests(unittest.TestCase):
         request = app.list_requests(self.token)["requests"][0]
         self.assertEqual(request["title"], "仙逆")
         self.assertEqual(request["media_type"], "tv")
-        self.assertIn("新的追更/缺集需求", notify.call_args.args[0])
 
     def test_emby_sync_completes_movie_and_tv_requests_after_ingest(self):
         timestamp = app.now_iso()
@@ -1517,7 +1514,7 @@ class MovieRequestTests(unittest.TestCase):
         with patch.object(app, "telegram_request") as telegram:
             app.configure_telegram_menu()
         commands = telegram.call_args.args[1]["commands"]
-        self.assertNotIn({"command": "hdhive", "description": "影巢账号"}, commands)
+        self.assertIn({"command": "hdhive", "description": "影巢账号"}, commands)
         self.assertIn({"command": "notice", "description": "发布片库公告"}, commands)
         self.assertIn({"command": "clear_notice", "description": "清除片库公告"}, commands)
 
@@ -1558,15 +1555,15 @@ class MovieRequestTests(unittest.TestCase):
         self.assertIn("周免费额度：400/400", summary)
         self.assertIn("OpenAPI 额度：988/1,000", summary)
 
-    def test_telegram_hdhive_command_is_no_longer_exposed(self):
+    def test_telegram_hdhive_command_sends_account_summary(self):
         with patch.object(
             app,
             "hdhive_account_summary",
             return_value="🟠 影巢账号\n积分：7,156",
         ):
             with patch.object(app, "send_telegram") as telegram:
-                self.assertFalse(app.handle_telegram_message("/hdhive"))
-        telegram.assert_not_called()
+                self.assertTrue(app.handle_telegram_message("/hdhive"))
+        telegram.assert_called_once_with("🟠 影巢账号\n积分：7,156")
 
     def test_dian_resources_query_uses_tmdb_identity(self):
         response = {

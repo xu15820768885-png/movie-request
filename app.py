@@ -51,18 +51,6 @@ LIBRARY_NOTIFICATION_FALLBACK_PATH = (
 )
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
-HDHIVE_FEATURE_ENABLED = (
-    os.getenv("HDHIVE_FEATURE_ENABLED", "1").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
-HDHIVE_BACKGROUND_ENABLED = (
-    os.getenv("HDHIVE_BACKGROUND_ENABLED", "0").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
-HDHIVE_BASE_URL = (
-    os.getenv("HDHIVE_BASE_URL", "https://re0.me").strip().rstrip("/")
-    or "https://re0.me"
-)
 # Native HDHive subscriptions are created on demand. Subscription messages are
 # consumed only when the granted OAuth token contains both required scopes.
 HDHIVE_MESSAGE_POLLING_ENABLED = True
@@ -145,10 +133,7 @@ async def movie_http_exception_handler(
     workflow_job_id = int(getattr(getattr(request, "state", None), "workflow_job_id", 0) or 0)
     if workflow_job_id:
         fail_workflow_job(workflow_job_id, error.detail)
-    if request.url.path in (
-        "/api/hdhive/transfer",
-        "/api/dian/transfer",
-    ):
+    if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
         user = session_user(request.cookies.get("movie_session"))
         processing_conflict = (
             int(error.status_code) == 409
@@ -943,8 +928,6 @@ def hdhive_save_tokens(tokens: TokenSet) -> None:
 
 
 def hdhive_client(require_authorized: bool = True) -> HDHiveOpenAPI:
-    if not HDHIVE_FEATURE_ENABLED:
-        raise HTTPException(410, "影巢服务已停用")
     with db() as connection:
         row = hdhive_oauth_row(connection)
         api_key = decrypt_secret(row["app_secret_cipher"])
@@ -960,7 +943,6 @@ def hdhive_client(require_authorized: bool = True) -> HDHiveOpenAPI:
         raise HTTPException(503, "影巢应用尚未完成 OAuth 授权")
     return HDHiveOpenAPI(
         api_key=api_key,
-        base_url=HDHIVE_BASE_URL,
         access_token=access_token,
         refresh_token=refresh_token,
         proxy_url=proxy_url,
@@ -2707,8 +2689,24 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         marker in publisher_text
         for marker in ("官组", "官方", "official")
     )
-    unlock_points = item.get("unlock_points")
-    vip_free = is_official_group or unlock_points == 0 or bool(item.get("is_unlocked"))
+    unlock_points = first_value("unlock_points")
+    actual_unlock_points = first_value(
+        "actual_unlock_points", "required_unlock_points", "user_unlock_points"
+    )
+    unlock_points = None if unlock_points == "" else unlock_points
+    actual_unlock_points = (
+        None if actual_unlock_points == "" else actual_unlock_points
+    )
+    effective_unlock_points = (
+        actual_unlock_points
+        if actual_unlock_points is not None
+        else unlock_points
+    )
+    vip_free = (
+        is_official_group
+        or effective_unlock_points == 0
+        or bool(item.get("is_unlocked"))
+    )
     pan_type = str(item.get("pan_type") or details.get("pan_type") or "").strip()
     share_kind = str(
         item.get("share_kind")
@@ -2784,6 +2782,7 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "offline_type": offline_type,
         "is_offline": is_offline,
         "unlock_points": unlock_points,
+        "actual_unlock_points": actual_unlock_points,
         "is_unlocked": bool(item.get("is_unlocked")),
         "is_official_group": is_official_group,
         "vip_free": vip_free,
@@ -5451,8 +5450,9 @@ def configure_telegram_menu() -> None:
         "setMyCommands",
         {
             "commands": [
-                {"command": "requests", "description": "求片/追更需求"},
+                {"command": "requests", "description": "求片需求"},
                 {"command": "completed", "description": "完成情况"},
+                {"command": "hdhive", "description": "影巢账号"},
                 {"command": "dian", "description": "癫影账号"},
                 {"command": "notice", "description": "发布片库公告"},
                 {"command": "clear_notice", "description": "清除片库公告"},
@@ -5737,7 +5737,7 @@ def wecom_menu_payload() -> dict[str, Any]:
             {
                 "name": "求片",
                 "sub_button": [
-                    {"type": "click", "name": "求片/追更", "key": "requests"},
+                    {"type": "click", "name": "求片需求", "key": "requests"},
                     {"type": "click", "name": "完成情况", "key": "completed"},
                 ],
             },
@@ -5751,6 +5751,7 @@ def wecom_menu_payload() -> dict[str, Any]:
             {
                 "name": "账号",
                 "sub_button": [
+                    {"type": "click", "name": "影巢账号", "key": "hdhive"},
                     {"type": "click", "name": "癫影账号", "key": "dian"},
                     {"type": "view", "name": "打开映单", "url": site_url},
                 ],
@@ -5788,12 +5789,12 @@ def telegram_request_summary(completed: bool) -> str:
                 "ORDER BY r.created_at DESC LIMIT 20"
             ).fetchall()
     if not rows:
-        return "✅ 暂无记录" if completed else "📭 暂无待处理的求片/追更需求"
+        return "✅ 暂无记录" if completed else "📭 暂无待处理的求片需求"
     if completed:
         lines = ["✅ 已入库 / 完成情况", ""]
         lines.extend(f"• {row['title']} ({row['year']}) · {row['display_name']}" for row in rows)
     else:
-        lines = ["🎬 求片/追更需求", ""]
+        lines = ["🎬 求片需求", ""]
         lines.extend(
             f"• {row['title']} ({row['year']}) · {row['display_name']} · {STATUS_NAMES.get(row['status'], row['status'])}"
             for row in rows
@@ -5916,11 +5917,16 @@ def handle_telegram_message(text: str) -> bool:
     command = first.split("@", 1)[0].lower()
     argument = argument.strip() if separator else ""
 
-    if text in ("求片需求", "求片/追更") or command == "/requests":
+    if text == "求片需求" or command == "/requests":
         send_telegram(telegram_request_summary(False))
     elif text == "完成情况" or command == "/completed":
         sync_emby_requests()
         send_telegram(telegram_request_summary(True))
+    elif text == "影巢账号" or command == "/hdhive":
+        try:
+            send_telegram(hdhive_account_summary())
+        except HTTPException as error:
+            send_telegram(f"❌ 影巢账号读取失败\n\n原因：{error.detail}")
     elif text == "癫影账号" or command == "/dian":
         send_telegram(dian_account_summary())
     elif command == "/notice":
@@ -5941,7 +5947,7 @@ def handle_telegram_message(text: str) -> bool:
         send_telegram("✅ 片库公告已清除")
     elif command in ("/start", "/menu"):
         send_telegram(
-            "请点击左下角“菜单”，可以查看求片/追更需求、完成情况、癫影账号，"
+            "请点击左下角“菜单”，可以查看求片需求、完成情况、影巢/癫影账号，"
             "或发布片库公告。"
         )
     elif not text.startswith("/"):
@@ -5994,6 +6000,11 @@ def handle_wecom_command(command: str, sender: str) -> bool:
     elif text in ("completed", "完成情况"):
         sync_emby_requests()
         send_wecom(telegram_request_summary(True), sender)
+    elif text in ("hdhive", "影巢账号"):
+        try:
+            send_wecom(hdhive_account_summary(), sender)
+        except HTTPException as error:
+            send_wecom(f"❌ 影巢账号读取失败\n\n原因：{error.detail}", sender)
     elif text in ("dian", "癫影账号"):
         send_wecom(dian_account_summary(), sender)
     elif text in ("notice", "发布公告"):
@@ -7772,8 +7783,7 @@ def startup() -> None:
         daemon=True,
     ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
-    if HDHIVE_FEATURE_ENABLED and HDHIVE_BACKGROUND_ENABLED:
-        Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
+    Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
     Thread(
         target=p115_offline_monitor_loop,
         name="p115-offline-monitor",
@@ -8053,9 +8063,6 @@ def activity_summary(
         else [serialize_follow(row) for row in active_follows]
     )
     active_washes = group_wash_activity(active_wash_rows)
-    if not HDHIVE_FEATURE_ENABLED:
-        grouped_follows = []
-        active_washes = []
     return {
         "requests_active": sum(
             request_counts.get(status, 0)
@@ -8166,9 +8173,14 @@ def admin_health(
     require_admin(movie_session)
     with db() as connection:
         workers = connection.execute(
-            "SELECT * FROM worker_health WHERE worker != 'hdhive_follow' "
-            "ORDER BY worker"
+            "SELECT * FROM worker_health ORDER BY worker"
         ).fetchall()
+        pending_messages = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM hdhive_message_log "
+                "WHERE status IN ('pending', 'failed', 'processed')"
+            ).fetchone()[0]
+        )
         pending_notifications = int(
             connection.execute(
                 "SELECT COUNT(*) FROM notification_outbox "
@@ -8184,8 +8196,10 @@ def admin_health(
         )
     return {
         "workers": [serialize_worker_health(row) for row in workers],
+        "pending_messages": pending_messages,
         "pending_notifications": pending_notifications,
         "active_jobs": active_jobs,
+        "hdhive": hdhive_public_status(),
     }
 
 
@@ -9385,8 +9399,6 @@ def hdhive_resources(
     refresh: bool = False,
 ) -> dict[str, Any]:
     require_user(movie_session)
-    if not HDHIVE_FEATURE_ENABLED:
-        raise HTTPException(410, "影巢服务已停用")
     if media_type not in ("movie", "tv") or tmdb_id <= 0:
         raise HTTPException(400, "影片编号无效")
     if not refresh:
@@ -10155,14 +10167,11 @@ def dian_resources(
         }, season)
 
 
-
 @APP.post("/api/hdhive/transfer")
 async def hdhive_transfer(
     request: Request,
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
-    if not HDHIVE_FEATURE_ENABLED:
-        raise HTTPException(410, "影巢服务已停用")
     user = require_user(movie_session)
     payload = await request.json()
     slug = str(payload.get("slug") or "").strip()
@@ -10939,9 +10948,8 @@ async def create_request(request: Request, movie_session: Optional[str] = Cookie
         )
         request_id = cursor.lastrowid
     kind = "电影" if media_type == "movie" else "剧集"
-    request_kind = "追更/缺集需求" if media_type == "tv" else "求片需求"
     send_notifications_async(
-        f"🎬 新的{request_kind}\n\n{user['display_name']} 想看："
+        f"🎬 新的求片需求\n\n{user['display_name']} 想看："
         f"{title} ({str(date)[:4]})\n"
         f"类型：{kind}\nTMDB：{tmdb_id}"
     )
