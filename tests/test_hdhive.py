@@ -299,12 +299,12 @@ class HDHiveFoundationTests(unittest.TestCase):
             session=session,
         )
         page = client.media_page(
-            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003"
+            "https://re0.me/tv/f84222db3d0e11eea73a0242ac1b0003"
         )
         self.assertIn("tv:5670", page)
         self.assertEqual(
             session.calls[0][1],
-            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003",
+            "https://re0.me/tv/f84222db3d0e11eea73a0242ac1b0003",
         )
         self.assertEqual(
             session.calls[0][2]["proxies"]["https"],
@@ -872,7 +872,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         selected = {
             "slug": "selected-subscription-resource",
             "title": "仙逆 长期更新",
-            "media_url": "https://hdhive.com/tv/example",
+            "media_url": "https://re0.me/tv/example",
         }
         with app.db() as connection:
             user_id = connection.execute(
@@ -1029,7 +1029,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
                 {
                     "slug": "resource-slug",
                     "media_url": (
-                        "https://hdhive.com/tv/"
+                        "https://re0.me/tv/"
                         "f84222db3d0e11eea73a0242ac1b0003"
                     ),
                     "media_slug": "f84222db3d0e11eea73a0242ac1b0003",
@@ -1086,7 +1086,7 @@ class HDHiveFollowRouteTests(unittest.TestCase):
 
         self.assertTrue(result["follow"]["hdhive_subscribed"])
         media_page.assert_called_once_with(
-            "https://hdhive.com/tv/f84222db3d0e11eea73a0242ac1b0003"
+            "https://re0.me/tv/f84222db3d0e11eea73a0242ac1b0003"
         )
         self.assertEqual(
             [method for method, _args, _kwargs in calls].count("share"),

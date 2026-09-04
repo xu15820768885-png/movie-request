@@ -52,7 +52,7 @@ class HDHiveOpenAPI:
         self,
         *,
         api_key: str,
-        base_url: str = "https://hdhive.com",
+        base_url: str = "https://re0.me",
         access_token: str = "",
         refresh_token: str = "",
         timeout: int = 20,

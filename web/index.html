@@ -642,7 +642,7 @@
           </div>
           <div id="followEventList" class="follow-event-list"><div class="empty">正在读取处理记录…</div></div>
         </div>
-        <details id="hdhiveMessageInbox" class="message-inbox panel hidden">
+        <details id="hdhiveMessageInbox" class="message-inbox panel">
           <summary><div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">不常用，展开后查看影巢实际推送的站内信及处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div></summary>
           <div id="hdhiveMessageList" class="message-list"><div class="empty">展开后读取影巢更新通知</div></div>
         </details>
@@ -652,7 +652,7 @@
       <section id="storageView" class="view hidden">
         <div class="section-head"><div><h2>资源和网盘</h2><span>按服务分类配置，状态和测速集中查看</span></div><span id="integrationBadge" class="badge badge-approved">配置中心</span></div>
         <div class="integration-status">
-          <div class="status-card hidden"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
+          <div class="status-card"><div class="status-label"><span class="status-dot"></span>影巢 OpenAPI</div><div id="hdhiveStatus" class="status-value">等待审核</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>癫影 OpenAPI</div><div id="dianStatus" class="status-value">待配置</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>115 账号</div><div id="p115Status" class="status-value">待扫码</div></div>
           <div class="status-card"><div class="status-label"><span class="status-dot"></span>123 投递</div><div id="pansaveStatus" class="status-value">待配置</div></div>
@@ -661,7 +661,7 @@
           <nav class="settings-nav" aria-label="资源和网盘分类">
             <div class="settings-nav-title">资源分类</div>
             <button class="settings-nav-button active" type="button" data-storage-panel="overview">状态与测速</button>
-            <button class="settings-nav-button hidden" type="button" data-storage-panel="hdhive">影巢</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="hdhive">影巢</button>
             <button class="settings-nav-button" type="button" data-storage-panel="dian">癫影</button>
             <button class="settings-nav-button" type="button" data-storage-panel="p115">115 网盘</button>
             <button class="settings-nav-button" type="button" data-storage-panel="pansave">123</button>
@@ -672,7 +672,7 @@
               <div class="section-head" style="margin:0"><div><h3>接口速度检测</h3><span>某一项失败不会影响另外两项</span></div><button id="testAllIntegrations" class="btn" type="button">全部测速</button></div>
               <div class="diagnostic-grid">
                 <div class="diagnostic-card"><strong>TMDB · NAS 出口</strong><div id="diagnosticTmdb" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="tmdb">单独重试</button></div>
-                <div class="diagnostic-card hidden"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
+                <div class="diagnostic-card"><strong>影巢 · 固定出口</strong><div id="diagnosticHdhive" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="hdhive">单独重试</button></div>
                 <div class="diagnostic-card"><strong>癫影 · OpenAPI</strong><div id="diagnosticDian" class="diagnostic-result">尚未检测</div><button class="btn btn-small" type="button" data-test-integration="dian">单独重试</button></div>
               </div>
               <div class="section-head" style="margin-top:18px"><div><h3>后台运行健康</h3><span>查看轮询、通知和入库任务是否真正持续运行</span></div><button id="refreshHealth" class="btn btn-small" type="button">刷新状态</button></div>
@@ -1617,7 +1617,7 @@
       $('wecomState').textContent=settings.wecom_configured?`企业微信已配置${settings.wecom_callback_configured?'，回调已配置':''}`:'尚未配置企业微信';
     }
     async function loadIntegrations() {
-      let hdhive={},settings;
+      let hdhive,settings;
       if(preview){
         hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',app_secret:'preview_app_secret',scopes:'meta query unlock write vip subscription messages',authorized_scopes:['meta','query','unlock','write','vip','subscription','messages'],subscription_authorized:true,messages_authorized:true,reauthorization_required:false,redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_url:'http://203.0.113.10:7890',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:900,auto_transfer:true,wash_window_hours:48,wash_after_emby:true,reprocess_changed:true,max_episode_transfers:4,lock_after_window:true,pending_candidates:2,last_poll_at:'今天 15:35',last_message_title:'仙逆新增115资源',signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
         settings={
@@ -1629,7 +1629,7 @@
           p115_apps:{alipaymini:'115生活_支付宝小程序端',wechatmini:'115生活_微信小程序端',qandroid:'115管理_安卓端',android:'115生活_安卓端',ios:'115生活_iOS端',os_windows:'115生活_Windows端',os_mac:'115生活_macOS端',os_linux:'115生活_Linux端',harmony:'115_鸿蒙端'}
         };
       }else{
-        settings=await api('/api/admin/integrations');
+        [hdhive,settings]=await Promise.all([api('/api/admin/hdhive/status'),api('/api/admin/integrations')]);
       }
       $('hdhiveStatus').textContent=hdhive.status_label||'等待审核';
       $('hdhiveState').textContent=hdhive.last_error?`上次错误：${hdhive.last_error}`:hdhive.connected?'OAuth 已连接，影巢资源查询已启用':hdhive.configured?'凭证已保存，等待完成 OAuth 授权':'审核通过前可以先完成资源查询与转存配置';
@@ -1705,7 +1705,7 @@
     async function testAllIntegrations() {
       const button=$('testAllIntegrations');
       button.disabled=true;button.textContent='测速中…';
-      await Promise.all(['tmdb','dian'].map(service=>testIntegration(service)));
+      await Promise.all(['tmdb','hdhive','dian'].map(service=>testIntegration(service)));
       button.disabled=false;button.textContent='全部测速';
     }
     function folderPickerIds(kind='p115') {

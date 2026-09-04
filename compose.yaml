@@ -9,7 +9,10 @@ services:
       HTTP_PROXY: http://192.168.31.129:7890
       HTTPS_PROXY: http://192.168.31.129:7890
       NO_PROXY: localhost,127.0.0.1,192.168.31.0/24
-      # 影巢当前停用；保留原固定出口配置，未来恢复 API 时可复用。
+      # 影巢试运行：先开放管理员 OAuth/测速，确认后再启动追更后台。
+      HDHIVE_FEATURE_ENABLED: ${HDHIVE_FEATURE_ENABLED:-true}
+      HDHIVE_BACKGROUND_ENABLED: ${HDHIVE_BACKGROUND_ENABLED:-false}
+      HDHIVE_BASE_URL: ${HDHIVE_BASE_URL:-https://re0.me}
       HDHIVE_PROXY_URL: ${HDHIVE_PROXY_URL:-}
     ports:
       - "1802:5056"

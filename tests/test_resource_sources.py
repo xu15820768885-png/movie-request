@@ -11,8 +11,9 @@ class ResourceSourceRetirementTests(unittest.TestCase):
         self.assertNotIn("/api/archive/resources/{media_type}/{tmdb_id}", paths)
         self.assertNotIn("/api/archive/transfer", paths)
 
-    def test_hdhive_stays_disabled_without_deleting_its_code(self):
-        self.assertFalse(app.HDHIVE_FEATURE_ENABLED)
+    def test_hdhive_backend_is_configured_for_admin_trial(self):
+        self.assertFalse(app.HDHIVE_BACKGROUND_ENABLED)
+        self.assertEqual(app.HDHIVE_BASE_URL, "https://re0.me")
         self.assertIn("/api/hdhive/resources/{media_type}/{tmdb_id}", {
             route.path for route in app.APP.routes
         })

@@ -9,7 +9,7 @@ class FrontendFeatureVisibilityTest(unittest.TestCase):
             Path(__file__).parents[1] / "web" / "index.html"
         ).read_text(encoding="utf-8")
 
-    def test_hdhive_and_follow_surfaces_stay_hidden(self):
+    def test_hdhive_admin_probe_is_visible_during_trial(self):
         html = self.html
         self.assertIn('id="followTab" class="tab hidden"', html)
         self.assertNotIn("$('followTab').classList.remove('hidden')", html)
@@ -17,8 +17,10 @@ class FrontendFeatureVisibilityTest(unittest.TestCase):
         self.assertNotIn("['adminTab','followLogTab'", html)
         self.assertIn('id="activityWashesCard" class="activity-card hidden"', html)
         self.assertIn('id="activityFollowsCard" class="activity-card hidden"', html)
-        self.assertIn('id="hdhiveMessageInbox" class="message-inbox panel hidden"', html)
-        self.assertIn('class="settings-nav-button hidden" type="button" data-storage-panel="hdhive"', html)
+        self.assertIn('id="hdhiveMessageInbox" class="message-inbox panel"', html)
+        self.assertIn('class="settings-nav-button" type="button" data-storage-panel="hdhive"', html)
+        self.assertIn("api('/api/admin/hdhive/status')", html)
+        self.assertIn("['tmdb','hdhive','dian']", html)
         self.assertNotIn("loadDetailResource('hdhive'", html)
         self.assertNotIn('data-resource-provider="hdhive"', html)
 

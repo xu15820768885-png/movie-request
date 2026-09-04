@@ -51,7 +51,18 @@ LIBRARY_NOTIFICATION_FALLBACK_PATH = (
 )
 PORT = int(os.getenv("PORT", "5056"))
 SESSION_DAYS = 30
-HDHIVE_FEATURE_ENABLED = False
+HDHIVE_FEATURE_ENABLED = (
+    os.getenv("HDHIVE_FEATURE_ENABLED", "1").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+HDHIVE_BACKGROUND_ENABLED = (
+    os.getenv("HDHIVE_BACKGROUND_ENABLED", "0").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+HDHIVE_BASE_URL = (
+    os.getenv("HDHIVE_BASE_URL", "https://re0.me").strip().rstrip("/")
+    or "https://re0.me"
+)
 # Native HDHive subscriptions are created on demand. Subscription messages are
 # consumed only when the granted OAuth token contains both required scopes.
 HDHIVE_MESSAGE_POLLING_ENABLED = True
@@ -949,6 +960,7 @@ def hdhive_client(require_authorized: bool = True) -> HDHiveOpenAPI:
         raise HTTPException(503, "影巢应用尚未完成 OAuth 授权")
     return HDHiveOpenAPI(
         api_key=api_key,
+        base_url=HDHIVE_BASE_URL,
         access_token=access_token,
         refresh_token=refresh_token,
         proxy_url=proxy_url,
@@ -7760,7 +7772,7 @@ def startup() -> None:
         daemon=True,
     ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
-    if HDHIVE_FEATURE_ENABLED:
+    if HDHIVE_FEATURE_ENABLED and HDHIVE_BACKGROUND_ENABLED:
         Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
     Thread(
         target=p115_offline_monitor_loop,
