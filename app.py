@@ -758,6 +758,18 @@ def init_db() -> None:
                 "UPDATE hdhive_oauth SET authorized_scopes = scopes "
                 "WHERE access_token_cipher != ''"
             )
+        poll_interval_migration = setting(
+            connection, "hdhive_poll_interval_options_v2"
+        )
+        if poll_interval_migration != "1":
+            current_poll_interval = setting(
+                connection, "hdhive_poll_interval"
+            )
+            if current_poll_interval in ("", "300", "900", "1800"):
+                set_setting(connection, "hdhive_poll_interval", "3600")
+            set_setting(
+                connection, "hdhive_poll_interval_options_v2", "1"
+            )
         hot_setting_keys = (
             "tmdb_token", "emby_url", "emby_api_key",
             "p123_emby_url", "p123_emby_api_key",
@@ -7590,8 +7602,14 @@ def hdhive_follow_loop() -> None:
                 row = hdhive_oauth_row(connection)
                 enabled = setting(connection, "hdhive_poll_enabled") != "0"
                 interval = max(
-                    300,
-                    int(setting(connection, "hdhive_poll_interval") or 900),
+                    1800,
+                    min(
+                        43200,
+                        int(
+                            setting(connection, "hdhive_poll_interval")
+                            or 3600
+                        ),
+                    ),
                 )
                 last_poll = setting(connection, "hdhive_last_poll_at")
                 next_poll = setting(connection, "hdhive_next_poll_at")
@@ -8784,7 +8802,11 @@ def hdhive_public_status() -> dict[str, Any]:
             and setting(connection, "hdhive_poll_enabled") != "0"
         )
         poll_interval = max(
-            300, int(setting(connection, "hdhive_poll_interval") or 900)
+            1800,
+            min(
+                43200,
+                int(setting(connection, "hdhive_poll_interval") or 3600),
+            ),
         )
         last_poll = setting(connection, "hdhive_last_poll_at")
         next_poll = setting(connection, "hdhive_next_poll_at")
@@ -9234,7 +9256,7 @@ async def update_hdhive_config(
                 "1" if payload["poll_enabled"] else "0",
             )
         if payload.get("poll_interval"):
-            interval = max(300, min(3600, int(payload["poll_interval"])))
+            interval = max(1800, min(43200, int(payload["poll_interval"])))
             set_setting(connection, "hdhive_poll_interval", interval)
         boolean_settings = {
             "auto_transfer": "hdhive_auto_transfer",

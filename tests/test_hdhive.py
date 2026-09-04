@@ -641,6 +641,41 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertTrue(app.HDHIVE_MESSAGE_POLLING_ENABLED)
         self.assertTrue(status["poll_enabled"])
 
+    def test_legacy_poll_interval_migrates_once_to_one_hour(self):
+        with app.db() as connection:
+            app.set_setting(connection, "hdhive_poll_interval", "900")
+            connection.execute(
+                "DELETE FROM settings WHERE key = ?",
+                ("hdhive_poll_interval_options_v2",),
+            )
+
+        app.init_db()
+
+        with app.db() as connection:
+            self.assertEqual(
+                app.setting(connection, "hdhive_poll_interval"), "3600"
+            )
+            app.set_setting(connection, "hdhive_poll_interval", "1800")
+
+        app.init_db()
+
+        with app.db() as connection:
+            self.assertEqual(
+                app.setting(connection, "hdhive_poll_interval"), "1800"
+            )
+
+    def test_poll_interval_supports_twelve_hours(self):
+        asyncio.run(
+            app.update_hdhive_config(
+                FakeRequest({"poll_interval": 43200}),
+                self.admin_token,
+            )
+        )
+
+        status = app.hdhive_public_status()
+
+        self.assertEqual(status["poll_interval"], 43200)
+
     def test_file_list_400_is_cached_instead_of_retried(self):
         error = app.HTTPException(400, "资源不存在或 slug 已失效")
         with patch.object(app, "hdhive_call", side_effect=error) as call:

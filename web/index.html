@@ -682,7 +682,7 @@
               <label>App Secret<input id="hdhiveAppSecret" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <label>云服务器固定出口代理<input id="hdhiveProxyUrl" autocomplete="off" placeholder="已保存值会直接显示"></label>
               <div class="section-head" style="margin:8px 0 0"><span>原生追更与 PanSave 洗版</span><span id="hdhiveFollowPermission" class="badge badge-approved">等待追加权限</span></div>
-              <div class="inline"><label>站内信检查间隔<select id="hdhivePollInterval"><option value="300">每5分钟</option><option value="900">每15分钟</option><option value="1800">每30分钟</option><option value="3600">每1小时</option></select></label><label>单集洗版窗口<select id="hdhiveWashWindow"><option value="12">12小时</option><option value="24">24小时</option><option value="48">48小时</option><option value="72">72小时</option></select></label></div>
+              <div class="inline"><label>站内信检查间隔<select id="hdhivePollInterval"><option value="1800">每30分钟</option><option value="3600">每1小时</option><option value="21600">每6小时</option><option value="43200">每12小时</option></select></label><label>单集洗版窗口<select id="hdhiveWashWindow"><option value="12">12小时</option><option value="24">24小时</option><option value="48">48小时</option><option value="72">72小时</option></select></label></div>
               <div class="inline"><label>单集最多处理次数<select id="hdhiveMaxTransfers"><option value="1">1次</option><option value="2">2次</option><option value="3">3次</option><option value="4">4次</option><option value="6">6次</option><option value="10">10次</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="hdhivePollEnabled" type="checkbox" style="width:auto">定时检查影巢站内信</label></div>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveAutoTransfer" type="checkbox" style="width:auto">自动把新的115候选送入 PanSave 洗版</label>
               <label style="display:flex;grid-template-columns:auto 1fr;align-items:center"><input id="hdhiveOfflineRetryCleanup" type="checkbox" style="width:auto">重复离线链接自动清空已完成任务记录后重试（保留已下载文件）</label>
@@ -1664,7 +1664,7 @@
     async function loadIntegrations() {
       let hdhive,settings;
       if(preview){
-        hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',app_secret:'preview_app_secret',scopes:'meta query unlock write vip subscription messages',authorized_scopes:['meta','query','unlock','write','vip','subscription','messages'],subscription_authorized:true,messages_authorized:true,reauthorization_required:false,redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_url:'http://203.0.113.10:7890',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:900,auto_transfer:true,wash_window_hours:48,wash_after_emby:true,reprocess_changed:true,max_episode_transfers:4,lock_after_window:true,pending_candidates:2,last_poll_at:'今天 15:35',last_message_title:'仙逆新增115资源',signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
+        hdhive={status:'connected',status_label:'已连接',configured:true,connected:true,client_id:'app_preview',app_secret:'preview_app_secret',scopes:'meta query unlock write vip subscription messages',authorized_scopes:['meta','query','unlock','write','vip','subscription','messages'],subscription_authorized:true,messages_authorized:true,reauthorization_required:false,redirect_uri:'https://media.example.com/api/hdhive/oauth/callback',proxy_url:'http://203.0.113.10:7890',proxy_configured:true,proxy_label:'云服务器固定出口',poll_enabled:true,poll_interval:3600,auto_transfer:true,wash_window_hours:48,wash_after_emby:true,reprocess_changed:true,max_episode_transfers:4,lock_after_window:true,pending_candidates:2,last_poll_at:'今天 15:35',last_message_title:'仙逆新增115资源',signin_enabled:true,signin_time:'08:35',signin_mode:'normal',last_signin_at:'今天 08:35',last_signin_status:'success',last_signin_message:'签到成功，获得 8 积分',last_error:''};
         settings={
         dian_base_url:'https://dian.example.com',dian_api_key:'preview_dian_api_key',dian_configured:true,dian_signin_enabled:true,dian_signin_time:'08:30',dian_signin_mode:'lucky',
         dian_last_signin_at:'今天 08:30',dian_last_signin_mode:'lucky',p115_app:'alipaymini',p115_app_name:'115生活_支付宝小程序端',p115_configured:true,p115_logged_in:true,
@@ -1687,7 +1687,7 @@
       for(const scope of ['write','subscription','messages'])if(!hdhiveScopes.includes(scope))hdhiveScopes.push(scope);
       $('hdhiveScopes').value=hdhiveScopes.join(' ');
       $('hdhivePollEnabled').checked=Boolean(hdhive.poll_enabled);
-      $('hdhivePollInterval').value=String(hdhive.poll_interval||900);
+      $('hdhivePollInterval').value=String(hdhive.poll_interval||3600);
       $('hdhiveAutoTransfer').checked=Boolean(hdhive.auto_transfer);
       $('hdhiveOfflineRetryCleanup').checked=hdhive.offline_retry_cleanup!==false;
       $('hdhiveWashWindow').value=String(hdhive.wash_window_hours||48);
