@@ -1373,13 +1373,23 @@
       const owner=currentUser?.role==='admin'&&item.display_name?` · ${escapeHtml(item.display_name)}`:'';
       return `<article class="request-row">${item.poster_url?`<img class="request-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="request-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year)}</span></div><div class="request-meta">${item.media_type==='movie'?'电影':'剧集'} · TMDB ${item.tmdb_id}${owner}</div>${item.admin_note?`<div class="request-note">管理员回复：${escapeHtml(item.admin_note)}</div>`:''}</div><div class="request-controls"><span class="badge badge-${item.status}">${escapeHtml(item.status_name||statusOptions[item.status])}</span><button class="btn btn-danger btn-small" data-delete="${item.id}">删除</button></div></article>`;
     }
+    function followWashMarkup(item) {
+      const washes=item.washes?.length?item.washes:(item.wash?[item.wash]:[]);
+      return washes.map(wash=>{
+        const hours=Math.max(1,Math.ceil(Number(wash.remaining_seconds||0)/3600));
+        const followIds=wash.follow_ids?.length?wash.follow_ids:(item.follow_ids||[item.id]);
+        const episode=`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')}`;
+        return `<div class="request-meta">${escapeHtml(episode)} · 洗版中，剩余约${hours}小时 · 当前 ${escapeHtml(wash.last_file_size_label||'容量未知')} · 已处理 ${Number(wash.process_count||0)} 次 <button class="btn btn-danger btn-small" type="button" data-follow-stop-wash="${followIds.join(',')}" data-wash-season="${Number(wash.season_number)}" data-wash-episode="${Number(wash.episode_number)}">停止本集洗版</button></div>`;
+      }).join('');
+    }
     async function loadFollows() {
       const follows=preview?demoFollows:(await api('/api/follows')).follows;
       $('followCount').textContent=follows.filter(item=>item.active).length?`· ${follows.filter(item=>item.active).length}`:'';
-      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const wash=item.wash;const hours=wash?Math.ceil((wash.remaining_seconds||0)/3600):0;const washText=wash?`S${String(wash.season_number).padStart(2,'0')}E${String(wash.episode_number).padStart(2,'0')} · ${wash.locked?'洗版已锁定':`洗版中，剩余约${hours}小时`} · 当前 ${wash.last_file_size_label||'容量未知'} · 已处理 ${wash.process_count} 次`:'';const currentSeason=Number(item.current_emby_season||1);const currentEpisode=Number(item.current_emby_episode||0);const embyText=currentEpisode?`Emby 已入库至${currentSeason>1?`第${currentSeason}季`:''}第${currentEpisode}集；追更起点为 ${item.baseline_label||'尚未识别'}`:`Emby 尚未识别到剧集；追更起点为 ${item.baseline_label||'第1季第0集'}`;const followIds=item.follow_ids||[item.id];return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · 追更人：${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(embyText)}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'尚未绑定影巢原生订阅，不参与后台刷新'}</div>${washText?`<div class="request-meta">${escapeHtml(washText)}</div>`:''}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-timeline="${item.id}">处理时间线</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${followIds.join(',')}">${followIds.length>1?'取消全部追更':'取消追更'}</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
+      $('followList').innerHTML=follows.length?follows.map(item=>{const movie=item.media_type==='movie';const currentSeason=Number(item.current_emby_season||1);const currentEpisode=Number(item.current_emby_episode||0);const embyText=currentEpisode?`Emby 已入库至${currentSeason>1?`第${currentSeason}季`:''}第${currentEpisode}集；追更起点为 ${item.baseline_label||'尚未识别'}`:`Emby 尚未识别到剧集；追更起点为 ${item.baseline_label||'第1季第0集'}`;const followIds=item.follow_ids||[item.id];return `<article class="follow-card" data-follow-card="${item.id}">${item.poster_url?`<img class="follow-poster" src="${escapeHtml(item.poster_url)}" alt="">`:'<div class="follow-poster"></div>'}<div><div class="request-title">${escapeHtml(item.title)} <span class="muted">${escapeHtml(item.year||'')}</span></div><div class="request-meta">${movie?'电影':'电视剧'} · TMDB ${item.tmdb_id}${currentUser?.role==='admin'&&item.display_name?` · 追更人：${escapeHtml(item.display_name)}`:''}</div><div class="request-note" data-follow-progress="${item.id}">${movie?'请选择资源后手动转存':escapeHtml(embyText)}</div><div class="request-meta">${item.hdhive_subscribed?'影巢原生订阅已开启':'尚未绑定影巢原生订阅，不参与后台刷新'}</div>${followWashMarkup(item)}${item.last_message?`<div class="request-meta">${escapeHtml(item.last_message)}</div>`:''}</div><div class="follow-actions"><button class="btn btn-primary btn-small" data-follow-search="${item.id}">查看当前资源</button><button class="btn btn-small" data-follow-timeline="${item.id}">处理时间线</button><button class="btn btn-small" data-follow-open="${item.id}">打开详情</button><button class="btn btn-danger btn-small" data-follow-delete="${followIds.join(',')}">${followIds.length>1?'取消全部追更':'取消追更'}</button></div><div class="follow-results hidden" data-follow-results="${item.id}"></div></article>`;}).join(''):'<div class="empty">还没有追更。打开未完结剧集详情，点击“追更”即可开启。</div>';
       $('followList').querySelectorAll('[data-follow-search]').forEach(button=>button.onclick=()=>searchFollowResources(follows.find(item=>Number(item.id)===Number(button.dataset.followSearch)),button));
       $('followList').querySelectorAll('[data-follow-open]').forEach(button=>{const item=follows.find(entry=>Number(entry.id)===Number(button.dataset.followOpen));button.onclick=()=>openDetails({...item,media_type:item.media_type||'tv',poster_path:'',in_library:item.media_type==='tv'&&Number(item.current_emby_episode)>0,emby_latest_episode_number:Number(item.current_emby_episode||0),emby_episode_label:item.current_emby_episode?`已入库至第${item.current_emby_episode}集`:'尚未入库'});});
       $('followList').querySelectorAll('[data-follow-timeline]').forEach(button=>button.onclick=()=>loadFollowTimeline(Number(button.dataset.followTimeline),button));
+      $('followList').querySelectorAll('[data-follow-stop-wash]').forEach(button=>button.onclick=()=>stopFollowWash(button));
       $('followList').querySelectorAll('[data-follow-delete]').forEach(button=>button.onclick=()=>deleteFollow(button.dataset.followDelete.split(',').map(Number),button));
       refreshFollowEmbyProgress(follows);
     }
@@ -1544,6 +1554,19 @@
       button.disabled=true;button.textContent='正在订阅…';
       try {await api(`/api/follows/${follow.id}/hdhive-subscription`,{method:'POST',body:JSON.stringify({slug:resource.slug})});toast(`《${follow.title}》已绑定影巢原生订阅`);loadFollows();}
       catch(error){button.disabled=false;button.textContent='重新订阅';toast(error.message,true);}
+    }
+    async function stopFollowWash(button) {
+      const ids=button.dataset.followStopWash.split(',').map(Number).filter(Boolean);
+      const season=Number(button.dataset.washSeason);
+      const episode=Number(button.dataset.washEpisode);
+      if(!confirm(`确认停止 S${String(season).padStart(2,'0')}E${String(episode).padStart(2,'0')} 的后续自动洗版？\n\n已经提交给115的转存不会撤回，影巢追更仍会保留。`))return;
+      if(preview){toast('已停止本集后续洗版');return loadFollows();}
+      button.disabled=true;button.textContent='正在停止…';
+      try {
+        for(const id of ids)await api(`/api/follows/${id}/wash/${season}/${episode}`,{method:'DELETE'});
+        toast('已停止本集后续洗版；影巢追更仍然保留');
+        await loadFollows();
+      } catch(error){button.disabled=false;button.textContent='停止本集洗版';toast(error.message,true);}
     }
     async function deleteFollow(ids,button) {
       ids=Array.isArray(ids)?ids:[ids];

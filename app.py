@@ -9498,32 +9498,40 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
         "已看到",
     )
     with db() as connection:
-        wash = connection.execute(
+        wash_rows = connection.execute(
             "SELECT season_number, episode_number, closes_at, locked_at, "
             "process_count, last_file_size, last_message "
             "FROM hdhive_wash_episodes WHERE follow_id = ? "
-            "ORDER BY season_number DESC, episode_number DESC LIMIT 1",
-            (int(item["id"]),),
-        ).fetchone()
-    item["wash"] = None
-    if wash:
-        remaining_seconds = max(
-            0,
-            int(
-                datetime.fromisoformat(str(wash["closes_at"])).timestamp()
-                - time.time()
-            ),
-        )
-        item["wash"] = {
+            "AND locked_at = '' AND closes_at > ? "
+            "ORDER BY season_number DESC, episode_number DESC",
+            (int(item["id"]), now_iso()),
+        ).fetchall()
+    item["washes"] = []
+    for wash in wash_rows:
+        item["washes"].append({
             "season_number": int(wash["season_number"]),
             "episode_number": int(wash["episode_number"]),
             "process_count": int(wash["process_count"] or 0),
             "last_file_size": int(wash["last_file_size"] or 0),
             "last_file_size_label": resource_size_label(wash["last_file_size"]),
-            "remaining_seconds": remaining_seconds,
-            "locked": bool(wash["locked_at"]),
+            "remaining_seconds": max(
+                0,
+                int(
+                    datetime.fromisoformat(str(wash["closes_at"])).timestamp()
+                    - time.time()
+                ),
+            ),
+            "locked": False,
             "last_message": str(wash["last_message"] or ""),
-        }
+            "follow_ids": [int(item["id"])],
+        })
+    item["wash"] = item["washes"][0] if item["washes"] else None
+    if not item["washes"] and str(item.get("last_message") or "").startswith(
+        "已提交洗版："
+    ):
+        # Keep the database history, but do not show a completed wash as if it
+        # were still the current follow status.
+        item["last_message"] = ""
     return item
 
 
@@ -9537,6 +9545,8 @@ def group_follow_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             current = dict(item)
             current["follow_ids"] = []
             current["follower_names"] = []
+            current["washes"] = []
+            current["wash"] = None
             grouped[key] = current
         current["follow_ids"].append(int(item["id"]))
         name = str(item.get("display_name") or item.get("username") or "家人")
@@ -9562,7 +9572,53 @@ def group_follow_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             current["current_emby_season"] = item_progress[0]
             current["current_emby_episode"] = item_progress[1]
             current["current_emby_label"] = item.get("current_emby_label") or ""
+        for wash in item.get("washes") or []:
+            wash_key = (
+                int(wash.get("season_number") or 1),
+                int(wash.get("episode_number") or 0),
+            )
+            grouped_wash = next(
+                (
+                    value
+                    for value in current["washes"]
+                    if (
+                        int(value.get("season_number") or 1),
+                        int(value.get("episode_number") or 0),
+                    ) == wash_key
+                ),
+                None,
+            )
+            if grouped_wash is None:
+                grouped_wash = dict(wash)
+                grouped_wash["follow_ids"] = []
+                current["washes"].append(grouped_wash)
+            grouped_wash["follow_ids"].append(int(item["id"]))
+            grouped_wash["process_count"] = max(
+                int(grouped_wash.get("process_count") or 0),
+                int(wash.get("process_count") or 0),
+            )
+            if int(wash.get("last_file_size") or 0) >= int(
+                grouped_wash.get("last_file_size") or 0
+            ):
+                grouped_wash["last_file_size"] = int(
+                    wash.get("last_file_size") or 0
+                )
+                grouped_wash["last_file_size_label"] = str(
+                    wash.get("last_file_size_label") or ""
+                )
+            grouped_wash["remaining_seconds"] = max(
+                int(grouped_wash.get("remaining_seconds") or 0),
+                int(wash.get("remaining_seconds") or 0),
+            )
     for item in grouped.values():
+        item["washes"].sort(
+            key=lambda value: (
+                int(value.get("season_number") or 1),
+                int(value.get("episode_number") or 0),
+            ),
+            reverse=True,
+        )
+        item["wash"] = item["washes"][0] if item["washes"] else None
         item["follower_count"] = len(item["follower_names"])
         item["display_name"] = "、".join(item["follower_names"])
     return list(grouped.values())
@@ -10124,6 +10180,49 @@ def delete_follow(
             (now_iso(), follow_id),
         )
     return {"ok": True}
+
+
+@APP.delete(
+    "/api/follows/{follow_id}/wash/{season_number}/{episode_number}"
+)
+def stop_follow_wash(
+    follow_id: int,
+    season_number: int,
+    episode_number: int,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    if season_number < 1 or episode_number < 1:
+        raise HTTPException(400, "洗版季集编号无效")
+    timestamp = now_iso()
+    message = "已手动停止本集洗版，后续不会再自动替换"
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?",
+            (follow_id,),
+        ).fetchone()
+        if not follow or (
+            user["role"] != "admin" and follow["user_id"] != user["id"]
+        ):
+            raise HTTPException(404, "没有找到这条追更")
+        cursor = connection.execute(
+            "UPDATE hdhive_wash_episodes SET locked_at = ?, last_message = ?, "
+            "updated_at = ? WHERE follow_id = ? AND season_number = ? "
+            "AND episode_number = ? AND locked_at = ''",
+            (
+                timestamp,
+                message,
+                timestamp,
+                follow_id,
+                season_number,
+                episode_number,
+            ),
+        )
+    return {
+        "ok": True,
+        "stopped": cursor.rowcount > 0,
+        "message": message,
+    }
 
 
 @APP.get("/api/follows/{follow_id}/resources")

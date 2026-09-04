@@ -1302,6 +1302,78 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(row["active"], 1)
         self.assertEqual(row["hdhive_subscription_id"], 9002)
 
+    def test_expired_wash_is_not_shown_as_active(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, active, "
+                "last_message, created_at, updated_at) VALUES(?, 223911, "
+                "'仙逆', 1, '已提交洗版：S01E156 · 1.17 GB', ?, ?)",
+                (user_id, timestamp, timestamp),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO hdhive_wash_episodes(follow_id, season_number, "
+                "episode_number, opened_at, closes_at, process_count, "
+                "updated_at) VALUES(?, 1, 156, ?, ?, 1, ?)",
+                (
+                    follow_id,
+                    (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
+                    (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                    timestamp,
+                ),
+            )
+
+        follow = app.list_follows(self.token)["follows"][0]
+
+        self.assertIsNone(follow["wash"])
+        self.assertEqual(follow["washes"], [])
+        self.assertEqual(follow["last_message"], "")
+
+    def test_stop_one_wash_keeps_follow_and_native_subscription_active(self):
+        timestamp = app.now_iso()
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, active, "
+                "hdhive_subscription_id, created_at, updated_at) "
+                "VALUES(?, 223911, '仙逆', 1, 9001, ?, ?)",
+                (user_id, timestamp, timestamp),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO hdhive_wash_episodes(follow_id, season_number, "
+                "episode_number, opened_at, closes_at, process_count, "
+                "updated_at) VALUES(?, 1, 156, ?, ?, 1, ?)",
+                (
+                    follow_id,
+                    timestamp,
+                    (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+                    timestamp,
+                ),
+            )
+
+        result = app.stop_follow_wash(follow_id, 1, 156, self.token)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["stopped"])
+        follow = app.list_follows(self.token)["follows"][0]
+        self.assertTrue(follow["active"])
+        self.assertTrue(follow["hdhive_subscribed"])
+        self.assertIsNone(follow["wash"])
+        with app.db() as connection:
+            wash = connection.execute(
+                "SELECT locked_at, last_message FROM hdhive_wash_episodes "
+                "WHERE follow_id = ? AND season_number = 1 "
+                "AND episode_number = 156",
+                (follow_id,),
+            ).fetchone()
+        self.assertTrue(wash["locked_at"])
+        self.assertIn("手动停止", wash["last_message"])
+
     def test_member_cannot_bind_native_subscription_directly(self):
         with app.db() as connection:
             user_id = connection.execute(
