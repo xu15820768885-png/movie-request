@@ -1242,6 +1242,66 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(row["active"], 0)
         self.assertIsNone(row["hdhive_subscription_id"])
 
+    def test_cancel_follow_succeeds_when_native_subscription_is_already_absent(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, hdhive_subscription_id, "
+                "created_at, updated_at"
+                ") VALUES(?, 301418, '现在不是出轨的问题', 9002, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        with patch.object(
+            app,
+            "hdhive_call",
+            side_effect=app.HTTPException(404, "影巢接口：订阅不存在"),
+        ):
+            result = app.delete_follow(follow_id, self.token)
+
+        self.assertTrue(result["ok"])
+        with app.db() as connection:
+            row = connection.execute(
+                "SELECT active, hdhive_subscription_id FROM tv_follows "
+                "WHERE id = ?",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(row["active"], 0)
+        self.assertIsNone(row["hdhive_subscription_id"])
+
+    def test_cancel_follow_keeps_local_record_on_other_hdhive_errors(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username = 'member'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows("
+                "user_id, tmdb_id, title, hdhive_subscription_id, "
+                "created_at, updated_at"
+                ") VALUES(?, 301418, '现在不是出轨的问题', 9002, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        with patch.object(
+            app,
+            "hdhive_call",
+            side_effect=app.HTTPException(502, "影巢接口暂时不可用"),
+        ):
+            with self.assertRaises(app.HTTPException):
+                app.delete_follow(follow_id, self.token)
+
+        with app.db() as connection:
+            row = connection.execute(
+                "SELECT active, hdhive_subscription_id FROM tv_follows "
+                "WHERE id = ?",
+                (follow_id,),
+            ).fetchone()
+        self.assertEqual(row["active"], 1)
+        self.assertEqual(row["hdhive_subscription_id"], 9002)
+
     def test_member_cannot_bind_native_subscription_directly(self):
         with app.db() as connection:
             user_id = connection.execute(

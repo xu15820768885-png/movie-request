@@ -1003,6 +1003,37 @@ def hdhive_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise HTTPException(502, f"暂时无法连接影巢：{error}") from error
 
 
+def delete_hdhive_subscription_if_present(subscription_id: int) -> None:
+    try:
+        hdhive_call("delete_subscription", subscription_id)
+    except HTTPException as error:
+        detail = str(error.detail or "").strip().lower()
+        cause = error.__cause__
+        error_code = (
+            str(cause.code or "").strip().lower()
+            if isinstance(cause, HDHiveOpenAPIError)
+            else ""
+        )
+        already_absent = (
+            "订阅不存在" in detail
+            or "subscription not found" in detail
+            or error_code in (
+                "subscription_not_found",
+                "openapi_subscription_not_found",
+            )
+        )
+        if not already_absent:
+            raise
+        # Deleting an already-absent subscription is an idempotent success,
+        # so this response must not leave the whole integration marked broken.
+        with db() as connection:
+            connection.execute(
+                "UPDATE hdhive_oauth SET status = 'connected', last_error = '', "
+                "updated_at = ? WHERE id = 1",
+                (now_iso(),),
+            )
+
+
 def hdhive_media_page(media_url: str) -> str:
     try:
         return hdhive_client().media_page(media_url)
@@ -10050,7 +10081,7 @@ def delete_hdhive_follow_subscription(
         raise HTTPException(404, "没有找到这条追更")
     subscription_id = int(follow["hdhive_subscription_id"] or 0)
     if subscription_id > 0:
-        hdhive_call("delete_subscription", subscription_id)
+        delete_hdhive_subscription_if_present(subscription_id)
     with db() as connection:
         connection.execute(
             "UPDATE tv_follows SET hdhive_subscription_id = NULL, "
@@ -10085,7 +10116,7 @@ def delete_follow(
             else 0
         )
     if subscription_id > 0 and remaining == 0:
-        hdhive_call("delete_subscription", subscription_id)
+        delete_hdhive_subscription_if_present(subscription_id)
     with db() as connection:
         connection.execute(
             "UPDATE tv_follows SET active = 0, hdhive_subscription_id = NULL, "
