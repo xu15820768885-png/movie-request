@@ -417,6 +417,7 @@ def init_db() -> None:
                 guanying_enabled INTEGER NOT NULL DEFAULT 1,
                 guanying_last_checked_at TEXT NOT NULL DEFAULT '',
                 guanying_next_check_at TEXT NOT NULL DEFAULT '',
+                wash_window_days INTEGER NOT NULL DEFAULT 0,
                 last_checked_at TEXT NOT NULL DEFAULT '',
                 last_message TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -719,6 +720,7 @@ def init_db() -> None:
             "guanying_enabled": "INTEGER NOT NULL DEFAULT 1",
             "guanying_last_checked_at": "TEXT NOT NULL DEFAULT ''",
             "guanying_next_check_at": "TEXT NOT NULL DEFAULT ''",
+            "wash_window_days": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in follow_column_sql.items():
             if column not in follow_columns:
@@ -2661,8 +2663,15 @@ def seed_offline_wash_baseline(
 ) -> None:
     config = hdhive_wash_config()
     timestamp = datetime.now(timezone.utc)
-    closes_at = (timestamp + timedelta(hours=config["window_hours"])).isoformat()
     with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (int(follow_id),)
+        ).fetchone()
+        days = effective_follow_wash_days(follow)
+        window_hours = config["window_hours"] if days == 0 else (
+            24 * 3650 if days < 0 else days * 24
+        )
+        closes_at = (timestamp + timedelta(hours=window_hours)).isoformat()
         for item in expected_files:
             file_name = str(item.get("name") or "")
             file_size = max(0, int(item.get("size") or 0))
@@ -6452,6 +6461,34 @@ def transferred_episode_set(tmdb_id: int, season_number: int) -> set[int]:
     return {int(row["episode_number"]) for row in rows}
 
 
+def effective_follow_wash_days(follow: Any) -> int:
+    """Return -1 for unlimited, otherwise the effective number of days."""
+
+    values = dict(follow) if follow is not None else {}
+    override = int(values.get("wash_window_days") or 0)
+    if override < 0:
+        return -1
+    if override > 0:
+        return min(365, override)
+    default_days = int(wash_rule_settings().get("default_wash_days") or 0)
+    return -1 if default_days == 0 else default_days
+
+
+def follow_wash_window_active(follow: Any, air_date: Any = "") -> bool:
+    days = effective_follow_wash_days(follow)
+    if days <= 0:
+        return True
+    try:
+        aired = datetime.fromisoformat(str(air_date or "")).date()
+    except ValueError:
+        values = dict(follow) if follow is not None else {}
+        try:
+            aired = datetime.fromisoformat(str(values.get("updated_at") or "")).date()
+        except ValueError:
+            return True
+    return (datetime.now(ZoneInfo("Asia/Shanghai")).date() - aired).days <= days
+
+
 def hdhive_wash_config() -> dict[str, Any]:
     with db() as connection:
         return {
@@ -6511,6 +6548,7 @@ def wash_rule_settings() -> dict[str, Any]:
             "platforms": values("wash_platforms"),
             "min_score_gain": max(1, min(100, int(setting(connection, "wash_min_score_gain") or 12))),
             "min_size_gain_percent": max(0, min(200, int(setting(connection, "wash_min_size_gain_percent") or 10))),
+            "default_wash_days": max(0, min(365, int(setting(connection, "wash_default_days") or 7))),
             "allow_equal_quality": setting(connection, "wash_allow_equal_quality") == "1",
             "magnet_auto_follow": setting(connection, "wash_magnet_auto_follow") != "0",
             "ed2k_auto_follow": setting(connection, "wash_ed2k_auto_follow") != "0",
@@ -6747,6 +6785,10 @@ def hdhive_wash_candidate_allowed(
         int(follow["baseline_episode"] or 0),
     )
     now = datetime.now(timezone.utc)
+    days = effective_follow_wash_days(follow)
+    window_hours = config["window_hours"] if days == 0 else (
+        24 * 3650 if days < 0 else days * 24
+    )
     with db() as connection:
         row = connection.execute(
             "SELECT * FROM hdhive_wash_episodes WHERE follow_id = ? "
@@ -6759,7 +6801,7 @@ def hdhive_wash_candidate_allowed(
             if (season, episode) <= baseline:
                 return False
             opened_at = now.isoformat()
-            closes_at = (now + timedelta(hours=config["window_hours"])).isoformat()
+            closes_at = (now + timedelta(hours=window_hours)).isoformat()
             connection.execute(
                 "INSERT INTO hdhive_wash_episodes("
                 "follow_id, season_number, episode_number, opened_at, closes_at, "
@@ -6802,7 +6844,7 @@ def hdhive_wash_candidate_allowed(
                     "AND season_number = ? AND episode_number = ?",
                     (
                         now.isoformat(),
-                        (now + timedelta(hours=config["window_hours"])).isoformat(),
+                        (now + timedelta(hours=window_hours)).isoformat(),
                         now.isoformat(),
                         follow_id,
                         season,
@@ -7952,16 +7994,9 @@ def hdhive_follow_loop() -> None:
             with db() as connection:
                 row = hdhive_oauth_row(connection)
                 enabled = setting(connection, "hdhive_poll_enabled") != "0"
-                interval = max(
-                    1800,
-                    min(
-                        43200,
-                        int(
-                            setting(connection, "hdhive_poll_interval")
-                            or 3600
-                        ),
-                    ),
-                )
+                # HDHive is message-driven: check the inbox hourly and keep
+                # the separate six-hour quiet reconciliation below.
+                interval = 3600
                 last_poll = setting(connection, "hdhive_last_poll_at")
                 next_poll = setting(connection, "hdhive_next_poll_at")
                 authorized_scopes = {
@@ -8267,7 +8302,20 @@ def auto_replenish_guanying_follow(follow_id: int) -> dict[str, Any]:
             current_files.get(str(latest_season), {}).get(str(latest_episode), {})
             if latest_season > 0 and latest_episode > 0 else {}
         )
-        if continuous_wash and current_file:
+        latest_air_date = next(
+            (
+                str(item.get("air_date") or "")
+                for item in aired
+                if int(item["season_number"]) == latest_season
+                and int(item["episode_number"]) == latest_episode
+            ),
+            "",
+        )
+        if (
+            continuous_wash
+            and current_file
+            and follow_wash_window_active(follow, latest_air_date)
+        ):
             for resource in _guanying_exact_resource(resources, latest_season, latest_episode):
                 share_url = str(resource.get("share_url") or resource.get("url") or "")
                 try:
@@ -8370,7 +8418,10 @@ def auto_replenish_guanying_follow(follow_id: int) -> dict[str, Any]:
 def guanying_follow_once() -> dict[str, int]:
     with db() as connection:
         row = guanying_row(connection)
-        enabled = setting(connection, "guanying_enabled") != "0"
+        enabled = (
+            setting(connection, "guanying_enabled") != "0"
+            and setting(connection, "guanying_follow_enabled") != "0"
+        )
         due = connection.execute(
             "SELECT id FROM tv_follows WHERE active = 1 AND media_type = 'tv' "
             "AND guanying_enabled = 1 AND (guanying_next_check_at = '' "
@@ -8406,6 +8457,342 @@ def guanying_follow_loop() -> None:
             update_worker_health("guanying_follow", "ok", detail=result)
         except Exception as error:
             update_worker_health("guanying_follow", "error", error=str(error))
+        time.sleep(60)
+
+
+def _dian_exact_resources(
+    resources: list[dict[str, Any]], season: int, episode: int
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for resource in resources:
+        parsed = parse_episode_spec(
+            " ".join(
+                str(value or "")
+                for value in (
+                    resource.get("episode_label"),
+                    resource.get("files"),
+                    resource.get("title"),
+                )
+            )
+        )
+        resource_season = int(
+            resource.get("season_number") or parsed.get("season_number") or season or 1
+        )
+        resource_episodes = {
+            int(value)
+            for value in (resource.get("episode_numbers") or parsed.get("episode_numbers") or [])
+            if int(value) > 0
+        }
+        safe_single = bool(
+            resource.get("safe_single_episode") or parsed.get("safe_single_episode")
+        )
+        if resource_season == season and resource_episodes == {episode} and safe_single:
+            matches.append(resource)
+    return sorted(
+        matches,
+        key=lambda item: resource_quality_score(
+            item.get("title"), item.get("size_bytes") or item.get("size_gb")
+        ),
+        reverse=True,
+    )
+
+
+def _dian_receive_exact_episode(
+    follow: sqlite3.Row,
+    resource: dict[str, Any],
+    season: int,
+    episode: int,
+    *,
+    scope: str,
+) -> bool:
+    share_id = int(resource.get("share_id") or 0)
+    resource_id = int(resource.get("resource_id") or 0)
+    if share_id <= 0 or resource_id <= 0:
+        return False
+    resource_key = f"{share_id}:{resource_id}"
+    share_label = str(resource.get("share_type_label") or "").strip().lower()
+    predicted_type = "magnet" if share_label == "磁力" else "ed2k" if share_label == "ed2k" else ""
+    if predicted_type:
+        rules = wash_rule_settings()
+        permission = (
+            f"{predicted_type}_auto_wash"
+            if scope == "auto_wash"
+            else f"{predicted_type}_auto_follow"
+        )
+        if not rules.get(permission):
+            return False
+    try:
+        job = begin_workflow_job(
+            user_id=int(follow["user_id"]), destination="p115", source="dian",
+            resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+            media_type="tv", title=str(follow["title"]), season_number=season,
+            episode_numbers=[episode], follow_id=int(follow["id"]), scope=scope,
+        )
+    except HTTPException:
+        return False
+    try:
+        unlocked = dian_call(
+            "unlock", {"share_id": share_id, "resource_id": resource_id}
+        )
+    except Exception as error:
+        fail_workflow_job(int(job["id"]), f"癫影解锁失败：{error}")
+        raise
+    unlocked_data = unlocked.get("data", unlocked)
+    data = unlocked_data if isinstance(unlocked_data, dict) else {"url": unlocked_data}
+    links = extract_dian_transfer_links(
+        {"payload": data.get("payload") if "payload" in data else data}
+    )
+    share_url = next(
+        (
+            link for link in links
+            if is_115_share_url(link) or guanying_link_kind(link) in {"magnet", "ed2k"}
+        ),
+        "",
+    )
+    if not share_url:
+        fail_workflow_job(int(job["id"]), "癫影解锁后没有支持的115、磁力或ED2K链接")
+        return False
+    link_type = "115" if is_115_share_url(share_url) else guanying_link_kind(share_url)
+    rules = wash_rule_settings()
+    if link_type in {"magnet", "ed2k"}:
+        permission = f"{link_type}_auto_wash" if scope == "auto_wash" else f"{link_type}_auto_follow"
+        if not rules.get(permission):
+            fail_workflow_job(int(job["id"]), f"统一规则未允许癫影{link_type}自动处理")
+            return False
+    client = p115_client()
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    if link_type in {"magnet", "ed2k"}:
+        queued = p115_call(
+            "提交癫影磁力/ED2K离线任务失败",
+            client.clouddownload_task_add_url,
+            {"url": share_url, "wp_path_id": target_cid},
+        )
+        if not response_ok(queued):
+            fail_workflow_job(
+                int(job["id"]), response_message(queued, "115离线任务提交失败")
+            )
+            return False
+        status = "submitted"
+        detail = f"癫影{link_type}严格单集已提交115离线"
+        update_workflow_job(int(job["id"]), "submitted", detail)
+    else:
+        tree = p115_share_tree(client, share_url)
+        selected, keys = select_largest_missing_episode_files_by_season(
+            tree, {(int(season), int(episode))}, fallback_season=int(season)
+        )
+        if (int(season), int(episode)) not in keys:
+            fail_workflow_job(int(job["id"]), "癫影115分享未找到精确单集")
+            return False
+        selected_ids = list(dict.fromkeys(
+            p115_share_item_id(item) for item in selected if p115_share_item_id(item)
+        ))
+        if not selected_ids:
+            fail_workflow_job(int(job["id"]), "癫影115分享没有可转存文件")
+            return False
+        before = p115_folder_snapshot(client, target_cid)
+        received = p115_call(
+            "接收癫影115分享失败",
+            client.share_receive,
+            {"file_id": ",".join(selected_ids), "cid": target_cid},
+            share_url=share_url,
+        )
+        if not response_ok(received) or not wait_for_p115_change(
+            lambda: p115_folder_snapshot(client, target_cid), before
+        ):
+            fail_workflow_job(int(job["id"]), "癫影115分享未确认写入目标目录")
+            return False
+        status = "success"
+        detail = f"癫影已精确转存 S{season:02d}E{episode:02d}"
+        update_workflow_job(int(job["id"]), "waiting_library", detail)
+    record_transfer(
+        user_id=int(follow["user_id"]), destination="p115", source="dian",
+        resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+        transfer_scope=scope, status=status, detail=detail,
+        follow_id=int(follow["id"]), season_number=season,
+        episode_numbers=[episode],
+    )
+    return True
+
+
+def auto_replenish_dian_follow(follow_id: int) -> dict[str, Any]:
+    with resource_request_lock("dian-follow", "tv", int(follow_id)):
+        with db() as connection:
+            follow = connection.execute(
+                "SELECT f.*, u.storage_destination FROM tv_follows f "
+                "JOIN users u ON u.id = f.user_id WHERE f.id = ? "
+                "AND f.active = 1 AND f.media_type = 'tv'",
+                (int(follow_id),),
+            ).fetchone()
+        if not follow:
+            return {"checked": False, "missing": 0, "transferred": [], "washed": []}
+        if storage_destination(follow["storage_destination"]) != "p115":
+            return {"checked": True, "missing": 0, "transferred": [], "washed": []}
+        aired = tmdb_aired_episodes(int(follow["tmdb_id"]))
+        progress = destination_episode_progress(
+            "p115", int(follow["tmdb_id"]), known_in_library=True
+        )
+        by_season = progress.get("emby_episode_numbers") or {}
+        missing = [
+            item for item in aired
+            if int(item["episode_number"]) not in {
+                int(value) for value in by_season.get(str(item["season_number"]), [])
+            }
+            and int(item["episode_number"]) not in transferred_episode_set(
+                int(follow["tmdb_id"]), int(item["season_number"])
+            )
+        ]
+        result = dian_call("list_shares", {
+            "tmdb_id": int(follow["tmdb_id"]), "media_type": "tv",
+            "page": 1, "size": 30, "sort": "hot",
+        })
+        resources = normalize_supported_dian_resources(extract_share_items(result))
+        cache_follow_resources(int(follow["id"]), "dian", resources)
+        transferred: list[tuple[int, int]] = []
+        for target in missing[:3]:
+            season = int(target["season_number"])
+            episode = int(target["episode_number"])
+            for resource in _dian_exact_resources(resources, season, episode):
+                if _dian_receive_exact_episode(
+                    follow, resource, season, episode, scope="auto_missing"
+                ):
+                    transferred.append((season, episode))
+                    break
+
+        washed: list[tuple[int, int]] = []
+        latest_season = int(progress.get("emby_latest_season_number") or 0)
+        latest_episode = int(progress.get("emby_latest_episode_number") or 0)
+        current_file = (
+            (progress.get("emby_episode_files") or {})
+            .get(str(latest_season), {})
+            .get(str(latest_episode), {})
+            if latest_season > 0 and latest_episode > 0 else {}
+        )
+        latest_air_date = next(
+            (
+                str(item.get("air_date") or "") for item in aired
+                if int(item["season_number"]) == latest_season
+                and int(item["episode_number"]) == latest_episode
+            ),
+            "",
+        )
+        if current_file and follow_wash_window_active(follow, latest_air_date):
+            for resource in _dian_exact_resources(
+                resources, latest_season, latest_episode
+            ):
+                candidate_name = str(resource.get("title") or "")
+                candidate_size = resource.get("size_bytes") or resource.get("size_gb") or 0
+                if not wash_candidate_is_upgrade(
+                    candidate_name=candidate_name, candidate_size=candidate_size,
+                    current_name=current_file.get("file_name"),
+                    current_size=current_file.get("file_size"),
+                ):
+                    continue
+                fingerprint = hashlib.sha256(
+                    f"dian\0{resource.get('share_id')}\0{resource.get('resource_id')}\0"
+                    f"{latest_season}\0{latest_episode}\0{candidate_name}\0{candidate_size}".encode()
+                ).hexdigest()
+                with db() as connection:
+                    if connection.execute(
+                        "SELECT 1 FROM unified_wash_attempts WHERE fingerprint = ?",
+                        (fingerprint,),
+                    ).fetchone():
+                        continue
+                success = _dian_receive_exact_episode(
+                    follow, resource, latest_season, latest_episode,
+                    scope="auto_wash",
+                )
+                timestamp = now_iso()
+                with db() as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO unified_wash_attempts("
+                        "fingerprint, follow_id, source, season_number, episode_number, "
+                        "resource_key, file_name, file_size, quality_score, status, detail, "
+                        "created_at, updated_at) VALUES(?, ?, 'dian', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            fingerprint, int(follow["id"]), latest_season, latest_episode,
+                            f"{resource.get('share_id')}:{resource.get('resource_id')}",
+                            candidate_name, resource_size_bytes(candidate_size),
+                            resource_quality_score(candidate_name, candidate_size),
+                            "success" if success else "failed",
+                            "符合统一规则，已提交癫影洗版" if success else "癫影转存未完成",
+                            timestamp, timestamp,
+                        ),
+                    )
+                if success:
+                    washed.append((latest_season, latest_episode))
+                    break
+        message = (
+            "癫影已自动转存：" + "、".join(f"S{s:02d}E{e:02d}" for s, e in transferred)
+            if transferred else
+            (f"癫影已检查，仍缺 {len(missing)} 集" if missing else "癫影已检查，没有应播缺集")
+        )
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET last_message = ?, updated_at = ? WHERE id = ?",
+                (message, now_iso(), int(follow_id)),
+            )
+        if transferred or washed:
+            send_notifications(
+                f"✅ 癫影追更处理完成\n\n剧集：{follow['title']}\n{message}"
+            )
+        return {
+            "checked": True, "missing": len(missing),
+            "transferred": [list(value) for value in transferred],
+            "washed": [list(value) for value in washed], "message": message,
+        }
+
+
+def dian_follow_once(force: bool = False) -> dict[str, int]:
+    with db() as connection:
+        enabled = setting(connection, "dian_follow_enabled") == "1"
+        interval = int(setting(connection, "dian_follow_interval") or 21600)
+        if interval not in {3600, 10800, 21600, 43200}:
+            interval = 21600
+        last_checked = setting(connection, "dian_follow_last_checked_at")
+        configured = bool(
+            setting(connection, "dian_base_url") and setting(connection, "dian_api_key")
+        )
+        follows = connection.execute(
+            "SELECT id FROM tv_follows WHERE active = 1 AND media_type = 'tv' "
+            "ORDER BY updated_at LIMIT 100"
+        ).fetchall()
+    try:
+        last_time = datetime.fromisoformat(last_checked).timestamp() if last_checked else 0
+    except ValueError:
+        last_time = 0
+    if not enabled or not configured or (
+        not force and time.time() - last_time < interval
+    ):
+        return {"checked": 0, "transferred": 0, "washed": 0, "failed": 0}
+    checked = transferred = washed = failed = 0
+    errors: list[str] = []
+    for item in follows:
+        try:
+            result = auto_replenish_dian_follow(int(item["id"]))
+            checked += int(bool(result.get("checked")))
+            transferred += len(result.get("transferred") or [])
+            washed += len(result.get("washed") or [])
+        except Exception as error:
+            failed += 1
+            errors.append(str(error)[:160])
+    with db() as connection:
+        set_setting(connection, "dian_follow_last_checked_at", now_iso())
+        set_setting(connection, "dian_follow_last_error", "；".join(errors[:3]))
+    return {
+        "checked": checked, "transferred": transferred,
+        "washed": washed, "failed": failed,
+    }
+
+
+def dian_follow_loop() -> None:
+    while True:
+        try:
+            update_worker_health("dian_follow", "running")
+            result = dian_follow_once()
+            update_worker_health("dian_follow", "ok", detail=result)
+        except Exception as error:
+            update_worker_health("dian_follow", "error", error=str(error))
         time.sleep(60)
 
 
@@ -8527,6 +8914,7 @@ def startup() -> None:
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
     Thread(target=guanying_follow_loop, name="guanying-follow", daemon=True).start()
+    Thread(target=dian_follow_loop, name="dian-follow", daemon=True).start()
     Thread(
         target=p115_offline_monitor_loop,
         name="p115-offline-monitor",
@@ -9531,13 +9919,7 @@ def hdhive_public_status() -> dict[str, Any]:
             HDHIVE_MESSAGE_POLLING_ENABLED
             and setting(connection, "hdhive_poll_enabled") != "0"
         )
-        poll_interval = max(
-            1800,
-            min(
-                43200,
-                int(setting(connection, "hdhive_poll_interval") or 3600),
-            ),
-        )
+        poll_interval = 3600
         last_poll = setting(connection, "hdhive_last_poll_at")
         next_poll = setting(connection, "hdhive_next_poll_at")
         last_full_scan = setting(connection, "hdhive_last_full_scan_at")
@@ -9657,10 +10039,12 @@ def guanying_public_status() -> dict[str, Any]:
     with db() as connection:
         row = guanying_row(connection)
         enabled = setting(connection, "guanying_enabled") != "0"
+        follow_enabled = setting(connection, "guanying_follow_enabled") != "0"
         interval = max(900, min(21600, int(setting(connection, "guanying_poll_interval") or 21600)))
         continuous_wash = setting(connection, "guanying_continuous_wash") != "0"
     return {
         "enabled": enabled,
+        "follow_enabled": follow_enabled,
         "configured": bool(row["username_cipher"] and row["password_cipher"]),
         "authenticated": str(row["status"] or "") == "connected",
         "status": str(row["status"] or "not_configured"),
@@ -9821,6 +10205,15 @@ async def guanying_config(
         )
         if "enabled" in payload:
             set_setting(connection, "guanying_enabled", "1" if payload["enabled"] else "0")
+        if "follow_enabled" in payload:
+            set_setting(
+                connection,
+                "guanying_follow_enabled",
+                "1" if payload["follow_enabled"] else "0",
+            )
+            # The new switch controls background work only; manual resource
+            # lookup remains available while automatic follow processing is off.
+            set_setting(connection, "guanying_enabled", "1")
         if "poll_interval" in payload:
             set_setting(connection, "guanying_poll_interval", max(900, min(21600, int(payload["poll_interval"]))))
         if "continuous_wash" in payload:
@@ -9894,6 +10287,31 @@ async def update_wash_rules(
             set_setting(connection, "wash_min_score_gain", max(1, min(100, int(payload["min_score_gain"]))))
         if "min_size_gain_percent" in payload:
             set_setting(connection, "wash_min_size_gain_percent", max(0, min(200, int(payload["min_size_gain_percent"]))))
+        if "default_wash_days" in payload:
+            days = int(payload["default_wash_days"])
+            if days not in {0, 1, 3, 7, 14, 30, 60, 90}:
+                raise HTTPException(400, "默认洗版期限无效")
+            set_setting(connection, "wash_default_days", days)
+            inherited = connection.execute(
+                "SELECT w.follow_id, w.season_number, w.episode_number, w.opened_at "
+                "FROM hdhive_wash_episodes w JOIN tv_follows f ON f.id = w.follow_id "
+                "WHERE f.wash_window_days = 0"
+            ).fetchall()
+            duration = timedelta(days=3650 if days == 0 else days)
+            for wash in inherited:
+                try:
+                    opened = datetime.fromisoformat(str(wash["opened_at"]))
+                except ValueError:
+                    opened = datetime.now(timezone.utc)
+                connection.execute(
+                    "UPDATE hdhive_wash_episodes SET closes_at = ?, locked_at = '', "
+                    "updated_at = ? WHERE follow_id = ? AND season_number = ? "
+                    "AND episode_number = ?",
+                    (
+                        (opened + duration).isoformat(), now_iso(), int(wash["follow_id"]),
+                        int(wash["season_number"]), int(wash["episode_number"]),
+                    ),
+                )
     return {"ok": True, **wash_rule_settings()}
 
 
@@ -10221,9 +10639,8 @@ async def update_hdhive_config(
                 "hdhive_poll_enabled",
                 "1" if payload["poll_enabled"] else "0",
             )
-        if payload.get("poll_interval"):
-            interval = max(1800, min(43200, int(payload["poll_interval"])))
-            set_setting(connection, "hdhive_poll_interval", interval)
+        if "poll_interval" in payload:
+            set_setting(connection, "hdhive_poll_interval", 3600)
         boolean_settings = {
             "auto_transfer": "hdhive_auto_transfer",
             "offline_retry_cleanup": "p115_offline_retry_cleanup",
@@ -10417,6 +10834,8 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     item["active"] = bool(item["active"])
     item["hdhive_subscribed"] = bool(item.get("hdhive_subscription_id"))
     item["guanying_enabled"] = bool(item.get("guanying_enabled", 1))
+    item["wash_window_days"] = int(item.get("wash_window_days") or 0)
+    item["wash_window_effective_days"] = effective_follow_wash_days(item)
     item["poster_url"] = tmdb_image_proxy_url(item["poster_path"], "w342")
     item["baseline_label"] = episode_progress_label(
         int(item["baseline_season"]),
@@ -10780,6 +11199,56 @@ def follow_timeline(
         "events": [dict(row) for row in events],
         "jobs": [serialize_workflow_job(row) for row in jobs],
     }
+
+
+@APP.patch("/api/follows/{follow_id}/wash-window")
+async def update_follow_wash_window(
+    follow_id: int,
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    days = int(payload.get("days") or 0)
+    if days not in {-1, 0, 1, 3, 7, 14, 30, 60, 90}:
+        raise HTTPException(400, "单独洗版期限无效")
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1", (follow_id,)
+        ).fetchone()
+        if not follow or (
+            user["role"] != "admin" and int(follow["user_id"]) != int(user["id"])
+        ):
+            raise HTTPException(404, "没有找到这条追更")
+        connection.execute(
+            "UPDATE tv_follows SET wash_window_days = ?, updated_at = ? WHERE id = ?",
+            (days, now_iso(), follow_id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ?", (follow_id,)
+        ).fetchone()
+        effective_days = effective_follow_wash_days(updated)
+        wash_rows = connection.execute(
+            "SELECT season_number, episode_number, opened_at "
+            "FROM hdhive_wash_episodes WHERE follow_id = ?",
+            (follow_id,),
+        ).fetchall()
+        duration = timedelta(days=3650 if effective_days <= 0 else effective_days)
+        for wash in wash_rows:
+            try:
+                opened = datetime.fromisoformat(str(wash["opened_at"]))
+            except ValueError:
+                opened = datetime.now(timezone.utc)
+            connection.execute(
+                "UPDATE hdhive_wash_episodes SET closes_at = ?, locked_at = '', "
+                "updated_at = ? WHERE follow_id = ? AND season_number = ? "
+                "AND episode_number = ?",
+                (
+                    (opened + duration).isoformat(), now_iso(), follow_id,
+                    int(wash["season_number"]), int(wash["episode_number"]),
+                ),
+            )
+    return {"ok": True, "follow": serialize_follow(updated)}
 
 
 @APP.get("/api/follows/emby-progress")
@@ -12524,6 +12993,12 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         dian_last_signin_mode = setting(connection, "dian_last_signin_mode") or ""
         dian_last_signin_status = setting(connection, "dian_last_signin_status") or ""
         dian_last_signin_message = setting(connection, "dian_last_signin_message") or ""
+        dian_follow_enabled = setting(connection, "dian_follow_enabled") == "1"
+        dian_follow_interval = int(setting(connection, "dian_follow_interval") or 21600)
+        if dian_follow_interval not in {3600, 10800, 21600, 43200}:
+            dian_follow_interval = 21600
+        dian_follow_last_checked_at = setting(connection, "dian_follow_last_checked_at")
+        dian_follow_last_error = setting(connection, "dian_follow_last_error")
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
@@ -12592,6 +13067,10 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "dian_last_signin_mode": dian_last_signin_mode,
         "dian_last_signin_status": dian_last_signin_status,
         "dian_last_signin_message": dian_last_signin_message,
+        "dian_follow_enabled": dian_follow_enabled,
+        "dian_follow_interval": dian_follow_interval,
+        "dian_follow_last_checked_at": dian_follow_last_checked_at,
+        "dian_follow_last_error": dian_follow_last_error,
         "p115_app": p115_app,
         "p115_app_name": P115_APPS.get(p115_app, p115_app),
         "p115_apps": P115_APPS,
@@ -12645,6 +13124,10 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
         raise HTTPException(400, "不支持这个115设备身份")
     if payload.get("p123_delivery_mode") not in (None, "", "telegram", "p115"):
         raise HTTPException(400, "123交付方式无效")
+    if "dian_follow_interval" in payload and int(payload["dian_follow_interval"]) not in {
+        3600, 10800, 21600, 43200,
+    }:
+        raise HTTPException(400, "癫影追更频率无效")
     if payload.get("wecom_agent_id"):
         try:
             if int(str(payload["wecom_agent_id"])) <= 0:
@@ -12661,6 +13144,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "emby_url", "emby_api_key", "dian_base_url", "dian_api_key",
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
+            "dian_follow_interval",
             "p115_target_cid", "p115_target_name",
             "p123_delivery_mode", "p123_staging_cid", "p123_staging_name",
             "wecom_corp_id", "wecom_agent_id",
@@ -12672,6 +13156,12 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                 set_setting(connection, key, payload[key])
         if "dian_signin_enabled" in payload:
             set_setting(connection, "dian_signin_enabled", "1" if payload["dian_signin_enabled"] else "0")
+        if "dian_follow_enabled" in payload:
+            set_setting(
+                connection,
+                "dian_follow_enabled",
+                "1" if payload["dian_follow_enabled"] else "0",
+            )
         for key, destination in (
             ("emby_library_notification_enabled", "p115"),
             ("p123_emby_library_notification_enabled", "p123"),

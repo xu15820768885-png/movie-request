@@ -137,8 +137,130 @@ class GuanyingDatabaseTests(unittest.TestCase):
         self.assertIn("guanying_next_check_at", columns)
         self.assertIn("guanying_session", tables)
         self.assertIn("unified_wash_attempts", tables)
+        self.assertIn("wash_window_days", columns)
         self.assertTrue(app.wash_rule_settings()["magnet_auto_follow"])
         self.assertFalse(app.wash_rule_settings()["magnet_auto_wash"])
+
+    def test_follow_sources_have_independent_background_switches(self):
+        asyncio.run(app.guanying_config(FakeRequest({
+            "base_url": "https://www.教父.com", "follow_enabled": False,
+        }), self.token))
+        asyncio.run(app.update_settings(FakeRequest({
+            "dian_follow_enabled": True, "dian_follow_interval": 10800,
+        }), self.token))
+        self.assertFalse(app.guanying_public_status()["follow_enabled"])
+        settings = app.get_settings(self.token)
+        self.assertTrue(settings["dian_follow_enabled"])
+        self.assertEqual(settings["dian_follow_interval"], 10800)
+        with app.db() as connection:
+            self.assertNotEqual(app.setting(connection, "guanying_enabled"), "0")
+
+    def test_default_and_per_follow_wash_windows(self):
+        asyncio.run(app.update_wash_rules(FakeRequest({
+            "default_wash_days": 14,
+        }), self.token))
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username='admin'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,created_at,updated_at) "
+                "VALUES(?,999,'tv','测试剧',?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            follow = connection.execute(
+                "SELECT * FROM tv_follows WHERE id=?", (follow_id,)
+            ).fetchone()
+        self.assertEqual(app.effective_follow_wash_days(follow), 14)
+        result = asyncio.run(app.update_follow_wash_window(
+            int(follow_id), FakeRequest({"days": 30}), self.token
+        ))
+        self.assertEqual(result["follow"]["wash_window_days"], 30)
+        self.assertEqual(result["follow"]["wash_window_effective_days"], 30)
+
+    def test_dian_cycle_only_scans_active_tv_follows_when_enabled(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username='admin'"
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,created_at,updated_at) "
+                "VALUES(?,1001,'tv','追更剧',?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+            connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,active,created_at,updated_at) "
+                "VALUES(?,1002,'tv','已停用剧',0,?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+            app.set_setting(connection, "dian_base_url", "https://dian.example")
+            app.set_setting(connection, "dian_api_key", "test-key")
+            app.set_setting(connection, "dian_follow_enabled", "1")
+            app.set_setting(connection, "dian_follow_interval", "3600")
+        with patch.object(
+            app, "auto_replenish_dian_follow",
+            return_value={"checked": True, "transferred": [[1, 8]], "washed": []},
+        ) as replenish:
+            result = app.dian_follow_once(force=True)
+        self.assertEqual(result, {
+            "checked": 1, "transferred": 1, "washed": 0, "failed": 0,
+        })
+        replenish.assert_called_once()
+
+    def test_dian_uses_exact_single_resources_for_follow_and_wash(self):
+        resources = [
+            {"title": "测试剧 S01E08 2160p", "season_number": 1,
+             "episode_numbers": [8], "safe_single_episode": True},
+            {"title": "测试剧 S01E01-E10", "season_number": 1,
+             "episode_numbers": list(range(1, 11)), "safe_single_episode": False},
+        ]
+        exact = app._dian_exact_resources(resources, 1, 8)
+        self.assertEqual([item["title"] for item in exact], ["测试剧 S01E08 2160p"])
+
+    def test_dian_follow_replenishes_missing_and_washes_latest_episode(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username='admin'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,created_at,updated_at) "
+                "VALUES(?,301418,'tv','现在不是出轨的问题',?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+        aired = [
+            {"season_number": 1, "episode_number": 7, "air_date": app.now_iso()[:10]},
+            {"season_number": 1, "episode_number": 8, "air_date": app.now_iso()[:10]},
+        ]
+        progress = {
+            "emby_latest_season_number": 1,
+            "emby_latest_episode_number": 7,
+            "emby_episode_numbers": {"1": list(range(1, 8))},
+            "emby_episode_files": {"1": {"7": {
+                "file_name": "Show.S01E07.1080p.WEBRip.H264.AAC.mkv",
+                "file_size": 2 * 1024**3,
+            }}},
+        }
+        resources = [
+            {"share_id": 1, "resource_id": 8, "title": "Show.S01E08.1080p.WEB-DL.mkv",
+             "season_number": 1, "episode_numbers": [8], "safe_single_episode": True,
+             "size_bytes": 3 * 1024**3},
+            {"share_id": 1, "resource_id": 7, "title": "Show.S01E07.2160p.WEB-DL.H265.HDR10.mkv",
+             "season_number": 1, "episode_numbers": [7], "safe_single_episode": True,
+             "size_bytes": 8 * 1024**3},
+        ]
+        with patch.object(app, "tmdb_aired_episodes", return_value=aired), patch.object(
+            app, "destination_episode_progress", return_value=progress
+        ), patch.object(app, "transferred_episode_set", return_value=set()), patch.object(
+            app, "dian_call", return_value={"data": []}
+        ), patch.object(
+            app, "normalize_supported_dian_resources", return_value=resources
+        ), patch.object(
+            app, "_dian_receive_exact_episode", return_value=True
+        ) as receive, patch.object(app, "send_notifications"):
+            result = app.auto_replenish_dian_follow(int(follow_id))
+        self.assertEqual(result["transferred"], [[1, 8]])
+        self.assertEqual(result["washed"], [[1, 7]])
+        self.assertEqual(receive.call_count, 2)
 
     def test_wash_rules_are_single_shared_configuration(self):
         result = asyncio.run(app.update_wash_rules(FakeRequest({
