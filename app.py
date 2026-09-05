@@ -727,6 +727,39 @@ def init_db() -> None:
                 connection.execute(
                     f"ALTER TABLE tv_follows ADD COLUMN {column} {definition}"
                 )
+        wash_days_migration = setting(connection, "wash_window_max_seven_days_v1")
+        if wash_days_migration != "1":
+            try:
+                saved_default_days = int(setting(connection, "wash_default_days") or 7)
+            except ValueError:
+                saved_default_days = 7
+            default_days = max(1, min(7, saved_default_days))
+            set_setting(connection, "wash_default_days", default_days)
+            connection.execute(
+                "UPDATE tv_follows SET wash_window_days = 7 "
+                "WHERE wash_window_days < 0 OR wash_window_days > 7"
+            )
+            wash_rows = connection.execute(
+                "SELECT w.follow_id, w.season_number, w.episode_number, w.opened_at, "
+                "f.wash_window_days FROM hdhive_wash_episodes w "
+                "JOIN tv_follows f ON f.id = w.follow_id"
+            ).fetchall()
+            for wash in wash_rows:
+                try:
+                    opened = datetime.fromisoformat(str(wash["opened_at"]))
+                except ValueError:
+                    opened = datetime.now(timezone.utc)
+                duration_days = int(wash["wash_window_days"] or default_days)
+                connection.execute(
+                    "UPDATE hdhive_wash_episodes SET closes_at = ?, updated_at = ? "
+                    "WHERE follow_id = ? AND season_number = ? AND episode_number = ?",
+                    (
+                        (opened + timedelta(days=duration_days)).isoformat(),
+                        now_iso(), int(wash["follow_id"]),
+                        int(wash["season_number"]), int(wash["episode_number"]),
+                    ),
+                )
+            set_setting(connection, "wash_window_max_seven_days_v1", "1")
         request_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(movie_requests)").fetchall()
@@ -2668,9 +2701,7 @@ def seed_offline_wash_baseline(
             "SELECT * FROM tv_follows WHERE id = ?", (int(follow_id),)
         ).fetchone()
         days = effective_follow_wash_days(follow)
-        window_hours = config["window_hours"] if days == 0 else (
-            24 * 3650 if days < 0 else days * 24
-        )
+        window_hours = days * 24
         closes_at = (timestamp + timedelta(hours=window_hours)).isoformat()
         for item in expected_files:
             file_name = str(item.get("name") or "")
@@ -6462,16 +6493,13 @@ def transferred_episode_set(tmdb_id: int, season_number: int) -> set[int]:
 
 
 def effective_follow_wash_days(follow: Any) -> int:
-    """Return -1 for unlimited, otherwise the effective number of days."""
+    """Return the effective wash duration, capped at seven days."""
 
     values = dict(follow) if follow is not None else {}
     override = int(values.get("wash_window_days") or 0)
-    if override < 0:
-        return -1
     if override > 0:
-        return min(365, override)
-    default_days = int(wash_rule_settings().get("default_wash_days") or 0)
-    return -1 if default_days == 0 else default_days
+        return max(1, min(7, override))
+    return max(1, min(7, int(wash_rule_settings().get("default_wash_days") or 7)))
 
 
 def follow_wash_window_active(follow: Any, air_date: Any = "") -> bool:
@@ -6548,7 +6576,7 @@ def wash_rule_settings() -> dict[str, Any]:
             "platforms": values("wash_platforms"),
             "min_score_gain": max(1, min(100, int(setting(connection, "wash_min_score_gain") or 12))),
             "min_size_gain_percent": max(0, min(200, int(setting(connection, "wash_min_size_gain_percent") or 10))),
-            "default_wash_days": max(0, min(365, int(setting(connection, "wash_default_days") or 7))),
+            "default_wash_days": max(1, min(7, int(setting(connection, "wash_default_days") or 7))),
             "allow_equal_quality": setting(connection, "wash_allow_equal_quality") == "1",
             "magnet_auto_follow": setting(connection, "wash_magnet_auto_follow") != "0",
             "ed2k_auto_follow": setting(connection, "wash_ed2k_auto_follow") != "0",
@@ -6786,9 +6814,7 @@ def hdhive_wash_candidate_allowed(
     )
     now = datetime.now(timezone.utc)
     days = effective_follow_wash_days(follow)
-    window_hours = config["window_hours"] if days == 0 else (
-        24 * 3650 if days < 0 else days * 24
-    )
+    window_hours = days * 24
     with db() as connection:
         row = connection.execute(
             "SELECT * FROM hdhive_wash_episodes WHERE follow_id = ? "
@@ -10301,7 +10327,7 @@ async def update_wash_rules(
             set_setting(connection, "wash_min_size_gain_percent", max(0, min(200, int(payload["min_size_gain_percent"]))))
         if "default_wash_days" in payload:
             days = int(payload["default_wash_days"])
-            if days not in {0, 1, 3, 7, 14, 30, 60, 90}:
+            if days not in {1, 2, 3, 4, 5, 6, 7}:
                 raise HTTPException(400, "默认洗版期限无效")
             set_setting(connection, "wash_default_days", days)
             inherited = connection.execute(
@@ -10309,7 +10335,7 @@ async def update_wash_rules(
                 "FROM hdhive_wash_episodes w JOIN tv_follows f ON f.id = w.follow_id "
                 "WHERE f.wash_window_days = 0"
             ).fetchall()
-            duration = timedelta(days=3650 if days == 0 else days)
+            duration = timedelta(days=days)
             for wash in inherited:
                 try:
                     opened = datetime.fromisoformat(str(wash["opened_at"]))
@@ -11225,7 +11251,7 @@ async def update_follow_wash_window(
     user = require_user(movie_session)
     payload = await request.json()
     days = int(payload.get("days") or 0)
-    if days not in {-1, 0, 1, 3, 7, 14, 30, 60, 90}:
+    if days not in {0, 1, 2, 3, 4, 5, 6, 7}:
         raise HTTPException(400, "单独洗版期限无效")
     with db() as connection:
         follow = connection.execute(
@@ -11248,7 +11274,7 @@ async def update_follow_wash_window(
             "FROM hdhive_wash_episodes WHERE follow_id = ?",
             (follow_id,),
         ).fetchall()
-        duration = timedelta(days=3650 if effective_days <= 0 else effective_days)
+        duration = timedelta(days=effective_days)
         for wash in wash_rows:
             try:
                 opened = datetime.fromisoformat(str(wash["opened_at"]))

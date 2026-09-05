@@ -157,7 +157,7 @@ class GuanyingDatabaseTests(unittest.TestCase):
 
     def test_default_and_per_follow_wash_windows(self):
         asyncio.run(app.update_wash_rules(FakeRequest({
-            "default_wash_days": 14,
+            "default_wash_days": 4,
         }), self.token))
         with app.db() as connection:
             user_id = connection.execute(
@@ -171,12 +171,51 @@ class GuanyingDatabaseTests(unittest.TestCase):
             follow = connection.execute(
                 "SELECT * FROM tv_follows WHERE id=?", (follow_id,)
             ).fetchone()
-        self.assertEqual(app.effective_follow_wash_days(follow), 14)
+        self.assertEqual(app.effective_follow_wash_days(follow), 4)
         result = asyncio.run(app.update_follow_wash_window(
-            int(follow_id), FakeRequest({"days": 30}), self.token
+            int(follow_id), FakeRequest({"days": 6}), self.token
         ))
-        self.assertEqual(result["follow"]["wash_window_days"], 30)
-        self.assertEqual(result["follow"]["wash_window_effective_days"], 30)
+        self.assertEqual(result["follow"]["wash_window_days"], 6)
+        self.assertEqual(result["follow"]["wash_window_effective_days"], 6)
+
+    def test_wash_window_is_limited_to_one_through_seven_days(self):
+        with self.assertRaises(app.HTTPException):
+            asyncio.run(app.update_wash_rules(FakeRequest({
+                "default_wash_days": 8,
+            }), self.token))
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username='admin'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,created_at,updated_at) "
+                "VALUES(?,998,'tv','七天限制测试',?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+        with self.assertRaises(app.HTTPException):
+            asyncio.run(app.update_follow_wash_window(
+                int(follow_id), FakeRequest({"days": 8}), self.token
+            ))
+
+    def test_old_long_or_unlimited_wash_windows_migrate_to_seven_days(self):
+        with app.db() as connection:
+            user_id = connection.execute(
+                "SELECT id FROM users WHERE username='admin'"
+            ).fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id,tmdb_id,media_type,title,wash_window_days,created_at,updated_at) "
+                "VALUES(?,997,'tv','旧期限测试',-1,?,?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+            app.set_setting(connection, "wash_default_days", "90")
+            app.set_setting(connection, "wash_window_max_seven_days_v1", "0")
+        app.init_db()
+        with app.db() as connection:
+            follow = connection.execute(
+                "SELECT wash_window_days FROM tv_follows WHERE id = ?", (follow_id,)
+            ).fetchone()
+            self.assertEqual(app.setting(connection, "wash_default_days"), "7")
+        self.assertEqual(int(follow["wash_window_days"]), 7)
 
     def test_dian_cycle_only_scans_active_tv_follows_when_enabled(self):
         with app.db() as connection:
