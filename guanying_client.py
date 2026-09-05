@@ -144,6 +144,28 @@ def extract_media_candidates(document: str) -> list[dict[str, Any]]:
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
+            # Current Guanying search pages expose parallel compact arrays,
+            # for example {"d":["mv"], "i":["abc"], "title":["..."]}.
+            compact_kinds = value.get("d")
+            compact_ids = value.get("i")
+            if isinstance(compact_kinds, list) and isinstance(compact_ids, list):
+                compact_titles = value.get("title") or value.get("name") or []
+                compact_years = value.get("year") or []
+                for index, compact_id in enumerate(compact_ids):
+                    compact_kind = (
+                        compact_kinds[index] if index < len(compact_kinds) else ""
+                    )
+                    compact_title = (
+                        compact_titles[index]
+                        if isinstance(compact_titles, list) and index < len(compact_titles)
+                        else ""
+                    )
+                    compact_year = (
+                        compact_years[index]
+                        if isinstance(compact_years, list) and index < len(compact_years)
+                        else ""
+                    )
+                    add(compact_kind, compact_id, compact_title, compact_year)
             kind = value.get("dir") or value.get("type") or value.get("media_type")
             media_id = value.get("id") or value.get("bid") or value.get("media_id")
             if kind and media_id:
@@ -170,6 +192,66 @@ def normalize_resources(payload: Any, *, media_kind: str, media_id: str) -> list
     """Flatten the site's downlist/panlist response into allowed resource rows."""
 
     raw_items: list[dict[str, Any]] = []
+
+    def compact_rows(value: Any) -> None:
+        if isinstance(value, dict):
+            downlist = value.get("downlist")
+            if isinstance(downlist, dict):
+                downlist = downlist.get("list")
+            if isinstance(downlist, dict):
+                hashes = downlist.get("m") or []
+                titles = downlist.get("t") or []
+                sizes = downlist.get("s") or []
+                if isinstance(hashes, list):
+                    for index, raw_hash in enumerate(hashes):
+                        current = str(raw_hash or "").strip()
+                        if re.fullmatch(r"[A-Fa-f0-9]{32,64}", current):
+                            current = f"magnet:?xt=urn:btih:{current}"
+                        links = allowed_links([current])
+                        if not links:
+                            continue
+                        title = (
+                            titles[index]
+                            if isinstance(titles, list) and index < len(titles)
+                            else f"观影资源 {index + 1}"
+                        )
+                        size = (
+                            sizes[index]
+                            if isinstance(sizes, list) and index < len(sizes)
+                            else ""
+                        )
+                        raw_items.append({
+                            "payload": {"title": title, "size": size, "hash": raw_hash},
+                            "links": links,
+                            "group": "downlist",
+                        })
+
+            panlist = value.get("panlist")
+            if isinstance(panlist, dict):
+                names = panlist.get("name") or []
+                urls = panlist.get("url") or []
+                if isinstance(urls, list):
+                    for index, raw_url in enumerate(urls):
+                        links = allowed_links([raw_url])
+                        if not links:
+                            continue
+                        title = (
+                            names[index]
+                            if isinstance(names, list) and index < len(names)
+                            else f"观影网盘资源 {index + 1}"
+                        )
+                        raw_items.append({
+                            "payload": {"title": title, "url": raw_url},
+                            "links": links,
+                            "group": "panlist",
+                        })
+            for child in value.values():
+                compact_rows(child)
+        elif isinstance(value, list):
+            for child in value:
+                compact_rows(child)
+
+    compact_rows(payload)
 
     def visit(value: Any, group: str = "") -> None:
         if isinstance(value, dict):

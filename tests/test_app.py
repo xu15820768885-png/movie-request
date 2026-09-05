@@ -549,6 +549,43 @@ class MovieRequestTests(unittest.TestCase):
             10000,
         )
 
+    def test_emby_episode_progress_merges_duplicate_series_across_libraries(self):
+        with app.db() as connection:
+            app.set_setting(connection, "emby_url", "http://nas:8096")
+            app.set_setting(connection, "emby_api_key", "emby-key")
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        series = FakeResponse({"Items": [
+            {"Id": "link-series", "ProviderIds": {"Tmdb": "301418"}},
+            {"Id": "strm-series", "ProviderIds": {"Tmdb": "301418"}},
+        ]})
+        first_library = FakeResponse({"Items": [
+            {"ParentIndexNumber": 1, "IndexNumber": episode}
+            for episode in range(1, 7)
+        ]})
+        second_library = FakeResponse({"Items": [
+            {"ParentIndexNumber": 1, "IndexNumber": episode}
+            for episode in range(1, 9)
+        ]})
+        with patch.object(
+            app.requests, "get", side_effect=[series, first_library, second_library]
+        ) as get:
+            result = app.emby_series_episode_progress(301418)
+
+        self.assertEqual(result["emby_latest_episode_number"], 8)
+        self.assertEqual(result["emby_episode_numbers"], {"1": list(range(1, 9))})
+        self.assertIn("/Shows/link-series/Episodes", get.call_args_list[1].args[0])
+        self.assertIn("/Shows/strm-series/Episodes", get.call_args_list[2].args[0])
+
     def test_emby_episode_progress_keeps_real_gaps_beyond_default_page_size(self):
         with app.db() as connection:
             app.set_setting(connection, "emby_url", "http://nas:8096")
@@ -2901,6 +2938,27 @@ class MovieRequestTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(completed["state"], "ingested")
         self.assertTrue(completed["completed_at"])
+
+    def test_workflow_reconciliation_can_reuse_fresh_emby_progress(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="guanying",
+            resource_key="episode-8",
+            tmdb_id=301418,
+            media_type="tv",
+            title="现在不是出轨的问题 S01E08",
+            season_number=1,
+            episode_numbers=[8],
+        )
+        app.update_workflow_job(int(job["id"]), "waiting_library", "等待入库")
+        progress = {"emby_episode_numbers": {"1": list(range(1, 9))}}
+        with patch.object(app, "destination_episode_progress") as fetch:
+            completed = app.complete_workflow_jobs_from_library(
+                "p115", {301418}, {301418: progress}
+            )
+        self.assertEqual(completed, 1)
+        fetch.assert_not_called()
 
     def test_emby_reconciles_failed_job_and_recovers_missing_episode_metadata(self):
         job = app.begin_workflow_job(

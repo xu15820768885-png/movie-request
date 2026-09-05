@@ -4167,71 +4167,82 @@ def emby_series_episode_progress(
             series_response.raise_for_status()
             series_items = series_response.json().get("Items", [])
 
-        series_id = ""
+        series_ids: list[str] = []
         for item in series_items:
             provider_ids = item.get("ProviderIds") or {}
             raw_id = provider_ids.get("Tmdb") or provider_ids.get("TMDB")
             if str(raw_id or "") == str(tmdb_id):
                 series_id = str(item.get("Id") or item.get("id") or "")
-                break
-        if not series_id:
+                if series_id and series_id not in series_ids:
+                    series_ids.append(series_id)
+        if not series_ids:
             with CACHE_LOCK:
                 EMBY_EPISODE_CACHE.pop(cache_key, None)
             return {}
 
-        episodes_response = requests.get(
-            emby_api_url(base_url, f"/Shows/{quote(series_id, safe='')}/Episodes"),
-            headers=headers,
-            params={
-                "Fields": (
-                    "ParentIndexNumber,IndexNumber,IsMissing,LocationType,"
-                    "Path,MediaSources,Size"
-                ),
-                "IsMissing": "false",
-                "StartIndex": 0,
-                "Limit": 10000,
-            },
-            timeout=20,
-        )
-        episodes_response.raise_for_status()
         latest_season = 0
         latest_episode = 0
         episode_numbers_by_season: dict[int, set[int]] = {}
         episode_files_by_season: dict[int, dict[int, dict[str, Any]]] = {}
-        for episode in episodes_response.json().get("Items", []):
-            if episode.get("IsMissing") is True or episode.get("LocationType") == "Virtual":
-                continue
-            season_number = int(episode.get("ParentIndexNumber") or 0)
-            episode_number = int(episode.get("IndexNumber") or 0)
-            if season_number > 0 and episode_number > 0:
-                episode_numbers_by_season.setdefault(season_number, set()).add(
-                    episode_number
+        successful_series = 0
+        for series_id in series_ids:
+            try:
+                episodes_response = requests.get(
+                    emby_api_url(base_url, f"/Shows/{quote(series_id, safe='')}/Episodes"),
+                    headers=headers,
+                    params={
+                        "Fields": (
+                            "ParentIndexNumber,IndexNumber,IsMissing,LocationType,"
+                            "Path,MediaSources,Size"
+                        ),
+                        "IsMissing": "false",
+                        "StartIndex": 0,
+                        "Limit": 10000,
+                    },
+                    timeout=20,
                 )
-                media_sources = episode.get("MediaSources") or []
-                source_sizes = [
-                    int(source.get("Size") or 0)
-                    for source in media_sources
-                    if isinstance(source, dict)
-                ]
-                file_size = max([int(episode.get("Size") or 0), *source_sizes])
-                file_path = str(episode.get("Path") or "")
-                file_name = Path(file_path).name or str(episode.get("Name") or "")
-                if file_size > 0:
-                    current_file = episode_files_by_season.setdefault(
-                        season_number, {}
-                    ).get(episode_number)
-                    if not current_file or file_size > int(
-                        current_file.get("file_size") or 0
-                    ):
-                        episode_files_by_season[season_number][episode_number] = {
-                            "file_name": file_name,
-                            "file_size": file_size,
-                        }
-            if episode_number > 0 and (season_number, episode_number) > (
-                latest_season,
-                latest_episode,
-            ):
-                latest_season, latest_episode = season_number, episode_number
+                episodes_response.raise_for_status()
+                successful_series += 1
+            except requests.RequestException:
+                # One duplicate library path must not hide a healthy copy of
+                # the same TMDB series in another Emby library.
+                continue
+            for episode in episodes_response.json().get("Items", []):
+                if episode.get("IsMissing") is True or episode.get("LocationType") == "Virtual":
+                    continue
+                season_number = int(episode.get("ParentIndexNumber") or 0)
+                episode_number = int(episode.get("IndexNumber") or 0)
+                if season_number > 0 and episode_number > 0:
+                    episode_numbers_by_season.setdefault(season_number, set()).add(
+                        episode_number
+                    )
+                    media_sources = episode.get("MediaSources") or []
+                    source_sizes = [
+                        int(source.get("Size") or 0)
+                        for source in media_sources
+                        if isinstance(source, dict)
+                    ]
+                    file_size = max([int(episode.get("Size") or 0), *source_sizes])
+                    file_path = str(episode.get("Path") or "")
+                    file_name = Path(file_path).name or str(episode.get("Name") or "")
+                    if file_size > 0:
+                        current_file = episode_files_by_season.setdefault(
+                            season_number, {}
+                        ).get(episode_number)
+                        if not current_file or file_size > int(
+                            current_file.get("file_size") or 0
+                        ):
+                            episode_files_by_season[season_number][episode_number] = {
+                                "file_name": file_name,
+                                "file_size": file_size,
+                            }
+                if episode_number > 0 and (season_number, episode_number) > (
+                    latest_season,
+                    latest_episode,
+                ):
+                    latest_season, latest_episode = season_number, episode_number
+        if successful_series <= 0:
+            return {}
         if latest_episode <= 0:
             with CACHE_LOCK:
                 EMBY_EPISODE_CACHE.pop(cache_key, None)
@@ -5089,6 +5100,7 @@ def queue_emby_webhook(
 def complete_workflow_jobs_from_library(
     destination: str,
     library_tmdb_ids: set[int],
+    progress_by_tmdb: Optional[dict[int, dict[str, Any]]] = None,
 ) -> int:
     current = storage_destination(destination)
     if not library_tmdb_ids:
@@ -5102,7 +5114,7 @@ def complete_workflow_jobs_from_library(
             (current, *sorted(library_tmdb_ids)),
         ).fetchall()
     completed = 0
-    progress_cache: dict[int, dict[str, Any]] = {}
+    progress_cache: dict[int, dict[str, Any]] = dict(progress_by_tmdb or {})
     for row in rows:
         episodes = episode_numbers_from_json(row["episode_numbers_json"])
         if str(row["media_type"] or "") == "tv":
@@ -9494,6 +9506,11 @@ def emby_episode_progress(
     )
     if progress:
         sync_wash_sizes_from_emby(destination, tmdb_id, progress)
+        complete_workflow_jobs_from_library(
+            destination,
+            {tmdb_id},
+            {tmdb_id: progress},
+        )
     return {
         "in_library": bool(progress.get("emby_latest_episode_number")),
         "emby_latest_season_number": 0,
@@ -10570,6 +10587,12 @@ def refresh_follow_emby_baseline(follow_id: int) -> sqlite3.Row:
     )
     season_number = int(progress.get("emby_latest_season_number") or 1)
     episode_number = int(progress.get("emby_latest_episode_number") or 0)
+    if progress:
+        complete_workflow_jobs_from_library(
+            destination,
+            {tmdb_id},
+            {tmdb_id: progress},
+        )
     with db() as connection:
         connection.execute(
             "UPDATE tv_follows SET current_emby_season = ?, current_emby_episode = ?, "

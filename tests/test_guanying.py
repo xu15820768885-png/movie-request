@@ -60,6 +60,33 @@ class GuanyingFoundationTests(unittest.TestCase):
         self.assertEqual(len(resources), 1)
         self.assertEqual(resources[0]["share_type_label"], "磁力")
 
+    def test_current_compact_search_and_download_payload_are_normalized(self):
+        document = (
+            '<script>_obj.search={"l":{"title":["给阿嬷的情书"],'
+            '"year":[2026],"d":["mv"],"i":["eGe5d"]}};</script>'
+        )
+        self.assertEqual(extract_media_candidates(document), [{
+            "kind": "mv", "id": "eGe5d", "title": "给阿嬷的情书", "year": "2026",
+        }])
+        resources = normalize_resources({
+            "downlist": {"list": {
+                "m": ["0123456789abcdef0123456789abcdef01234567"],
+                "t": ["给阿嬷的情书 2026 1080p"],
+                "s": ["4.2 GB"],
+            }},
+            "panlist": {
+                "name": ["115资源", "夸克资源"],
+                "url": ["https://115.com/s/abc", "https://pan.quark.cn/s/no"],
+            },
+        }, media_kind="mv", media_id="eGe5d")
+        self.assertEqual(len(resources), 2)
+        self.assertEqual(
+            {item["link_type"] for item in resources}, {"115", "magnet"}
+        )
+        magnet = next(item for item in resources if item["link_type"] == "magnet")
+        self.assertEqual(magnet["title"], "给阿嬷的情书 2026 1080p")
+        self.assertTrue(magnet["share_url"].startswith("magnet:?xt=urn:btih:"))
+
     def test_exact_single_episode_filter_rejects_pack_and_wrong_episode(self):
         resources = [
             {"title": "剧名 S01E03", "share_url": "magnet:?xt=urn:btih:one"},
