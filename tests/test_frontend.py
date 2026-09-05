@@ -54,7 +54,7 @@ class FollowFeatureVisibilityTest(unittest.TestCase):
         self.assertIn("/api/admin/hdhive/follow-events", html)
         self.assertIn("站内信检查间隔", html)
         self.assertIn('<option value="1800">每30分钟</option>', html)
-        self.assertIn('<option value="3600">每1小时</option>', html)
+        self.assertIn('<option value="3600">每1小时（默认）</option>', html)
         self.assertIn('<option value="21600">每6小时</option>', html)
         self.assertIn('<option value="43200">每12小时</option>', html)
         self.assertNotIn('<option value="300">每5分钟</option>', html)

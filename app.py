@@ -7994,9 +7994,15 @@ def hdhive_follow_loop() -> None:
             with db() as connection:
                 row = hdhive_oauth_row(connection)
                 enabled = setting(connection, "hdhive_poll_enabled") != "0"
-                # HDHive is message-driven: check the inbox hourly and keep
-                # the separate six-hour quiet reconciliation below.
-                interval = 3600
+                # HDHive stays message-driven. The inbox polling interval is
+                # configurable; quiet reconciliation remains a separate six-hour timer.
+                interval = max(
+                    1800,
+                    min(
+                        43200,
+                        int(setting(connection, "hdhive_poll_interval") or 3600),
+                    ),
+                )
                 last_poll = setting(connection, "hdhive_last_poll_at")
                 next_poll = setting(connection, "hdhive_next_poll_at")
                 authorized_scopes = {
@@ -9919,7 +9925,13 @@ def hdhive_public_status() -> dict[str, Any]:
             HDHIVE_MESSAGE_POLLING_ENABLED
             and setting(connection, "hdhive_poll_enabled") != "0"
         )
-        poll_interval = 3600
+        poll_interval = max(
+            1800,
+            min(
+                43200,
+                int(setting(connection, "hdhive_poll_interval") or 3600),
+            ),
+        )
         last_poll = setting(connection, "hdhive_last_poll_at")
         next_poll = setting(connection, "hdhive_next_poll_at")
         last_full_scan = setting(connection, "hdhive_last_full_scan_at")
@@ -10640,7 +10652,10 @@ async def update_hdhive_config(
                 "1" if payload["poll_enabled"] else "0",
             )
         if "poll_interval" in payload:
-            set_setting(connection, "hdhive_poll_interval", 3600)
+            interval = int(payload["poll_interval"])
+            if interval not in {1800, 3600, 21600, 43200}:
+                raise HTTPException(400, "影巢站内信检查频率无效")
+            set_setting(connection, "hdhive_poll_interval", interval)
         boolean_settings = {
             "auto_transfer": "hdhive_auto_transfer",
             "offline_retry_cleanup": "p115_offline_retry_cleanup",
