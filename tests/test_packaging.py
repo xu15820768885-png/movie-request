@@ -8,6 +8,7 @@ class ImagePackagingTests(unittest.TestCase):
             Path(__file__).parents[1] / "Dockerfile"
         ).read_text(encoding="utf-8")
         self.assertIn("COPY workflow.py .", dockerfile)
+        self.assertIn("COPY guanying_client.py .", dockerfile)
         self.assertIn('RUN python -c "import app, workflow"', dockerfile)
 
 

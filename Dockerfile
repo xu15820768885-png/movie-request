@@ -14,6 +14,7 @@ COPY app.py .
 COPY workflow.py .
 COPY dian115_openapi.py .
 COPY hdhive_openapi.py .
+COPY guanying_client.py .
 COPY web ./web
 
 # Fail the image build if an application module was omitted from the image.

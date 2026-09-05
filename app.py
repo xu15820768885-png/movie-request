@@ -22,6 +22,7 @@ from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Iterable, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 import uvicorn
@@ -34,6 +35,12 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from requests.adapters import HTTPAdapter
 from dian115_openapi import Dian115OpenAPI, OpenAPIError
 from hdhive_openapi import HDHiveOpenAPI, HDHiveOpenAPIError, TokenSet
+from guanying_client import (
+    DEFAULT_BASE_URL as GUANYING_DEFAULT_BASE_URL,
+    GuanyingClient,
+    GuanyingError,
+    link_kind as guanying_link_kind,
+)
 from workflow import (
     ACTIVE_JOB_STATES,
     JOB_STATE_LABELS,
@@ -110,6 +117,8 @@ EMBY_WEBHOOK_GENERATIONS: dict[str, int] = {}
 LOGGER = logging.getLogger("uvicorn.error")
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
+GUANYING_LOGIN_LOCK = Lock()
+GUANYING_LOGIN_ATTEMPTS: dict[str, dict[str, Any]] = {}
 P115_APPS = {
     "alipaymini": "115生活_支付宝小程序端",
     "wechatmini": "115生活_微信小程序端",
@@ -133,7 +142,9 @@ async def movie_http_exception_handler(
     workflow_job_id = int(getattr(getattr(request, "state", None), "workflow_job_id", 0) or 0)
     if workflow_job_id:
         fail_workflow_job(workflow_job_id, error.detail)
-    if request.url.path in ("/api/hdhive/transfer", "/api/dian/transfer"):
+    if request.url.path in (
+        "/api/hdhive/transfer", "/api/dian/transfer", "/api/guanying/transfer"
+    ):
         user = session_user(request.cookies.get("movie_session"))
         processing_conflict = (
             int(error.status_code) == 409
@@ -370,6 +381,18 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
             INSERT OR IGNORE INTO hdhive_oauth(id, updated_at) VALUES(1, '');
+            CREATE TABLE IF NOT EXISTS guanying_session (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                base_url TEXT NOT NULL DEFAULT 'https://www.xn--wcv59z.com',
+                username_cipher TEXT NOT NULL DEFAULT '',
+                password_cipher TEXT NOT NULL DEFAULT '',
+                cookies_cipher TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'not_configured',
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO guanying_session(id, updated_at) VALUES(1, '');
             CREATE TABLE IF NOT EXISTS tv_follows (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -391,6 +414,9 @@ def init_db() -> None:
                 last_transferred_season INTEGER NOT NULL DEFAULT 0,
                 last_transferred_episode INTEGER NOT NULL DEFAULT 0,
                 hdhive_subscription_id INTEGER,
+                guanying_enabled INTEGER NOT NULL DEFAULT 1,
+                guanying_last_checked_at TEXT NOT NULL DEFAULT '',
+                guanying_next_check_at TEXT NOT NULL DEFAULT '',
                 last_checked_at TEXT NOT NULL DEFAULT '',
                 last_message TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -540,6 +566,23 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS hdhive_wash_episode_time_idx
                 ON hdhive_wash_episodes(follow_id, closes_at);
+            CREATE TABLE IF NOT EXISTS unified_wash_attempts (
+                fingerprint TEXT PRIMARY KEY,
+                follow_id INTEGER NOT NULL REFERENCES tv_follows(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL,
+                resource_key TEXT NOT NULL,
+                file_name TEXT NOT NULL DEFAULT '',
+                file_size INTEGER NOT NULL DEFAULT 0,
+                quality_score INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS unified_wash_follow_idx
+                ON unified_wash_attempts(follow_id, season_number, episode_number, updated_at);
             CREATE TABLE IF NOT EXISTS hdhive_file_list_cache (
                 slug TEXT PRIMARY KEY,
                 payload_json TEXT NOT NULL DEFAULT '',
@@ -672,6 +715,16 @@ def init_db() -> None:
                 "UPDATE tv_follows SET current_emby_season = baseline_season, "
                 "current_emby_episode = baseline_episode"
             )
+        follow_column_sql = {
+            "guanying_enabled": "INTEGER NOT NULL DEFAULT 1",
+            "guanying_last_checked_at": "TEXT NOT NULL DEFAULT ''",
+            "guanying_next_check_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in follow_column_sql.items():
+            if column not in follow_columns:
+                connection.execute(
+                    f"ALTER TABLE tv_follows ADD COLUMN {column} {definition}"
+                )
         request_columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(movie_requests)").fetchall()
@@ -1001,6 +1054,136 @@ def hdhive_call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
         raise HTTPException(error.status or 502, f"影巢接口：{error}") from error
     except (requests.RequestException, RuntimeError, ValueError, KeyError) as error:
         raise HTTPException(502, f"暂时无法连接影巢：{error}") from error
+
+
+def guanying_row(connection: sqlite3.Connection) -> sqlite3.Row:
+    row = connection.execute("SELECT * FROM guanying_session WHERE id = 1").fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO guanying_session(id, base_url, updated_at) VALUES(1, ?, ?)",
+            (GUANYING_DEFAULT_BASE_URL, now_iso()),
+        )
+        row = connection.execute("SELECT * FROM guanying_session WHERE id = 1").fetchone()
+    return row
+
+
+def guanying_client(*, require_configured: bool = True) -> GuanyingClient:
+    with db() as connection:
+        row = guanying_row(connection)
+    username = decrypt_secret(row["username_cipher"])
+    password = decrypt_secret(row["password_cipher"])
+    if require_configured and (not username or not password):
+        raise HTTPException(503, "管理员还没有配置观影账号")
+    try:
+        client = GuanyingClient(base_url=str(row["base_url"] or GUANYING_DEFAULT_BASE_URL))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    cookies = decrypt_secret(row["cookies_cipher"])
+    if cookies:
+        client.import_cookies(cookies)
+    return client
+
+
+def guanying_credentials() -> tuple[str, str]:
+    with db() as connection:
+        row = guanying_row(connection)
+    return decrypt_secret(row["username_cipher"]), decrypt_secret(row["password_cipher"])
+
+
+def save_guanying_client(
+    client: GuanyingClient,
+    *,
+    status: str = "connected",
+    error: str = "",
+) -> None:
+    with db() as connection:
+        connection.execute(
+            "UPDATE guanying_session SET cookies_cipher = ?, status = ?, "
+            "last_checked_at = ?, last_error = ?, updated_at = ? WHERE id = 1",
+            (
+                encrypt_secret(client.export_cookies()),
+                status,
+                now_iso(),
+                str(error or "")[:500],
+                now_iso(),
+            ),
+        )
+
+
+def guanying_error(error: Exception) -> HTTPException:
+    if isinstance(error, HTTPException):
+        return error
+    if isinstance(error, GuanyingError):
+        status = 401 if error.status == 401 or error.code == "SESSION_EXPIRED" else 429 if error.status == 429 else 502
+        return HTTPException(status, f"观影：{error}")
+    return HTTPException(502, f"暂时无法连接观影：{error}")
+
+
+def guanying_search_resources(
+    media_type: str,
+    tmdb_id: int,
+    *,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    if media_type not in ("movie", "tv") or int(tmdb_id) <= 0:
+        raise HTTPException(400, "影片信息无效")
+    if not force:
+        cached = cached_resource_response("guanying", media_type, tmdb_id)
+        if cached is not None:
+            return list(cached.get("resources") or [])
+    detail = tmdb_get(f"/{media_type}/{int(tmdb_id)}", {"language": "zh-CN"})
+    title = str(detail.get("name") or detail.get("title") or "").strip()
+    aliases = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in (
+            detail.get("original_name"), detail.get("original_title")
+        )
+        if str(value or "").strip() and str(value or "").strip() != title
+    ))
+    date = str(detail.get("first_air_date") or detail.get("release_date") or "")
+    client = guanying_client()
+    try:
+        resources = client.search(
+            title,
+            aliases=aliases[:2],
+            year=date[:4],
+            media_type=media_type,
+        )
+        for resource in resources:
+            parsed = parse_episode_spec(resource.get("title") or "")
+            resource.update({
+                "season_number": int(parsed.get("season_number") or 1),
+                "episode_numbers": sorted(set(int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0)),
+                "episode_label": parsed.get("episode_label") or "",
+                "res": media_quality_value(resource.get("title"), ("2160p", "1080p", "720p", "4K")),
+                "codec": media_quality_value(resource.get("title"), ("AV1", "H.265", "HEVC", "H.264", "x265", "x264")),
+                "hdr": media_quality_value(resource.get("title"), ("Dolby Vision", "DV", "HDR10+", "HDR10", "HDR")),
+                "subtitle_label": "中文字幕" if re.search(r"中字|中文|简中|繁中|CHS|CHT", str(resource.get("title") or ""), re.I) else "",
+            })
+        cache_resource_response(
+            "guanying", media_type, tmdb_id, {"resources": resources}
+        )
+        save_guanying_client(client)
+        return resources
+    except Exception as error:
+        with db() as connection:
+            connection.execute(
+                "UPDATE guanying_session SET status = ?, last_error = ?, "
+                "last_checked_at = ?, updated_at = ? WHERE id = 1",
+                (
+                    "login_required" if isinstance(error, GuanyingError) and error.code == "SESSION_EXPIRED" else "error",
+                    str(error)[:500], now_iso(), now_iso(),
+                ),
+            )
+        raise guanying_error(error) from error
+
+
+def media_quality_value(value: Any, options: Iterable[str]) -> str:
+    text = str(value or "")
+    for option in options:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(option)}(?![A-Za-z0-9])", text, re.I):
+            return option
+    return ""
 
 
 def delete_hdhive_subscription_if_present(subscription_id: int) -> None:
@@ -2837,12 +3020,13 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def hdhive_resource_is_supported(resource: dict[str, Any]) -> bool:
-    """Only expose resources that 115 can receive directly or download offline."""
+    """Only expose 115, magnet and ED2K resources."""
 
     pan_type = str(
         resource.get("pan_type") or resource.get("share_type_label") or ""
     ).strip().lower()
-    return "115" in pan_type or bool(resource.get("is_offline"))
+    offline_type = str(resource.get("offline_type") or "").strip().lower()
+    return "115" in pan_type or offline_type in {"magnet", "ed2k"} or pan_type in {"磁力", "ed2k"}
 
 
 def hdhive_resource_is_direct_115(resource: dict[str, Any]) -> bool:
@@ -3757,10 +3941,10 @@ def normalize_dian_resource(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def dian_resource_is_supported(resource: dict[str, Any]) -> bool:
-    """Only expose 115 shares and links that 115 can download offline."""
+    """Only expose 115, magnet and ED2K resources."""
 
     share_type = str(resource.get("share_type_label") or "").strip().lower()
-    return "115" in share_type or share_type in {"ed2k", "磁力", "离线"}
+    return "115" in share_type or share_type in {"ed2k", "磁力"}
 
 
 def normalize_supported_dian_resources(
@@ -6280,6 +6464,118 @@ def hdhive_wash_config() -> dict[str, Any]:
         }
 
 
+def wash_rule_settings() -> dict[str, Any]:
+    defaults = {
+        "resolutions": ["2160p", "1080p", "720p"],
+        "qualities": ["Remux", "BluRay", "WEB-DL", "WEBRip"],
+        "codecs": ["AV1", "H.265", "HEVC", "H.264"],
+        "hdr": ["Dolby Vision", "HDR10+", "HDR10", "HDR"],
+        "languages": ["国语", "中字", "中文"],
+        "release_groups": [],
+        "editions": ["Director's Cut", "Extended", "Uncut", "Theatrical"],
+        "frame_rates": ["60fps", "50fps", "24fps"],
+        "extensions": [".mkv", ".mp4", ".m2ts"],
+        "audio": ["TrueHD Atmos", "DTS-HD MA", "DDP Atmos", "AAC"],
+        "platforms": [],
+    }
+    with db() as connection:
+        def values(key: str) -> list[str]:
+            raw = setting(connection, key)
+            if raw == "__disabled__":
+                return []
+            return [part.strip() for part in re.split(r"[,，|、]+", raw) if part.strip()] if raw else list(defaults[key.removeprefix("wash_")])
+
+        return {
+            "resolutions": values("wash_resolutions"),
+            "qualities": values("wash_qualities"),
+            "codecs": values("wash_codecs"),
+            "hdr": values("wash_hdr"),
+            "languages": values("wash_languages"),
+            "release_groups": values("wash_release_groups"),
+            "editions": values("wash_editions"),
+            "frame_rates": values("wash_frame_rates"),
+            "extensions": values("wash_extensions"),
+            "audio": values("wash_audio"),
+            "platforms": values("wash_platforms"),
+            "min_score_gain": max(1, min(100, int(setting(connection, "wash_min_score_gain") or 12))),
+            "min_size_gain_percent": max(0, min(200, int(setting(connection, "wash_min_size_gain_percent") or 10))),
+            "allow_equal_quality": setting(connection, "wash_allow_equal_quality") == "1",
+            "magnet_auto_follow": setting(connection, "wash_magnet_auto_follow") != "0",
+            "ed2k_auto_follow": setting(connection, "wash_ed2k_auto_follow") != "0",
+            "magnet_auto_wash": setting(connection, "wash_magnet_auto_wash") == "1",
+            "ed2k_auto_wash": setting(connection, "wash_ed2k_auto_wash") == "1",
+        }
+
+
+def resource_quality_score(name: Any, size: Any = 0, rules: Optional[dict[str, Any]] = None) -> int:
+    """Score a release name deterministically; hard episode matching happens first."""
+
+    if rules is None:
+        try:
+            rules = wash_rule_settings()
+        except OSError:
+            rules = {
+                "resolutions": ["2160p", "1080p", "720p"],
+                "qualities": ["Remux", "BluRay", "WEB-DL", "WEBRip"],
+                "codecs": ["AV1", "H.265", "HEVC", "H.264"],
+                "hdr": ["Dolby Vision", "HDR10+", "HDR10", "HDR"],
+                "languages": ["国语", "中字", "中文"],
+                "release_groups": [],
+                "editions": ["Director's Cut", "Extended", "Uncut", "Theatrical"],
+                "frame_rates": ["60fps", "50fps", "24fps"],
+                "extensions": [".mkv", ".mp4", ".m2ts"],
+                "audio": ["TrueHD Atmos", "DTS-HD MA", "DDP Atmos", "AAC"],
+                "platforms": [],
+            }
+    text = str(name or "")
+    score = 0
+    weights = {
+        "resolutions": 120,
+        "qualities": 90,
+        "hdr": 50,
+        "editions": 35,
+        "languages": 40,
+        "codecs": 35,
+        "audio": 25,
+        "frame_rates": 20,
+        "release_groups": 20,
+        "extensions": 15,
+        "platforms": 10,
+    }
+    for key, base in weights.items():
+        for index, token in enumerate(rules.get(key) or []):
+            if token and re.search(re.escape(str(token)), text, re.I):
+                score += max(1, base - index * max(1, base // 8))
+                break
+    bytes_value = resource_size_bytes(size)
+    if bytes_value > 0:
+        score += min(30, int(bytes_value / (1024**3)))
+    return score
+
+
+def wash_candidate_is_upgrade(
+    *,
+    candidate_name: Any,
+    candidate_size: Any,
+    current_name: Any,
+    current_size: Any,
+    rules: Optional[dict[str, Any]] = None,
+) -> bool:
+    rules = rules or wash_rule_settings()
+    candidate_score = resource_quality_score(candidate_name, candidate_size, rules)
+    current_score = resource_quality_score(current_name, current_size, rules)
+    score_gain = candidate_score - current_score
+    if score_gain >= int(rules["min_score_gain"]):
+        return True
+    if score_gain < 0 or (score_gain == 0 and not rules["allow_equal_quality"]):
+        return False
+    old_size = resource_size_bytes(current_size)
+    new_size = resource_size_bytes(candidate_size)
+    if old_size <= 0 or new_size <= old_size:
+        return False
+    return new_size * 100 >= old_size * (100 + int(rules["min_size_gain_percent"]))
+
+
 def hdhive_file_episode_candidates(
     slug: str,
     result: dict[str, Any],
@@ -6330,6 +6626,7 @@ def hdhive_file_episode_candidates(
                 "file_name": name,
                 "file_size": size,
                 "fingerprint": fingerprint,
+                "quality_score": resource_quality_score(name, size),
             }
             current = candidates.get((season, episode))
             if current is None or size > int(current["file_size"]):
@@ -6461,7 +6758,12 @@ def hdhive_wash_candidate_allowed(
         else:
             baseline_size = int(row["last_file_size"] or 0)
             candidate_size = int(candidate.get("file_size") or 0)
-            if baseline_size > 0 and candidate_size > 0 and candidate_size <= baseline_size:
+            if baseline_size > 0 and not wash_candidate_is_upgrade(
+                candidate_name=candidate.get("file_name"),
+                candidate_size=candidate_size,
+                current_name=row["last_file_name"],
+                current_size=baseline_size,
+            ):
                 return False
             if row["locked_at"]:
                 return False
@@ -6640,7 +6942,13 @@ def auto_wash_hdhive_follow(
                 int(config["max_transfers"])
                 - int(row["process_count"] if row else 0),
             )
-            candidates.sort(key=lambda value: int(value["file_size"]), reverse=True)
+            candidates.sort(
+                key=lambda value: (
+                    int(value.get("quality_score") or 0),
+                    int(value["file_size"]),
+                ),
+                reverse=True,
+            )
             allowed_fingerprints.update(
                 candidate["fingerprint"] for candidate in candidates[:remaining]
             )
@@ -7716,6 +8024,379 @@ def hdhive_follow_loop() -> None:
         time.sleep(60)
 
 
+def guanying_adaptive_interval(age_seconds: float, missing: bool) -> int:
+    """Return a conservative next-check delay for Guanying subscriptions."""
+
+    if not missing:
+        with db() as connection:
+            return max(
+                900,
+                min(21600, int(setting(connection, "guanying_poll_interval") or 21600)),
+            )
+    if age_seconds <= 24 * 3600:
+        return 1800
+    if age_seconds <= 72 * 3600:
+        return 7200
+    return 21600
+
+
+def tmdb_aired_episodes(tmdb_id: int) -> list[dict[str, Any]]:
+    """List normal episodes whose local Shanghai air date has arrived."""
+
+    detail = tmdb_get(f"/tv/{int(tmdb_id)}", {"language": "zh-CN"})
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    episodes: list[dict[str, Any]] = []
+    for season in detail.get("seasons") or []:
+        season_number = int((season or {}).get("season_number") or 0)
+        if season_number <= 0:
+            continue
+        payload = tmdb_get(
+            f"/tv/{int(tmdb_id)}/season/{season_number}",
+            {"language": "zh-CN"},
+        )
+        for episode in payload.get("episodes") or []:
+            air_date = str((episode or {}).get("air_date") or "")
+            try:
+                aired = datetime.fromisoformat(air_date).date() <= today
+            except ValueError:
+                aired = False
+            episode_number = int((episode or {}).get("episode_number") or 0)
+            if aired and episode_number > 0:
+                episodes.append({
+                    "season_number": season_number,
+                    "episode_number": episode_number,
+                    "air_date": air_date,
+                    "name": str((episode or {}).get("name") or ""),
+                })
+    return episodes
+
+
+def _guanying_exact_resource(
+    resources: list[dict[str, Any]], season: int, episode: int
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for resource in resources:
+        parsed = parse_episode_spec(resource.get("title") or "")
+        resource_season = int(parsed.get("season_number") or season or 1)
+        resource_episodes = {
+            int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0
+        }
+        link_type = guanying_link_kind(
+            resource.get("share_url") or resource.get("url") or ""
+        )
+        if link_type in {"magnet", "ed2k"} and not parsed.get("safe_single_episode"):
+            continue
+        if resource_season == season and episode in resource_episodes:
+            result.append(resource)
+    return sorted(
+        result,
+        key=lambda item: resource_quality_score(
+            item.get("title"), item.get("size") or item.get("size_gb")
+        ),
+        reverse=True,
+    )
+
+
+def _guanying_receive_exact_episode(
+    follow: sqlite3.Row,
+    resource: dict[str, Any],
+    season: int,
+    episode: int,
+    *,
+    scope: str,
+) -> bool:
+    """Preflight a 115 share and receive one exact episode only."""
+
+    share_url = str(resource.get("share_url") or resource.get("url") or "").strip()
+    link_type = guanying_link_kind(share_url)
+    if link_type in {"magnet", "ed2k"}:
+        rules = wash_rule_settings()
+        permission = f"{link_type}_auto_wash" if scope == "auto_wash" else f"{link_type}_auto_follow"
+        if not rules.get(permission):
+            return False
+        resource_key = str(resource.get("resource_key") or resource.get("id") or "")
+        if not resource_key:
+            resource_key = hashlib.sha256(share_url.encode()).hexdigest()
+        try:
+            job = begin_workflow_job(
+                user_id=int(follow["user_id"]), destination="p115", source="guanying",
+                resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+                media_type="tv", title=str(follow["title"]), season_number=season,
+                episode_numbers=[episode], follow_id=int(follow["id"]),
+                scope=scope,
+            )
+        except HTTPException:
+            return False
+        client = p115_client()
+        with db() as connection:
+            target_cid = setting(connection, "p115_target_cid") or "0"
+        queued = p115_call(
+            "提交观影磁力/ED2K离线任务失败",
+            client.clouddownload_task_add_url,
+            {"url": share_url, "wp_path_id": target_cid},
+        )
+        if not response_ok(queued):
+            fail_workflow_job(int(job["id"]), response_message(queued, "115离线任务提交失败"))
+            return False
+        expected: list[dict[str, Any]] = []
+        if link_type == "ed2k":
+            parts = share_url.split("|")
+            if len(parts) >= 5:
+                try:
+                    expected = [{"name": unquote(parts[2]), "size": int(parts[3])}]
+                except (TypeError, ValueError):
+                    expected = []
+        register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]), user_id=int(follow["user_id"]),
+            follow_id=int(follow["id"]), destination="p115", source="guanying",
+            resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+            media_type="tv", season_number=season, episode_numbers=[episode],
+            title=str(follow["title"]), target_cid=str(target_cid), links=[share_url],
+        )
+        update_workflow_job(int(job["id"]), "submitted", f"观影{link_type}已提交115离线，等待入库")
+        record_transfer(
+            user_id=int(follow["user_id"]), source="guanying",
+            resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+            transfer_scope=scope, status="submitted",
+            detail=f"观影{link_type}严格单集已提交115离线",
+            follow_id=int(follow["id"]), season_number=season,
+            episode_numbers=[episode], destination="p115",
+        )
+        return True
+    if link_type != "115":
+        return False
+    client = p115_client()
+    tree = p115_share_tree(client, share_url)
+    selected, keys = select_largest_missing_episode_files_by_season(
+        tree, {(int(season), int(episode))}, fallback_season=int(season)
+    )
+    if (int(season), int(episode)) not in keys:
+        return False
+    selected_ids = list(dict.fromkeys(
+        p115_share_item_id(item) for item in selected if p115_share_item_id(item)
+    ))
+    if not selected_ids:
+        return False
+    with db() as connection:
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    before = p115_folder_snapshot(client, target_cid)
+    received = p115_call(
+        "接收观影115分享失败",
+        client.share_receive,
+        {"file_id": ",".join(selected_ids), "cid": target_cid},
+        share_url=share_url,
+    )
+    if not response_ok(received) or not wait_for_p115_change(
+        lambda: p115_folder_snapshot(client, target_cid), before
+    ):
+        return False
+    resource_key = str(resource.get("resource_key") or resource.get("id") or "")
+    if not resource_key:
+        resource_key = hashlib.sha256(share_url.encode()).hexdigest()
+    detail = f"观影已精确转存 S{season:02d}E{episode:02d}"
+    record_transfer(
+        user_id=int(follow["user_id"]), source="guanying",
+        resource_key=resource_key, tmdb_id=int(follow["tmdb_id"]),
+        transfer_scope=scope, status="success", detail=detail,
+        follow_id=int(follow["id"]), season_number=season,
+        episode_numbers=[episode], destination="p115",
+    )
+    return True
+
+
+def auto_replenish_guanying_follow(follow_id: int) -> dict[str, Any]:
+    """Check one follow, transfer exact missing episodes, then consider upgrades."""
+
+    with resource_request_lock("follow", "tv", int(follow_id)):
+        with db() as connection:
+            follow = connection.execute(
+                "SELECT f.*, u.storage_destination FROM tv_follows f "
+                "JOIN users u ON u.id = f.user_id WHERE f.id = ? AND f.active = 1",
+                (int(follow_id),),
+            ).fetchone()
+        if not follow or not int(follow["guanying_enabled"] or 0):
+            return {"checked": False, "missing": 0, "transferred": []}
+        if storage_destination(follow["storage_destination"]) != "p115":
+            return {"checked": True, "missing": 0, "transferred": []}
+        aired = tmdb_aired_episodes(int(follow["tmdb_id"]))
+        progress = destination_episode_progress(
+            "p115", int(follow["tmdb_id"]), known_in_library=True
+        )
+        by_season = progress.get("emby_episode_numbers") or {}
+        missing = [
+            item for item in aired
+            if int(item["episode_number"]) not in {
+                int(value) for value in by_season.get(str(item["season_number"]), [])
+            }
+            and int(item["episode_number"]) not in transferred_episode_set(
+                int(follow["tmdb_id"]), int(item["season_number"])
+            )
+        ]
+        resources = guanying_search_resources("tv", int(follow["tmdb_id"]), force=True)
+        cache_follow_resources(int(follow["id"]), "guanying", resources)
+        transferred: list[tuple[int, int]] = []
+        # Oldest missing first, but cap each cycle to avoid noisy pack ingestion.
+        for target in missing[:3]:
+            season = int(target["season_number"])
+            episode = int(target["episode_number"])
+            for resource in _guanying_exact_resource(resources, season, episode):
+                if _guanying_receive_exact_episode(
+                    follow, resource, season, episode, scope="auto_missing"
+                ):
+                    transferred.append((season, episode))
+                    break
+        washed: list[tuple[int, int]] = []
+        with db() as connection:
+            continuous_wash = setting(connection, "guanying_continuous_wash") != "0"
+        latest_season = int(progress.get("emby_latest_season_number") or 0)
+        latest_episode = int(progress.get("emby_latest_episode_number") or 0)
+        current_files = progress.get("emby_episode_files") or {}
+        current_file = (
+            current_files.get(str(latest_season), {}).get(str(latest_episode), {})
+            if latest_season > 0 and latest_episode > 0 else {}
+        )
+        if continuous_wash and current_file:
+            for resource in _guanying_exact_resource(resources, latest_season, latest_episode):
+                share_url = str(resource.get("share_url") or resource.get("url") or "")
+                try:
+                    link_type = guanying_link_kind(share_url)
+                    if link_type == "115":
+                        tree = p115_share_tree(p115_client(), share_url)
+                        selected, keys = select_largest_missing_episode_files_by_season(
+                            tree, {(latest_season, latest_episode)}, fallback_season=latest_season
+                        )
+                        media = max(
+                            (item for item in selected if Path(str(item.get("_share_name") or "")).suffix.lower() in {".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".mov", ".webm"}),
+                            key=p115_share_item_size,
+                        )
+                        candidate_name = str(media.get("_share_name") or resource.get("title") or "")
+                        candidate_size = p115_share_item_size(media)
+                        if (latest_season, latest_episode) not in keys:
+                            continue
+                    elif link_type in {"magnet", "ed2k"} and wash_rule_settings().get(f"{link_type}_auto_wash"):
+                        candidate_name = str(resource.get("title") or "")
+                        candidate_size = resource.get("size") or resource.get("size_gb") or 0
+                    else:
+                        continue
+                    if not wash_candidate_is_upgrade(
+                        candidate_name=candidate_name, candidate_size=candidate_size,
+                        current_name=current_file.get("file_name"),
+                        current_size=current_file.get("file_size"),
+                    ):
+                        continue
+                    fingerprint = hashlib.sha256(
+                        f"guanying\0{share_url}\0{latest_season}\0{latest_episode}\0{candidate_name}\0{candidate_size}".encode()
+                    ).hexdigest()
+                    with db() as connection:
+                        attempted = connection.execute(
+                            "SELECT 1 FROM unified_wash_attempts WHERE fingerprint = ?",
+                            (fingerprint,),
+                        ).fetchone()
+                    if attempted:
+                        continue
+                    success = _guanying_receive_exact_episode(
+                        follow, resource, latest_season, latest_episode,
+                        scope="auto_wash",
+                    )
+                    timestamp = now_iso()
+                    with db() as connection:
+                        connection.execute(
+                            "INSERT OR REPLACE INTO unified_wash_attempts("
+                            "fingerprint, follow_id, source, season_number, episode_number, "
+                            "resource_key, file_name, file_size, quality_score, status, detail, "
+                            "created_at, updated_at) VALUES(?, ?, 'guanying', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                fingerprint, int(follow["id"]), latest_season, latest_episode,
+                                str(resource.get("resource_key") or resource.get("id") or ""),
+                                candidate_name, candidate_size,
+                                resource_quality_score(candidate_name, candidate_size),
+                                "success" if success else "failed",
+                                "符合统一规则，已提交观影115洗版" if success else "115未确认转存",
+                                timestamp, timestamp,
+                            ),
+                        )
+                    if success:
+                        washed.append((latest_season, latest_episode))
+                        break
+                except (HTTPException, StopIteration, ValueError):
+                    continue
+        now = datetime.now(timezone.utc)
+        age_seconds = 0.0
+        if missing:
+            try:
+                air_day = datetime.fromisoformat(str(missing[0]["air_date"])).replace(
+                    tzinfo=ZoneInfo("Asia/Shanghai")
+                )
+                age_seconds = max(0.0, time.time() - air_day.timestamp())
+            except ValueError:
+                age_seconds = 0.0
+        interval = guanying_adaptive_interval(age_seconds, bool(missing and not transferred))
+        message = (
+            "观影已自动转存：" + "、".join(f"S{s:02d}E{e:02d}" for s, e in transferred)
+            if transferred else
+            (f"观影已检查，仍缺 {len(missing)} 集" if missing else "观影已检查，没有应播缺集")
+        )
+        with db() as connection:
+            connection.execute(
+                "UPDATE tv_follows SET guanying_last_checked_at = ?, "
+                "guanying_next_check_at = ?, last_message = ?, updated_at = ? WHERE id = ?",
+                (
+                    now.isoformat(), (now + timedelta(seconds=interval)).isoformat(),
+                    message, now.isoformat(), int(follow_id),
+                ),
+            )
+        if transferred:
+            send_notifications(f"✅ 观影追更自动转存成功\n\n剧集：{follow['title']}\n{message}")
+        return {
+            "checked": True, "missing": len(missing),
+            "transferred": [list(value) for value in transferred],
+            "washed": [list(value) for value in washed],
+            "next_interval": interval, "message": message,
+        }
+
+
+def guanying_follow_once() -> dict[str, int]:
+    with db() as connection:
+        row = guanying_row(connection)
+        enabled = setting(connection, "guanying_enabled") != "0"
+        due = connection.execute(
+            "SELECT id FROM tv_follows WHERE active = 1 AND media_type = 'tv' "
+            "AND guanying_enabled = 1 AND (guanying_next_check_at = '' "
+            "OR guanying_next_check_at <= ?) ORDER BY guanying_next_check_at LIMIT 20",
+            (now_iso(),),
+        ).fetchall()
+        configured = bool(row["username_cipher"] and row["password_cipher"])
+    if not enabled or not configured:
+        return {"checked": 0, "transferred": 0, "failed": 0}
+    checked = transferred = failed = 0
+    for item in due:
+        try:
+            result = auto_replenish_guanying_follow(int(item["id"]))
+            checked += int(bool(result.get("checked")))
+            transferred += len(result.get("transferred") or [])
+        except Exception as error:
+            failed += 1
+            next_time = datetime.now(timezone.utc) + timedelta(hours=2)
+            with db() as connection:
+                connection.execute(
+                    "UPDATE tv_follows SET guanying_last_checked_at = ?, "
+                    "guanying_next_check_at = ?, last_message = ?, updated_at = ? WHERE id = ?",
+                    (now_iso(), next_time.isoformat(), f"观影检查失败：{error}"[:500], now_iso(), int(item["id"])),
+                )
+    return {"checked": checked, "transferred": transferred, "failed": failed}
+
+
+def guanying_follow_loop() -> None:
+    while True:
+        try:
+            update_worker_health("guanying_follow", "running")
+            result = guanying_follow_once()
+            update_worker_health("guanying_follow", "ok", detail=result)
+        except Exception as error:
+            update_worker_health("guanying_follow", "error", error=str(error))
+        time.sleep(60)
+
+
 def p115_offline_monitor_once() -> dict[str, int]:
     with db() as connection:
         monitors = connection.execute(
@@ -7833,6 +8514,7 @@ def startup() -> None:
     ).start()
     Thread(target=dian_signin_loop, name="dian-signin", daemon=True).start()
     Thread(target=hdhive_follow_loop, name="hdhive-follow", daemon=True).start()
+    Thread(target=guanying_follow_loop, name="guanying-follow", daemon=True).start()
     Thread(
         target=p115_offline_monitor_loop,
         name="p115-offline-monitor",
@@ -8954,12 +9636,248 @@ def hdhive_public_status() -> dict[str, Any]:
     }
 
 
+def guanying_public_status() -> dict[str, Any]:
+    with db() as connection:
+        row = guanying_row(connection)
+        enabled = setting(connection, "guanying_enabled") != "0"
+        interval = max(900, min(21600, int(setting(connection, "guanying_poll_interval") or 21600)))
+        continuous_wash = setting(connection, "guanying_continuous_wash") != "0"
+    return {
+        "enabled": enabled,
+        "configured": bool(row["username_cipher"] and row["password_cipher"]),
+        "authenticated": str(row["status"] or "") == "connected",
+        "status": str(row["status"] or "not_configured"),
+        "status_label": {
+            "connected": "已登录",
+            "login_required": "需要重新登录",
+            "captcha_required": "等待验证码",
+            "error": "连接异常",
+            "not_configured": "待配置",
+        }.get(str(row["status"] or ""), "待配置"),
+        "base_url": str(row["base_url"] or GUANYING_DEFAULT_BASE_URL),
+        "credentials_saved": bool(row["username_cipher"] and row["password_cipher"]),
+        "poll_interval": interval,
+        "continuous_wash": continuous_wash,
+        "last_checked_at": str(row["last_checked_at"] or ""),
+        "last_error": str(row["last_error"] or ""),
+    }
+
+
 @APP.get("/api/admin/hdhive/status")
 def hdhive_admin_status(
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
     require_admin(movie_session)
     return hdhive_public_status()
+
+
+@APP.get("/api/admin/guanying/status")
+def guanying_admin_status(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    return guanying_public_status()
+
+
+@APP.post("/api/admin/guanying/login")
+async def guanying_login(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    with db() as connection:
+        row = guanying_row(connection)
+    base_url = str(payload.get("base_url") or row["base_url"] or GUANYING_DEFAULT_BASE_URL)
+    username = str(payload.get("username") or "").strip() or decrypt_secret(row["username_cipher"])
+    password = str(payload.get("password") or "") or decrypt_secret(row["password_cipher"])
+    if len(username) < 2 or not 6 <= len(password) <= 128:
+        raise HTTPException(400, "请输入有效的观影账号和密码")
+    try:
+        client = GuanyingClient(base_url=base_url)
+        result = await asyncio.to_thread(client.login, username, password)
+    except Exception as error:
+        raise guanying_error(error) from error
+    with db() as connection:
+        connection.execute(
+            "UPDATE guanying_session SET base_url = ?, username_cipher = ?, "
+            "password_cipher = ?, cookies_cipher = ?, status = ?, last_error = '', "
+            "last_checked_at = ?, updated_at = ? WHERE id = 1",
+            (
+                client.base_url,
+                encrypt_secret(username),
+                encrypt_secret(password),
+                encrypt_secret(client.export_cookies()),
+                "connected" if result.get("authenticated") else "captcha_required",
+                now_iso(), now_iso(),
+            ),
+        )
+    if result.get("authenticated"):
+        return {"ok": True, "message": "观影登录成功", **guanying_public_status()}
+    challenge = await asyncio.to_thread(client.captcha)
+    attempt_id = secrets.token_urlsafe(24)
+    with GUANYING_LOGIN_LOCK:
+        GUANYING_LOGIN_ATTEMPTS[attempt_id] = {
+            "client": client,
+            "username": username,
+            "password": password,
+            "created": time.time(),
+        }
+    return {
+        "ok": False,
+        "captcha_required": True,
+        "attempt_id": attempt_id,
+        "captcha": {
+            "image": f"data:image/{challenge.image_type};base64,{challenge.image}",
+            "text": challenge.text,
+            "width": 350,
+            "height": 200,
+        },
+        "message": result.get("message") or "请完成观影点选验证码",
+    }
+
+
+@APP.post("/api/admin/guanying/captcha/verify")
+async def guanying_captcha_verify(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    attempt_id = str(payload.get("attempt_id") or "")
+    with GUANYING_LOGIN_LOCK:
+        attempt = GUANYING_LOGIN_ATTEMPTS.get(attempt_id)
+    if not attempt or time.time() - float(attempt["created"]) > 600:
+        raise HTTPException(410, "观影验证码已过期，请重新登录")
+    client: GuanyingClient = attempt["client"]
+    try:
+        code = await asyncio.to_thread(
+            client.verify_captcha,
+            payload.get("points") or [],
+            int(payload.get("width") or 350),
+            int(payload.get("height") or 200),
+        )
+        result = await asyncio.to_thread(
+            client.login, attempt["username"], attempt["password"], code
+        )
+    except Exception as error:
+        raise guanying_error(error) from error
+    if not result.get("authenticated"):
+        raise HTTPException(401, "观影登录验证未完成")
+    save_guanying_client(client)
+    with GUANYING_LOGIN_LOCK:
+        GUANYING_LOGIN_ATTEMPTS.pop(attempt_id, None)
+    return {"ok": True, "message": "观影登录成功", **guanying_public_status()}
+
+
+@APP.post("/api/admin/guanying/test")
+def guanying_test(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    client = guanying_client()
+    try:
+        authenticated = client.authenticated()
+        if not authenticated:
+            raise GuanyingError("登录会话已失效", status=401, code="SESSION_EXPIRED")
+        save_guanying_client(client)
+    except Exception as error:
+        raise guanying_error(error) from error
+    return {"ok": True, "message": "观影登录状态正常", **guanying_public_status()}
+
+
+@APP.patch("/api/admin/guanying/config")
+async def guanying_config(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    try:
+        base_url = GuanyingClient(base_url=str(payload.get("base_url") or GUANYING_DEFAULT_BASE_URL)).base_url
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    with db() as connection:
+        connection.execute(
+            "UPDATE guanying_session SET base_url = ?, updated_at = ? WHERE id = 1",
+            (base_url, now_iso()),
+        )
+        if "enabled" in payload:
+            set_setting(connection, "guanying_enabled", "1" if payload["enabled"] else "0")
+        if "poll_interval" in payload:
+            set_setting(connection, "guanying_poll_interval", max(900, min(21600, int(payload["poll_interval"]))))
+        if "continuous_wash" in payload:
+            set_setting(connection, "guanying_continuous_wash", "1" if payload["continuous_wash"] else "0")
+    return {"ok": True, **guanying_public_status()}
+
+
+@APP.delete("/api/admin/guanying/session")
+def guanying_clear_session(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        connection.execute(
+            "UPDATE guanying_session SET username_cipher = '', password_cipher = '', "
+            "cookies_cipher = '', status = 'not_configured', last_error = '', "
+            "updated_at = ? WHERE id = 1",
+            (now_iso(),),
+        )
+    return {"ok": True, "message": "已清除观影登录信息"}
+
+
+@APP.get("/api/admin/wash-rules")
+def get_wash_rules(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    return wash_rule_settings()
+
+
+@APP.patch("/api/admin/wash-rules")
+async def update_wash_rules(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    list_keys = {
+        "resolutions": "wash_resolutions",
+        "qualities": "wash_qualities",
+        "codecs": "wash_codecs",
+        "hdr": "wash_hdr",
+        "languages": "wash_languages",
+        "release_groups": "wash_release_groups",
+        "editions": "wash_editions",
+        "frame_rates": "wash_frame_rates",
+        "extensions": "wash_extensions",
+        "audio": "wash_audio",
+        "platforms": "wash_platforms",
+    }
+    bool_keys = {
+        "allow_equal_quality": "wash_allow_equal_quality",
+        "magnet_auto_follow": "wash_magnet_auto_follow",
+        "ed2k_auto_follow": "wash_ed2k_auto_follow",
+        "magnet_auto_wash": "wash_magnet_auto_wash",
+        "ed2k_auto_wash": "wash_ed2k_auto_wash",
+    }
+    with db() as connection:
+        for payload_key, setting_key in list_keys.items():
+            if payload_key not in payload:
+                continue
+            value = payload[payload_key]
+            if isinstance(value, list):
+                selected = [str(item).strip() for item in value if str(item).strip()]
+                value = ",".join(selected) if selected else "__disabled__"
+            set_setting(connection, setting_key, str(value or ""))
+        for payload_key, setting_key in bool_keys.items():
+            if payload_key in payload:
+                set_setting(connection, setting_key, "1" if payload[payload_key] else "0")
+        if "min_score_gain" in payload:
+            set_setting(connection, "wash_min_score_gain", max(1, min(100, int(payload["min_score_gain"]))))
+        if "min_size_gain_percent" in payload:
+            set_setting(connection, "wash_min_size_gain_percent", max(0, min(200, int(payload["min_size_gain_percent"]))))
+    return {"ok": True, **wash_rule_settings()}
 
 
 @APP.get("/api/admin/hdhive/follow-events")
@@ -9481,6 +10399,7 @@ def serialize_follow(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["active"] = bool(item["active"])
     item["hdhive_subscribed"] = bool(item.get("hdhive_subscription_id"))
+    item["guanying_enabled"] = bool(item.get("guanying_enabled", 1))
     item["poster_url"] = tmdb_image_proxy_url(item["poster_path"], "w342")
     item["baseline_label"] = episode_progress_label(
         int(item["baseline_season"]),
@@ -9685,6 +10604,127 @@ def list_follows(
         return {"follows": items}
 
     return {"follows": group_follow_items(items)}
+
+
+@APP.get("/api/follows/calendar")
+def follow_calendar(
+    month: str = "",
+    scope: str = "mine",
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    """Return a private, follow-only calendar with processing state overlays."""
+
+    user = require_user(movie_session)
+    try:
+        start = datetime.strptime(month or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m"), "%Y-%m").date().replace(day=1)
+    except ValueError as error:
+        raise HTTPException(400, "月份格式应为 YYYY-MM") from error
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    show_all = user["role"] == "admin" and scope == "all"
+    with db() as connection:
+        query = (
+            "SELECT f.*, u.display_name, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
+        )
+        values: tuple[Any, ...] = ()
+        if not show_all:
+            query += "AND f.user_id = ? "
+            values = (int(user["id"]),)
+        follows = connection.execute(query + "ORDER BY f.updated_at DESC", values).fetchall()
+        jobs = connection.execute(
+            "SELECT follow_id, season_number, episode_numbers_json, state, source, updated_at "
+            "FROM media_workflow_jobs WHERE follow_id IS NOT NULL "
+            "AND state NOT IN ('cancelled') ORDER BY updated_at DESC"
+        ).fetchall()
+        transfers = connection.execute(
+            "SELECT follow_id, season_number, episode_number, transfer_scope, status, updated_at "
+            "FROM resource_transfer_log WHERE follow_id IS NOT NULL ORDER BY updated_at DESC"
+        ).fetchall()
+    jobs_by_key: dict[tuple[int, int, int], sqlite3.Row] = {}
+    for job in jobs:
+        for episode in episode_numbers_from_json(job["episode_numbers_json"]):
+            jobs_by_key.setdefault(
+                (int(job["follow_id"]), int(job["season_number"] or 1), int(episode)), job
+            )
+    transfers_by_key: dict[tuple[int, int, int], sqlite3.Row] = {}
+    for transfer in transfers:
+        transfers_by_key.setdefault(
+            (int(transfer["follow_id"]), int(transfer["season_number"] or 1), int(transfer["episode_number"] or 0)), transfer
+        )
+    entries: list[dict[str, Any]] = []
+    pending_dates: list[dict[str, Any]] = []
+    now_day = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    for follow in follows:
+        if str(follow["media_type"] or "tv") != "tv":
+            continue
+        try:
+            detail = tmdb_get(f"/tv/{int(follow['tmdb_id'])}", {"language": "zh-CN"})
+        except HTTPException:
+            continue
+        has_future_date = False
+        progress = destination_episode_progress(
+            str(follow["storage_destination"]), int(follow["tmdb_id"]), known_in_library=True
+        )
+        present_by_season = progress.get("emby_episode_numbers") or {}
+        for season in detail.get("seasons") or []:
+            season_number = int((season or {}).get("season_number") or 0)
+            if season_number <= 0:
+                continue
+            try:
+                season_data = tmdb_get(
+                    f"/tv/{int(follow['tmdb_id'])}/season/{season_number}",
+                    {"language": "zh-CN"},
+                )
+            except HTTPException:
+                continue
+            for episode in season_data.get("episodes") or []:
+                air_date = str((episode or {}).get("air_date") or "")
+                episode_number = int((episode or {}).get("episode_number") or 0)
+                try:
+                    day = datetime.fromisoformat(air_date).date()
+                except ValueError:
+                    continue
+                has_future_date = has_future_date or day >= now_day
+                if not (start <= day < end) or episode_number <= 0:
+                    continue
+                key = (int(follow["id"]), season_number, episode_number)
+                job = jobs_by_key.get(key)
+                transfer = transfers_by_key.get(key)
+                present = episode_number in {
+                    int(value) for value in present_by_season.get(str(season_number), [])
+                }
+                if present:
+                    state = "ingested"
+                elif job and str(job["state"]) in {"unlocking", "submitted", "transferred", "organizing", "waiting_library", "failed"}:
+                    state = str(job["state"])
+                elif transfer and str(transfer["transfer_scope"]) == "auto_wash":
+                    state = "washing"
+                elif transfer and str(transfer["status"]) in {"success", "submitted"}:
+                    state = "waiting_library"
+                elif day > now_day:
+                    state = "upcoming"
+                else:
+                    state = "waiting_resource"
+                entries.append({
+                    "follow_id": int(follow["id"]), "tmdb_id": int(follow["tmdb_id"]),
+                    "title": str(follow["title"]), "owner": str(follow["display_name"] or ""),
+                    "poster_url": tmdb_image_proxy_url(follow["poster_path"], "w342"),
+                    "date": air_date, "season_number": season_number,
+                    "episode_number": episode_number, "episode_name": str((episode or {}).get("name") or ""),
+                    "state": state, "source": str(job["source"] or "") if job else "",
+                })
+        if not has_future_date and str(detail.get("status") or "") not in {"Ended", "Canceled"}:
+            pending_dates.append({
+                "follow_id": int(follow["id"]), "tmdb_id": int(follow["tmdb_id"]),
+                "title": str(follow["title"]), "owner": str(follow["display_name"] or ""),
+                "poster_url": tmdb_image_proxy_url(follow["poster_path"], "w342"),
+                "state": "date_pending",
+            })
+    return {
+        "month": start.strftime("%Y-%m"), "timezone": "Asia/Shanghai",
+        "scope": "all" if show_all else "mine", "entries": entries,
+        "date_pending": pending_dates,
+    }
 
 
 @APP.get("/api/follows/{follow_id}/timeline")
@@ -9992,7 +11032,7 @@ async def create_follow(
                     (row["id"],),
                 ).fetchone()
     else:
-        bind_error = "缺少影巢订阅资源，请刷新详情后重试"
+        bind_error = ""
     return {
         "ok": True,
         "follow": serialize_follow(row),
@@ -10239,6 +11279,7 @@ def follow_resources(
         raise HTTPException(404, "没有找到这条追更")
     row = refresh_follow_emby_baseline(follow_id)
     hdhive_items: list[dict[str, Any]] = []
+    guanying_items: list[dict[str, Any]] = []
     dian_items: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
     media_type = str(row["media_type"] or "tv")
@@ -10255,6 +11296,13 @@ def follow_resources(
         cache_follow_resources(follow_id, "hdhive", hdhive_items)
     except HTTPException as error:
         errors["hdhive"] = str(error.detail)
+    try:
+        guanying_items = guanying_resources(
+            media_type, row["tmdb_id"], movie_session
+        )["resources"]
+        cache_follow_resources(follow_id, "guanying", guanying_items)
+    except HTTPException as error:
+        errors["guanying"] = str(error.detail)
     try:
         dian_items = dian_resources(media_type, row["tmdb_id"], None, movie_session)[
             "resources"
@@ -10274,9 +11322,10 @@ def follow_resources(
     return {
         "follow": serialize_follow(row),
         "hdhive_resources": hdhive_items,
+        "guanying_resources": guanying_items,
         "dian_resources": dian_items,
         "errors": errors,
-        "source_order": ["hdhive", "dian"],
+        "source_order": ["hdhive", "guanying", "dian"],
     }
 
 
@@ -10317,6 +11366,166 @@ def dian_resources(
                 extract_share_items(result)
             )
         }, season)
+
+
+@APP.get("/api/guanying/resources/{media_type}/{tmdb_id}")
+def guanying_resources(
+    media_type: str,
+    tmdb_id: int,
+    movie_session: Optional[str] = Cookie(default=None),
+    refresh: bool = False,
+) -> dict[str, Any]:
+    require_user(movie_session)
+    with db() as connection:
+        enabled = setting(connection, "guanying_enabled") != "0"
+    if not enabled:
+        raise HTTPException(503, "观影资源检索已关闭")
+    with resource_request_lock("guanying", media_type, tmdb_id):
+        resources = guanying_search_resources(
+            media_type, tmdb_id, force=bool(refresh)
+        )
+    return {"resources": resources, "allowed_link_types": ["115", "magnet", "ed2k"]}
+
+
+@APP.post("/api/guanying/transfer")
+async def guanying_transfer(
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    payload = await request.json()
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    media_type = str(payload.get("media_type") or "")
+    share_url = str(payload.get("share_url") or "").strip()
+    resource_key = str(payload.get("resource_key") or payload.get("slug") or "").strip()
+    resource_title = str(payload.get("resource_title") or payload.get("title") or "").strip()
+    kind = guanying_link_kind(share_url)
+    if tmdb_id <= 0 or media_type not in ("movie", "tv") or kind not in {"115", "magnet", "ed2k"}:
+        raise HTTPException(400, "观影资源信息无效")
+    if str(user.get("storage_destination") or "p115") != "p115":
+        raise HTTPException(409, "观影自动转存当前只支持115目标")
+    if not resource_key:
+        resource_key = hashlib.sha256(share_url.encode()).hexdigest()
+    parsed = parse_episode_spec(resource_title)
+    season_number = int(parsed.get("season_number") or 1)
+    wanted_episodes = sorted(set(int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0))
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? AND active = 1",
+            (int(user["id"]), tmdb_id),
+        ).fetchone()
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    follow_id = int(follow["id"]) if follow else None
+    job = begin_workflow_job(
+        user_id=int(user["id"]), destination="p115", source="guanying",
+        resource_key=resource_key, tmdb_id=tmdb_id, media_type=media_type,
+        title=str(payload.get("title") or resource_title), season_number=season_number,
+        episode_numbers=wanted_episodes, follow_id=follow_id, scope="manual",
+    )
+    attach_workflow_job_to_request(request, int(job["id"]))
+    client = await asyncio.to_thread(p115_client)
+    detail = {
+        "source": "guanying", "resource_key": resource_key,
+        "link_type": kind, "season_number": season_number,
+        "episode_numbers": wanted_episodes,
+    }
+    log_hdhive_follow_event(
+        "transfer", "running", f"正在处理观影{kind}资源",
+        follow_id=follow_id, user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or resource_title), detail=detail,
+    )
+    if kind in {"magnet", "ed2k"}:
+        if media_type == "tv" and len(wanted_episodes) != 1:
+            raise HTTPException(409, "磁力和ED2K自动处理仅接受可明确识别的单集资源")
+        before = await asyncio.to_thread(p115_offline_snapshot, client)
+        queued = await asyncio.to_thread(
+            p115_call,
+            "提交115离线任务失败",
+            client.clouddownload_task_add_url,
+            {"url": share_url, "wp_path_id": target_cid},
+        )
+        if not response_ok(queued):
+            raise HTTPException(502, response_message(queued, "115离线任务提交失败"))
+        changed = await asyncio.to_thread(
+            wait_for_p115_change, lambda: p115_offline_snapshot(client), before
+        )
+        if not changed:
+            raise HTTPException(502, "115接口没有创建云下载任务")
+        register_p115_offline_monitor(
+            workflow_job_id=int(job["id"]), user_id=int(user["id"]),
+            follow_id=follow_id, destination="p115", source="guanying",
+            resource_key=resource_key, tmdb_id=tmdb_id, media_type=media_type,
+            season_number=season_number, episode_numbers=wanted_episodes,
+            title=str(payload.get("title") or resource_title),
+            target_cid=str(target_cid), links=[share_url],
+        )
+        update_workflow_job(int(job["id"]), "submitted", "已提交115离线任务，等待文件落盘")
+        record_transfer(
+            user_id=int(user["id"]), source="guanying", resource_key=resource_key,
+            tmdb_id=tmdb_id, transfer_scope="manual", status="submitted",
+            detail="已提交115离线任务", follow_id=follow_id,
+            season_number=season_number, episode_numbers=wanted_episodes,
+            destination="p115",
+        )
+        return {"ok": True, "mode": "offline", "message": "已加入115离线下载", "job_id": int(job["id"])}
+
+    before_files = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
+    tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[int, int]] = set()
+    if media_type == "tv" and wanted_episodes:
+        missing = {(season_number, episode) for episode in wanted_episodes}
+        for episode in completed_episode_numbers(tmdb_id, season_number, set(wanted_episodes)):
+            missing.discard((season_number, episode))
+        if not missing:
+            raise HTTPException(409, "这个资源中可识别的剧集都已存在")
+        selected, selected_keys = select_largest_missing_episode_files_by_season(
+            tree, missing, fallback_season=season_number
+        )
+        if not selected:
+            raise HTTPException(502, "115分享中没有找到可安全增量转存的目标集")
+    else:
+        snap = await asyncio.to_thread(
+            p115_call, "读取115分享失败", client.share_snap, 0, share_url=share_url
+        )
+        if not response_ok(snap):
+            raise HTTPException(502, response_message(snap, "无法读取115分享"))
+        selected = [item for item in extract_share_items(snap) if p115_share_item_id(item)]
+    selected_ids = list(dict.fromkeys(p115_share_item_id(item) for item in selected if p115_share_item_id(item)))
+    if not selected_ids:
+        raise HTTPException(502, "115分享中没有可转存文件")
+    received = await asyncio.to_thread(
+        p115_call,
+        "接收115分享失败",
+        client.share_receive,
+        {"file_id": ",".join(selected_ids), "cid": target_cid},
+        share_url=share_url,
+    )
+    if not response_ok(received):
+        raise HTTPException(502, response_message(received, "115没有接受转存请求"))
+    changed = await asyncio.to_thread(
+        wait_for_p115_change,
+        lambda: p115_folder_snapshot(client, target_cid),
+        before_files,
+    )
+    if not changed:
+        raise HTTPException(502, "115已响应，但目标目录没有确认发生变化")
+    completed = sorted(episode for _season, episode in selected_keys) or wanted_episodes
+    message = "观影115资源已确认转存完成"
+    update_workflow_job(int(job["id"]), "waiting_library", message)
+    record_transfer(
+        user_id=int(user["id"]), source="guanying", resource_key=resource_key,
+        tmdb_id=tmdb_id, transfer_scope="manual", status="success", detail=message,
+        follow_id=follow_id, season_number=season_number,
+        episode_numbers=completed, destination="p115",
+    )
+    log_hdhive_follow_event(
+        "transfer", "success", message, follow_id=follow_id,
+        user_id=int(user["id"]), tmdb_id=tmdb_id,
+        title=str(payload.get("title") or resource_title),
+        detail={**detail, "episode_numbers": completed},
+    )
+    return {"ok": True, "mode": "direct", "message": message, "job_id": int(job["id"])}
 
 
 @APP.post("/api/hdhive/transfer")
