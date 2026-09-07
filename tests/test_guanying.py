@@ -85,7 +85,12 @@ class GuanyingFoundationTests(unittest.TestCase):
         )
         magnet = next(item for item in resources if item["link_type"] == "magnet")
         self.assertEqual(magnet["title"], "给阿嬷的情书 2026 1080p")
+        self.assertEqual(magnet["size"], "4.2 GB")
+        self.assertEqual(magnet["size_label"], "4.2 GB")
         self.assertTrue(magnet["share_url"].startswith("magnet:?xt=urn:btih:"))
+
+        share = next(item for item in resources if item["link_type"] == "115")
+        self.assertEqual(share["size_label"], "")
 
     def test_exact_single_episode_filter_rejects_pack_and_wrong_episode(self):
         resources = [

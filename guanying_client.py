@@ -281,6 +281,8 @@ def normalize_resources(payload: Any, *, media_kind: str, media_id: str) -> list
             item.get("title") or item.get("name") or item.get("text")
             or item.get("remark") or row["group"] or f"观影资源 {index + 1}"
         ).strip()
+        raw_size = item.get("size") or item.get("size_label") or item.get("s") or ""
+        size = str(raw_size).strip() if not isinstance(raw_size, (dict, list)) else ""
         for link in row["links"]:
             url = link["url"]
             fingerprint = f"{media_kind}:{media_id}:{link['kind']}:{url}"
@@ -296,6 +298,8 @@ def normalize_resources(payload: Any, *, media_kind: str, media_id: str) -> list
                 "resource_key": digest,
                 "slug": digest,
                 "title": title,
+                "size": size,
+                "size_label": size,
                 "share_url": url,
                 "links": [url],
                 "link_type": link["kind"],
