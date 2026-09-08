@@ -6955,6 +6955,15 @@ def auto_wash_hdhive_follow(
     cycle_id: str = "",
     force_file_lists: bool = False,
 ) -> dict[str, Any]:
+    wash_run_id = secrets.token_hex(16)
+
+    def log_wash_event(stage, status, message, *, detail=None, **kwargs):
+        log_hdhive_follow_event(
+            stage, status, message,
+            detail={**(detail or {}), "source": "hdhive", "wash_run_id": wash_run_id},
+            **kwargs,
+        )
+
     config = hdhive_wash_config()
     if not config["enabled"]:
         return {"transferred": [], "message": "追更自动洗版已关闭"}
@@ -6967,7 +6976,7 @@ def auto_wash_hdhive_follow(
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not follow or follow["storage_destination"] != "p115":
         if follow:
-            log_hdhive_follow_event(
+            log_wash_event(
                 "transfer", "skipped", "当前追更不是115目标，已跳过自动转存",
                 follow=follow, cycle_id=cycle_id,
             )
@@ -7000,7 +7009,7 @@ def auto_wash_hdhive_follow(
         if not slug or not hdhive_resource_is_supported(resource):
             continue
         resource_title = str(resource.get("title") or slug)
-        log_hdhive_follow_event(
+        log_wash_event(
             "file_list", "running", f"正在读取资源文件列表：{resource_title}",
             follow=follow, cycle_id=cycle_id, detail={"resource_slug": slug},
         )
@@ -7011,7 +7020,7 @@ def auto_wash_hdhive_follow(
         except HTTPException:
             raise
         if file_result is None:
-            log_hdhive_follow_event(
+            log_wash_event(
                 "file_list", "skipped" if from_cache else "failed",
                 (
                     f"资源文件列表已进入冷却：{resource_title} · {file_error}"
@@ -7034,7 +7043,7 @@ def auto_wash_hdhive_follow(
                 follow, candidate, config, emby_present
             )
         }
-        log_hdhive_follow_event(
+        log_wash_event(
             "file_list", "success",
             (
                 f"资源文件列表读取完成：识别 {len(candidates)} 集，"
@@ -7118,19 +7127,20 @@ def auto_wash_hdhive_follow(
                 scope="auto_wash",
             )
         except HTTPException as error:
-            log_hdhive_follow_event(
+            log_wash_event(
                 "transfer", "skipped", str(error.detail),
                 follow=follow, cycle_id=cycle_id,
                 detail={"resource_slug": slug},
             )
             continue
         job_id = int(job["id"])
-        log_hdhive_follow_event(
+        log_wash_event(
             "unlock", "running",
             f"正在解锁资源：{resource_title} · 目标第{episode_label}集",
             follow=follow, cycle_id=cycle_id,
             detail={"resource_slug": slug, "episodes": sorted(target_episodes)},
         )
+        unlock_succeeded = False
         try:
             unlocked = hdhive_call("unlock", slug)
             data = hdhive_response_data(unlocked)
@@ -7141,18 +7151,19 @@ def auto_wash_hdhive_follow(
             )
             if not is_115_share_url(share_url):
                 fail_workflow_job(job_id, "资源未返回有效115链接", retry_seconds=21600)
-                log_hdhive_follow_event(
+                log_wash_event(
                     "unlock", "failed", "资源已解锁，但没有返回有效的115链接",
                     follow=follow, cycle_id=cycle_id,
                     detail={"resource_slug": slug},
                 )
                 continue
-            log_hdhive_follow_event(
+            log_wash_event(
                 "unlock", "success",
                 f"资源解锁成功，正在检查115分享中的第{episode_label}集",
                 follow=follow, cycle_id=cycle_id,
                 detail={"resource_slug": slug},
             )
+            unlock_succeeded = True
             tree = p115_share_tree(client, share_url)
             selected, selected_keys = select_largest_missing_episode_files_by_season(
                 tree,
@@ -7167,7 +7178,7 @@ def auto_wash_hdhive_follow(
             ]
             if not selected_ids or not selected_episodes:
                 fail_workflow_job(job_id, "115分享中没有可安全转存的目标集", retry_seconds=21600)
-                log_hdhive_follow_event(
+                log_wash_event(
                     "transfer", "skipped", "115分享中没有找到可安全转存的缺失集文件",
                     follow=follow, cycle_id=cycle_id,
                     detail={"resource_slug": slug},
@@ -7180,7 +7191,7 @@ def auto_wash_hdhive_follow(
                 selected_episodes,
             )
             selected_label = compact_episode_numbers(selected_episodes)
-            log_hdhive_follow_event(
+            log_wash_event(
                 "transfer", "running",
                 f"正在转存第{selected_label}集到115目标目录",
                 follow=follow, cycle_id=cycle_id,
@@ -7203,7 +7214,7 @@ def auto_wash_hdhive_follow(
                     rejection = f"{rejection}；{recovery}"
                 if not receive_confirmed:
                     fail_workflow_job(job_id, rejection, retry_seconds=900)
-                    log_hdhive_follow_event(
+                    log_wash_event(
                         "transfer", "failed",
                         f"115拒绝接收第{selected_label}集：{rejection}",
                         follow=follow, cycle_id=cycle_id,
@@ -7214,7 +7225,7 @@ def auto_wash_hdhive_follow(
                         },
                     )
                     continue
-                log_hdhive_follow_event(
+                log_wash_event(
                     "transfer", "success",
                     f"第{selected_label}集曾被115接收，已找回并放入目标目录",
                     follow=follow, cycle_id=cycle_id,
@@ -7227,7 +7238,7 @@ def auto_wash_hdhive_follow(
             if not receive_confirmed and not wait_for_p115_change(
                 lambda: p115_folder_snapshot(client, target_cid), before_files
             ):
-                log_hdhive_follow_event(
+                log_wash_event(
                     "transfer", "running",
                     f"115首次受理后目录未变化，正在重新提交第{selected_label}集",
                     follow=follow, cycle_id=cycle_id,
@@ -7261,7 +7272,7 @@ def auto_wash_hdhive_follow(
                         "已安排15分钟后重新处理"
                     )
                     fail_workflow_job(job_id, failure, retry_seconds=900)
-                    log_hdhive_follow_event(
+                    log_wash_event(
                         "transfer", "failed", failure,
                         follow=follow, cycle_id=cycle_id,
                         detail={
@@ -7272,15 +7283,21 @@ def auto_wash_hdhive_follow(
                     )
                     continue
         except HTTPException as error:
+            if not unlock_succeeded:
+                log_wash_event(
+                    "unlock", "failed", f"影巢解锁失败：{error.detail}",
+                    follow=follow, cycle_id=cycle_id,
+                    detail={"resource_slug": slug, "episodes": sorted(target_episodes)},
+                )
             fail_workflow_job(job_id, error.detail, retry_seconds=900)
-            log_hdhive_follow_event(
+            log_wash_event(
                 "transfer", "failed", f"资源处理失败：{error.detail}",
                 follow=follow, cycle_id=cycle_id,
                 detail={"resource_slug": slug},
             )
             continue
 
-        log_hdhive_follow_event(
+        log_wash_event(
             "transfer", "success",
             f"第{selected_label}集已确认转存到115，等待 PanSave 整理与 Emby 入库",
             follow=follow, cycle_id=cycle_id,
@@ -10432,6 +10449,37 @@ async def update_wash_rules(
     return {"ok": True, **wash_rule_settings()}
 
 
+def hdhive_unlock_statistics(rows) -> tuple[dict[int, dict], dict[str, dict]]:
+    """Count starts once, separately from outcomes, within retained logs only."""
+    by_movie: dict[int, dict] = {}
+    by_wash: dict[str, dict] = {}
+    for row in rows:
+        try:
+            detail = json.loads(str(row["detail_json"] or "{}"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(detail, dict):
+            continue
+        # Older automatic HDHive events predate the explicit source field.
+        source = detail.get("source")
+        if source != "hdhive" and not (
+            not source and row["follow_id"] and detail.get("resource_slug")
+        ):
+            continue
+        if row["stage"] != "unlock":
+            continue
+        field = {"running": "requests", "success": "successes", "failed": "failures"}.get(row["status"])
+        if not field:
+            continue
+        keys = [(by_movie, int(row["tmdb_id"] or 0))]
+        if detail.get("wash_run_id"):
+            keys.append((by_wash, str(detail["wash_run_id"])))
+        for groups, key in keys:
+            counts = groups.setdefault(key, {"requests": 0, "successes": 0, "failures": 0})
+            counts[field] += 1
+    return by_movie, by_wash
+
+
 @APP.get("/api/admin/hdhive/follow-events")
 def hdhive_follow_events(
     status: str = "",
@@ -10494,6 +10542,14 @@ def hdhive_follow_events(
             "WHERE created_at >= ? GROUP BY status",
             ((datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(),),
         ).fetchall()
+        movie_ids = sorted({int(row["tmdb_id"] or 0) for row in rows})
+        unlock_rows = connection.execute(
+            "SELECT tmdb_id, follow_id, stage, status, detail_json FROM hdhive_follow_events "
+            "WHERE stage = 'unlock' AND tmdb_id IN (" + ",".join("?" for _ in movie_ids) + ")",
+            movie_ids,
+        ).fetchall() if movie_ids else []
+    by_movie, by_wash = hdhive_unlock_statistics(unlock_rows)
+    empty_counts = {"requests": 0, "successes": 0, "failures": 0}
     events = []
     for row in rows:
         try:
@@ -10519,6 +10575,8 @@ def hdhive_follow_events(
                     or ("ongoing" if row["follow_id"] else "")
                 ),
                 "detail": detail,
+                "hdhive_unlock_counts": by_movie.get(int(row["tmdb_id"] or 0), empty_counts),
+                "wash_unlock_counts": by_wash.get(str(detail.get("wash_run_id") or ""), empty_counts),
                 "created_at": row["created_at"],
             }
         )

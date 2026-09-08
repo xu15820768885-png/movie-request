@@ -1716,6 +1716,56 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             app.hdhive_follow_events(movie_session=self.token)
         self.assertEqual(denied.exception.status_code, 403)
 
+    def test_unlock_counts_separate_starts_from_results_and_wash_rounds(self):
+        for run_id, statuses in [("wash-one", ["running", "success", "running", "failed"]), ("wash-two", ["running", "success"])]:
+            for status in statuses:
+                app.log_hdhive_follow_event(
+                    "unlock", status, "测试解锁", tmdb_id=223911, title="仙逆",
+                    detail={"source": "hdhive", "wash_run_id": run_id},
+                )
+        app.log_hdhive_follow_event("unlock", "running", "癫影解锁", tmdb_id=223911, title="仙逆", detail={"source": "dian"})
+        # Results remain correct even when only a filtered, limited page is read.
+        for index in range(25):
+            app.log_hdhive_follow_event("transfer", "success", "转存", tmdb_id=223911, title="仙逆", detail={"source": "hdhive", "wash_run_id": "wash-two"})
+        result = app.hdhive_follow_events(stage="transfer", status="success", limit=20, movie_session=self.admin_token)
+        self.assertEqual(len(result["events"]), 20)
+        self.assertEqual(result["events"][0]["hdhive_unlock_counts"], {"requests": 3, "successes": 2, "failures": 1})
+        self.assertEqual(result["events"][0]["wash_unlock_counts"], {"requests": 1, "successes": 1, "failures": 0})
+
+    def test_wash_unlock_failure_is_separate_from_later_transfer_failure(self):
+        from contextlib import ExitStack
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            follow_id = connection.execute("INSERT INTO tv_follows(user_id, tmdb_id, title, created_at, updated_at) VALUES(?,223911,'仙逆',?,?)", (user_id, app.now_iso(), app.now_iso())).lastrowid
+        candidate = {"slug": "resource", "fingerprint": "one", "file_size": 100, "quality_score": 10}
+        for failure_stage in ("unlock", "transfer"):
+            with self.subTest(stage=failure_stage), ExitStack() as stack:
+                mocks = {
+                    "hdhive_wash_config": {"return_value": {"enabled": True, "max_transfers": 4}},
+                    "destination_episode_progress": {"return_value": {}},
+                    "hdhive_resource_is_direct_115": {"return_value": True},
+                    "hdhive_resource_is_supported": {"return_value": True},
+                    "hdhive_cached_file_list": {"return_value": ({}, False, "")},
+                    "hdhive_file_episode_candidates": {"return_value": {(1,157): candidate}},
+                    "hdhive_wash_candidate_allowed": {"return_value": True},
+                    "p115_client": {"return_value": object()},
+                    "begin_workflow_job": {"return_value": {"id": 1}},
+                    "fail_workflow_job": {"return_value": None},
+                    "hdhive_call": {"side_effect": app.HTTPException(502, "unlock failed")} if failure_stage == "unlock" else {"return_value": {"data": {"full_url": "https://115.com/s/test"}}},
+                    "p115_share_tree": {"side_effect": app.HTTPException(502, "tree failed")},
+                }
+                for name, kwargs in mocks.items():
+                    stack.enter_context(patch.object(app, name, **kwargs))
+                app.auto_wash_hdhive_follow(follow_id, [{"slug": "resource", "title": "S01E157"}])
+            latest = app.hdhive_follow_events(movie_session=self.admin_token)["events"][0]
+            self.assertEqual(latest["wash_unlock_counts"], {"requests": 1, "successes": int(failure_stage == "transfer"), "failures": int(failure_stage == "unlock")})
+
+    def test_legacy_unlock_records_count_once_but_are_not_invented_wash_rounds(self):
+        rows = [{"tmdb_id": 223911, "follow_id": 1, "stage": "unlock", "status": status, "detail_json": '{"resource_slug":"legacy"}'} for status in ["running", "success"] * 3]
+        movies, washes = app.hdhive_unlock_statistics(rows)
+        self.assertEqual(movies[223911], {"requests": 3, "successes": 3, "failures": 0})
+        self.assertEqual(washes, {})
+
     def test_real_subscription_message_content_is_visible_to_admin(self):
         with app.db() as connection:
             user_id = connection.execute(
@@ -2004,6 +2054,13 @@ class HDHiveFollowRouteTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(episode["process_count"], 1)
         self.assertEqual(episode["last_file_size"], 1_100_000_000)
+        events = app.hdhive_follow_events(movie_session=self.admin_token)["events"]
+        unlocks = [event for event in events if event["stage"] == "unlock"]
+        self.assertEqual(len(unlocks), 2)
+        self.assertEqual(len({event["detail"]["wash_run_id"] for event in unlocks}), 1)
+        self.assertEqual(unlocks[0]["wash_unlock_counts"], {"requests": 1, "successes": 1, "failures": 0})
+        self.assertEqual(len({event["detail"]["wash_run_id"] for event in events if event["detail"].get("wash_run_id")}), 2)
+
 
     def test_manual_transfer_ignores_existing_library_episode_rules(self):
         class FakeP115:

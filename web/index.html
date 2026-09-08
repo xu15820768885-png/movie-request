@@ -1551,6 +1551,18 @@
       for(const number of numbers.slice(1)){if(number===previous+1){previous=number;continue;}ranges.push(start===previous?`${start}`:`${start}-${previous}`);start=previous=number;}
       ranges.push(start===previous?`${start}`:`${start}-${previous}`);return ranges.join('、');
     }
+    function washUnlockSummaryMarkup(items,visible) {
+      const runIds=new Set(visible.map(item=>item.detail?.wash_run_id).filter(Boolean));
+      const rows=[...runIds].map(runId=>{
+        const records=items.filter(item=>item.detail?.wash_run_id===runId);
+        const event=records[0];const counts=event.wash_unlock_counts||{requests:0,successes:0,failures:0};
+        const episodes=records.flatMap(item=>item.detail?.episodes||item.detail?.episode_numbers||[]);
+        const label=episodes.length?`第${compactEpisodeLabel(episodes)}集`:'整部资源';
+        const owner=event.display_name?` · ${event.display_name}`:'';
+        return `<div class="follow-step"><span class="follow-step-time">${escapeHtml(formatTaskTime(event.created_at))}</span><span class="follow-step-episode">${escapeHtml(label+owner)}</span><span>影巢解锁请求 ${Number(counts.requests)} 次 · 成功 ${Number(counts.successes)} 次 · 失败 ${Number(counts.failures)} 次</span></div>`;
+      }).join('');
+      return rows?`<details class="follow-stage-group" open><summary><span>每轮洗版解锁</span><span>${runIds.size} 轮</span></summary><div class="muted">统计本轮影巢解锁操作，不代表扣费次数；旧日志没有轮次标识时不归入本轮统计。</div><div class="follow-stage-list">${rows}</div></details>`:'';
+    }
     async function loadFollowEvents() {
       const root=$('followEventList');root.innerHTML='<div class="empty">正在读取处理记录…</div>';
       const stage=$('followLogStage').value;const status=$('followLogStatus').value;const resourceStatus=$('followLogResourceStatus').value;
@@ -1580,18 +1592,20 @@
           const ownerLabel=owners.length?`成员 ${owners.join('、')}`:'';
           const resourceStatusLabel=items.some(item=>item.resource_status==='ongoing')?'追更中':items.some(item=>item.resource_status==='completed')?'已完结':'';
           const stageCounts={};visible.forEach(item=>stageCounts[item.stage]=(stageCounts[item.stage]||0)+1);
-          const countLabel=['unlock','transfer','library','complete','file_list','scan'].filter(key=>stageCounts[key]).map(key=>`${stageLabels[key]} ${stageCounts[key]}`).join(' · ');
-          const meta=[`TMDB ${Number(event.tmdb_id)}`,ownerLabel,resourceStatusLabel,countLabel].filter(Boolean).join(' · ');
+          const countLabel=['unlock','transfer','library','complete','file_list','scan'].filter(key=>stageCounts[key]).map(key=>`${stageLabels[key]}日志 ${stageCounts[key]}条`).join(' · ');
+          const unlockCounts=event.hdhive_unlock_counts;
+          const unlockLabel=unlockCounts?`影巢解锁请求 ${unlockCounts.requests}次 · 成功 ${unlockCounts.successes}次（保留日志内）`:'';
+          const meta=[`TMDB ${Number(event.tmdb_id)}`,ownerLabel,resourceStatusLabel,unlockLabel,countLabel].filter(Boolean).join(' · ');
           const stageOrder=['unlock','transfer','library','complete','file_list','scan'];
           const stageGroups=stageOrder.filter(stageKey=>visible.some(item=>item.stage===stageKey)).map((stageKey,index)=>{
             const records=visible.filter(item=>item.stage===stageKey);const successCount=records.filter(item=>item.status==='success').length;const failedCount=records.filter(item=>item.status==='failed').length;const runningCount=records.filter(item=>item.status==='running').length;
-            const summary=[`${records.length} 条`,successCount?`成功 ${successCount}`:'',failedCount?`失败 ${failedCount}`:'',runningCount?`处理中 ${runningCount}`:''].filter(Boolean).join(' · ');
+            const summary=[`${records.length} 条`,successCount?`成功 ${successCount}`:'',failedCount?`失败 ${failedCount}`:'',runningCount?`开始记录 ${runningCount}`:''].filter(Boolean).join(' · ');
             const rows=records.map(record=>{const recordOwner=record.display_name?` · ${record.display_name}`:'';return `<div class="follow-step"><span class="follow-step-time">${escapeHtml(formatTaskTime(record.created_at))}</span><span class="follow-step-episode">${escapeHtml(followEventEpisodeLabel(record))}${escapeHtml(recordOwner)}</span><span>${escapeHtml(record.message)}<span class="follow-step-status">${escapeHtml(statusLabels[record.status]||record.status)}</span></span></div>`;}).join('');
             return `<details class="follow-stage-group" ${index===0?'open':''}><summary><span>${escapeHtml(stageLabels[stageKey])}</span><span>${escapeHtml(summary)}</span></summary><div class="follow-stage-list">${rows}</div></details>`;
           }).join('');
           const posterUrl=event.poster_url||(demoMovies.find(movie=>Number(movie.tmdb_id)===Number(event.tmdb_id))||{}).poster_url||'';
           const poster=posterUrl?`<img class="follow-event-poster" src="${escapeHtml(posterUrl)}" alt="${escapeHtml(title)}海报" loading="lazy" decoding="async">`:'<div class="follow-event-poster empty">映</div>';
-          return `<details class="follow-event ${escapeHtml(event.status)}"><summary>${poster}<div class="follow-event-time">最近更新<br>${escapeHtml(timeLabel)}</div><div><div class="follow-event-title">${escapeHtml(title)}</div><div class="follow-event-message">${escapeHtml(event.message)}</div><div class="follow-event-meta">${escapeHtml(meta)}</div></div></summary><div class="follow-event-steps">${stageGroups}</div></details>`;
+          return `<details class="follow-event ${escapeHtml(event.status)}"><summary>${poster}<div class="follow-event-time">最近更新<br>${escapeHtml(timeLabel)}</div><div><div class="follow-event-title">${escapeHtml(title)}</div><div class="follow-event-message">${escapeHtml(event.message)}</div><div class="follow-event-meta">${escapeHtml(meta)}</div></div></summary><div class="follow-event-steps">${washUnlockSummaryMarkup(items,visible)}${stageGroups}</div></details>`;
         }).join(''):'<div class="empty">当前没有需要关注的影片处理记录。例行后台检查不会显示在这里。</div>';
       } catch(error) {root.innerHTML=`<div class="empty">处理记录读取失败：${escapeHtml(error.message)}</div>`;}
     }

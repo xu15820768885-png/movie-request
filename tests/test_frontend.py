@@ -3,6 +3,24 @@ from pathlib import Path
 
 
 class FollowFeatureVisibilityTest(unittest.TestCase):
+    def test_wash_unlock_round_rendering_does_not_count_log_rows_as_requests(self):
+        import shutil
+        import subprocess
+        if not shutil.which("node"):
+            self.skipTest("Node.js is required for the rendering check")
+        html = (Path(__file__).parents[1] / "web" / "index.html").read_text()
+        helper = html.split("    function washUnlockSummaryMarkup(", 1)[1].split("    async function loadFollowEvents()", 1)[0]
+        script = "const assert=require('node:assert/strict'); const escapeHtml=String; const formatTaskTime=String; const compactEpisodeLabel=x=>[...new Set(x)].join('、');\nfunction washUnlockSummaryMarkup(" + helper + """
+const first={created_at:'2026-09-08',display_name:'威哥',detail:{wash_run_id:'one',episodes:[157]},wash_unlock_counts:{requests:2,successes:1,failures:1}};
+const second={...first,detail:{wash_run_id:'two',episodes:[158]},wash_unlock_counts:{requests:1,successes:1,failures:0}};
+const html=washUnlockSummaryMarkup([first,first,second],[first,first,second]);
+assert.match(html,/2 轮/);assert.match(html,/第157集/);assert.match(html,/第158集/);
+assert.equal((html.match(/影巢解锁请求/g)||[]).length,2);
+assert.match(html,/影巢解锁请求 2 次 · 成功 1 次 · 失败 1 次/);
+assert.equal(washUnlockSummaryMarkup([{detail:{}}],[{detail:{}}]),'');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_native_follow_and_automatic_wash_controls_are_visible(self):
         html = (Path(__file__).parents[1] / "web" / "index.html").read_text(
             encoding="utf-8"
