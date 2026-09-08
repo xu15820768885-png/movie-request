@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
+from http.cookiejar import Cookie
 from typing import Any, Iterable, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -336,12 +337,31 @@ class GuanyingClient:
         except (TypeError, ValueError, json.JSONDecodeError):
             cookie = SimpleCookie(); cookie.load(payload)
             values = {key: morsel.value for key, morsel in cookie.items()}
-        if isinstance(values, dict):
+        if isinstance(values, dict) and values.get("version") == 2 and isinstance(values.get("cookies"), list):
+            self._legacy_cookie_names = set(values.get("legacy_names") or [])
+            for item in values["cookies"]:
+                cookie = Cookie(**item)
+                if not cookie.is_expired():
+                    self.session.cookies.set_cookie(cookie)
+        elif isinstance(values, dict):
+            # Legacy name/value cookies had no scope. Bind them to this site so
+            # a server renewal replaces them instead of adding a second value.
             for key, value in values.items():
-                self.session.cookies.set(str(key), str(value))
+                self.session.cookies.set(
+                    str(key), str(value), domain=urlparse(self.base_url).hostname,
+                    path="/", secure=True,
+                )
+            self._legacy_cookie_names = set(values)
 
     def export_cookies(self) -> str:
-        return json.dumps(self.session.cookies.get_dict(), ensure_ascii=False, separators=(",", ":"))
+        cookies = []
+        for cookie in self.session.cookies:
+            if cookie.is_expired():
+                continue
+            fields = vars(cookie).copy()
+            fields["rest"] = fields.pop("_rest")
+            cookies.append(fields)
+        return json.dumps({"version": 2, "cookies": cookies, "legacy_names": sorted(getattr(self, "_legacy_cookie_names", set()))}, ensure_ascii=False, separators=(",", ":"))
 
     def _raw(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         response = self.session.request(
@@ -350,6 +370,17 @@ class GuanyingClient:
             timeout=self.timeout,
             **kwargs,
         )
+        # A legacy cookie may be renewed with an explicit Domain attribute.
+        # Remove only its old migrated scope; retain the fresh server cookie.
+        legacy = getattr(self, "_legacy_cookie_names", set())
+        for renewed in response.cookies:
+            if renewed.name in legacy:
+                for old in list(self.session.cookies):
+                    if old.name == renewed.name and (old.domain, old.path) != (renewed.domain, renewed.path):
+                        self.session.cookies.clear(old.domain, old.path, old.name)
+                legacy.discard(renewed.name)
+        if response.status_code == 429:
+            raise GuanyingError("观影请求过于频繁，请稍后重试", status=429)
         if response.status_code >= 500:
             raise GuanyingError("观影服务暂时不可用", status=response.status_code)
         return response
@@ -431,10 +462,25 @@ class GuanyingClient:
             raise GuanyingError("验证码点选错误，请重新尝试", code="CAPTCHA_FAILED")
         return info
 
+    def _checked(self, path: str, **kwargs: Any) -> requests.Response:
+        response = self._raw("GET", path, **kwargs)
+        if "浏览器安全验证" in response.text:
+            raise GuanyingError("观影浏览器安全验证已失效", code="POW_FAILED")
+        if response.status_code == 401 or "未登录，访问受限" in response.text or "/user/login" in response.url:
+            raise GuanyingError("观影登录会话已失效", status=401, code="SESSION_EXPIRED")
+        if response.status_code >= 400:
+            raise GuanyingError("观影请求失败", status=response.status_code)
+        return response
+
     def authenticated(self) -> bool:
         self.ensure_browser_verified()
-        response = self._raw("GET", "/")
-        return "未登录，访问受限" not in response.text and "/user/login" not in response.url
+        try:
+            self._checked("/")
+        except GuanyingError as error:
+            if error.code == "SESSION_EXPIRED":
+                return False
+            raise
+        return True
 
     def search(self, title: str, *, aliases: Optional[list[str]] = None, year: str = "", media_type: str = "tv") -> list[dict[str, Any]]:
         if not self.authenticated():
@@ -442,7 +488,7 @@ class GuanyingClient:
         queries = [str(title or "").strip(), *[str(value or "").strip() for value in aliases or []]]
         candidates: list[dict[str, Any]] = []
         for query in dict.fromkeys(value for value in queries if value):
-            page = self._raw("GET", "/search", params={"q": query, "type": "", "mode": "1"})
+            page = self._checked("/search", params={"q": query, "type": "", "mode": "1"})
             candidates.extend(extract_media_candidates(page.text))
             if candidates:
                 break
@@ -459,7 +505,7 @@ class GuanyingClient:
             if key in seen_ids:
                 continue
             seen_ids.add(key)
-            response = self._raw("GET", f"/res/downurl/{candidate['kind']}/{candidate['id']}")
+            response = self._checked(f"/res/downurl/{candidate['kind']}/{candidate['id']}")
             try:
                 payload: Any = response.json()
             except (ValueError, json.JSONDecodeError):

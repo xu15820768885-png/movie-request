@@ -19,7 +19,8 @@ from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
+from functools import wraps
 from typing import Any, Iterable, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from zoneinfo import ZoneInfo
@@ -117,6 +118,8 @@ EMBY_WEBHOOK_GENERATIONS: dict[str, int] = {}
 LOGGER = logging.getLogger("uvicorn.error")
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
+GUANYING_SESSION_LOCK = RLock()
+GUANYING_RECOVERY_SECONDS = 900
 GUANYING_LOGIN_LOCK = Lock()
 GUANYING_LOGIN_ATTEMPTS: dict[str, dict[str, Any]] = {}
 P115_APPS = {
@@ -1102,6 +1105,69 @@ def guanying_row(connection: sqlite3.Connection) -> sqlite3.Row:
     return row
 
 
+def guanying_session_locked(function):
+    """Serialize reads/renewals and admin mutations of the one shared account."""
+    @wraps(function)
+    def locked(*args, **kwargs):
+        if not GUANYING_SESSION_LOCK.acquire(timeout=30):
+            raise HTTPException(503, "观影正在处理其他查询或恢复登录，请稍后重试")
+        try:
+            return function(*args, **kwargs)
+        finally:
+            GUANYING_SESSION_LOCK.release()
+    return locked
+
+
+@guanying_session_locked
+def run_guanying_operation(operation):
+    with db() as connection:
+        row = guanying_row(connection)
+        retry_at = float(setting(connection, "guanying_recovery_after") or 0)
+    if row["status"] in ("captcha_required", "credentials_invalid"):
+        raise HTTPException(409, "观影需要管理员在观影设置中完成验证码或重新登录")
+    if retry_at > time.time():
+        raise HTTPException(503, "观影自动恢复暂缓，稍后重试；管理员可在观影设置中重新登录")
+    client = guanying_client()
+    recovering = False
+    try:
+        try:
+            result = operation(client)
+        except GuanyingError as error:
+            if error.code not in ("SESSION_EXPIRED", "POW_FAILED", "POW_INVALID"):
+                raise
+            recovering = True
+            # Persist the cooldown before attempting recovery, including across
+            # a process restart. A successful operation clears it below.
+            with db() as connection:
+                set_setting(connection, "guanying_recovery_after", time.time() + GUANYING_RECOVERY_SECONDS)
+            if error.code.startswith("POW_"):
+                client.session.close()
+                client = GuanyingClient(base_url=client.base_url)
+            if not client.authenticated():
+                username, password = guanying_credentials()
+                login_result = client.login(username, password)
+                if not login_result.get("authenticated"):
+                    raise GuanyingError("需要管理员在观影设置中登录并完成点选验证码", code="CAPTCHA_REQUIRED")
+            result = operation(client)
+        save_guanying_client(client)
+        with db() as connection:
+            set_setting(connection, "guanying_recovery_after", "0")
+        return result
+    except Exception as error:
+        code = error.code if isinstance(error, GuanyingError) else ""
+        status = {
+            "CAPTCHA_REQUIRED": "captcha_required",
+            "LOGIN_FAILED": "credentials_invalid",
+        }.get(code, "error")
+        save_guanying_client(client, status=status, error=str(error))
+        if recovering or (isinstance(error, GuanyingError) and error.status == 429):
+            with db() as connection:
+                set_setting(connection, "guanying_recovery_after", time.time() + GUANYING_RECOVERY_SECONDS)
+        raise guanying_error(error) from error
+    finally:
+        client.session.close()
+
+
 def guanying_client(*, require_configured: bool = True) -> GuanyingClient:
     with db() as connection:
         row = guanying_row(connection)
@@ -1176,41 +1242,24 @@ def guanying_search_resources(
         if str(value or "").strip() and str(value or "").strip() != title
     ))
     date = str(detail.get("first_air_date") or detail.get("release_date") or "")
-    client = guanying_client()
-    try:
-        resources = client.search(
-            title,
-            aliases=aliases[:2],
-            year=date[:4],
-            media_type=media_type,
-        )
-        for resource in resources:
-            parsed = parse_episode_spec(resource.get("title") or "")
-            resource.update({
-                "season_number": int(parsed.get("season_number") or 1),
-                "episode_numbers": sorted(set(int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0)),
-                "episode_label": parsed.get("episode_label") or "",
-                "res": media_quality_value(resource.get("title"), ("2160p", "1080p", "720p", "4K")),
-                "codec": media_quality_value(resource.get("title"), ("AV1", "H.265", "HEVC", "H.264", "x265", "x264")),
-                "hdr": media_quality_value(resource.get("title"), ("Dolby Vision", "DV", "HDR10+", "HDR10", "HDR")),
-                "subtitle_label": "中文字幕" if re.search(r"中字|中文|简中|繁中|CHS|CHT", str(resource.get("title") or ""), re.I) else "",
-            })
-        cache_resource_response(
-            "guanying", media_type, tmdb_id, {"resources": resources}
-        )
-        save_guanying_client(client)
-        return resources
-    except Exception as error:
-        with db() as connection:
-            connection.execute(
-                "UPDATE guanying_session SET status = ?, last_error = ?, "
-                "last_checked_at = ?, updated_at = ? WHERE id = 1",
-                (
-                    "login_required" if isinstance(error, GuanyingError) and error.code == "SESSION_EXPIRED" else "error",
-                    str(error)[:500], now_iso(), now_iso(),
-                ),
-            )
-        raise guanying_error(error) from error
+    resources = run_guanying_operation(lambda client: client.search(
+        title, aliases=aliases[:2], year=date[:4], media_type=media_type,
+    ))
+    for resource in resources:
+        parsed = parse_episode_spec(resource.get("title") or "")
+        resource.update({
+            "season_number": int(parsed.get("season_number") or 1),
+            "episode_numbers": sorted(set(int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0)),
+            "episode_label": parsed.get("episode_label") or "",
+            "res": media_quality_value(resource.get("title"), ("2160p", "1080p", "720p", "4K")),
+            "codec": media_quality_value(resource.get("title"), ("AV1", "H.265", "HEVC", "H.264", "x265", "x264")),
+            "hdr": media_quality_value(resource.get("title"), ("Dolby Vision", "DV", "HDR10+", "HDR10", "HDR")),
+            "subtitle_label": "中文字幕" if re.search(r"中字|中文|简中|繁中|CHS|CHT", str(resource.get("title") or ""), re.I) else "",
+        })
+    cache_resource_response(
+        "guanying", media_type, tmdb_id, {"resources": resources}
+    )
+    return resources
 
 
 def media_quality_value(value: Any, options: Iterable[str]) -> str:
@@ -10079,8 +10128,10 @@ def guanying_public_status() -> dict[str, Any]:
         enabled = setting(connection, "guanying_enabled") != "0"
         follow_enabled = setting(connection, "guanying_follow_enabled") != "0"
         interval = max(900, min(21600, int(setting(connection, "guanying_poll_interval") or 21600)))
+        retry_seconds = max(0, int(float(setting(connection, "guanying_recovery_after") or 0) - time.time()))
         continuous_wash = setting(connection, "guanying_continuous_wash") != "0"
     return {
+        "recovery_retry_seconds": retry_seconds,
         "enabled": enabled,
         "follow_enabled": follow_enabled,
         "configured": bool(row["username_cipher"] and row["password_cipher"]),
@@ -10089,7 +10140,8 @@ def guanying_public_status() -> dict[str, Any]:
         "status_label": {
             "connected": "已登录",
             "login_required": "需要重新登录",
-            "captcha_required": "等待验证码",
+            "captcha_required": "需要完成验证码",
+            "credentials_invalid": "需要检查账号密码",
             "error": "连接异常",
             "not_configured": "待配置",
         }.get(str(row["status"] or ""), "待配置"),
@@ -10125,6 +10177,13 @@ async def guanying_login(
 ) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
+    return await asyncio.to_thread(_guanying_login, payload)
+
+
+@guanying_session_locked
+def _guanying_login(payload: dict[str, Any]) -> dict[str, Any]:
+    with GUANYING_LOGIN_LOCK:
+        GUANYING_LOGIN_ATTEMPTS.clear()
     with db() as connection:
         row = guanying_row(connection)
     base_url = str(payload.get("base_url") or row["base_url"] or GUANYING_DEFAULT_BASE_URL)
@@ -10134,7 +10193,7 @@ async def guanying_login(
         raise HTTPException(400, "请输入有效的观影账号和密码")
     try:
         client = GuanyingClient(base_url=base_url)
-        result = await asyncio.to_thread(client.login, username, password)
+        result = client.login(username, password)
     except Exception as error:
         raise guanying_error(error) from error
     with db() as connection:
@@ -10151,9 +10210,11 @@ async def guanying_login(
                 now_iso(), now_iso(),
             ),
         )
+    with db() as connection:
+        set_setting(connection, "guanying_recovery_after", "0")
     if result.get("authenticated"):
         return {"ok": True, "message": "观影登录成功", **guanying_public_status()}
-    challenge = await asyncio.to_thread(client.captcha)
+    challenge = client.captcha()
     attempt_id = secrets.token_urlsafe(24)
     with GUANYING_LOGIN_LOCK:
         GUANYING_LOGIN_ATTEMPTS[attempt_id] = {
@@ -10183,6 +10244,11 @@ async def guanying_captcha_verify(
 ) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
+    return await asyncio.to_thread(_guanying_captcha_verify, payload)
+
+
+@guanying_session_locked
+def _guanying_captcha_verify(payload: dict[str, Any]) -> dict[str, Any]:
     attempt_id = str(payload.get("attempt_id") or "")
     with GUANYING_LOGIN_LOCK:
         attempt = GUANYING_LOGIN_ATTEMPTS.get(attempt_id)
@@ -10190,20 +10256,19 @@ async def guanying_captcha_verify(
         raise HTTPException(410, "观影验证码已过期，请重新登录")
     client: GuanyingClient = attempt["client"]
     try:
-        code = await asyncio.to_thread(
-            client.verify_captcha,
+        code = client.verify_captcha(
             payload.get("points") or [],
             int(payload.get("width") or 350),
             int(payload.get("height") or 200),
         )
-        result = await asyncio.to_thread(
-            client.login, attempt["username"], attempt["password"], code
-        )
+        result = client.login(attempt["username"], attempt["password"], code)
     except Exception as error:
         raise guanying_error(error) from error
     if not result.get("authenticated"):
         raise HTTPException(401, "观影登录验证未完成")
     save_guanying_client(client)
+    with db() as connection:
+        set_setting(connection, "guanying_recovery_after", "0")
     with GUANYING_LOGIN_LOCK:
         GUANYING_LOGIN_ATTEMPTS.pop(attempt_id, None)
     return {"ok": True, "message": "观影登录成功", **guanying_public_status()}
@@ -10214,14 +10279,11 @@ def guanying_test(
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
     require_admin(movie_session)
-    client = guanying_client()
-    try:
-        authenticated = client.authenticated()
-        if not authenticated:
+    def check(client):
+        if not client.authenticated():
             raise GuanyingError("登录会话已失效", status=401, code="SESSION_EXPIRED")
-        save_guanying_client(client)
-    except Exception as error:
-        raise guanying_error(error) from error
+        return True
+    run_guanying_operation(check)
     return {"ok": True, "message": "观影登录状态正常", **guanying_public_status()}
 
 
@@ -10232,11 +10294,24 @@ async def guanying_config(
 ) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
+    return await asyncio.to_thread(_guanying_config, payload)
+
+
+@guanying_session_locked
+def _guanying_config(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         base_url = GuanyingClient(base_url=str(payload.get("base_url") or GUANYING_DEFAULT_BASE_URL)).base_url
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     with db() as connection:
+        previous = guanying_row(connection)
+        if previous["base_url"] != base_url:
+            with GUANYING_LOGIN_LOCK:
+                GUANYING_LOGIN_ATTEMPTS.clear()
+            set_setting(connection, "guanying_recovery_after", "0")
+            connection.execute(
+                "UPDATE guanying_session SET cookies_cipher = '', status = 'login_required', last_error = '' WHERE id = 1"
+            )
         connection.execute(
             "UPDATE guanying_session SET base_url = ?, updated_at = ? WHERE id = 1",
             (base_url, now_iso()),
@@ -10260,11 +10335,15 @@ async def guanying_config(
 
 
 @APP.delete("/api/admin/guanying/session")
+@guanying_session_locked
 def guanying_clear_session(
     movie_session: Optional[str] = Cookie(default=None),
 ) -> dict[str, Any]:
     require_admin(movie_session)
+    with GUANYING_LOGIN_LOCK:
+        GUANYING_LOGIN_ATTEMPTS.clear()
     with db() as connection:
+        set_setting(connection, "guanying_recovery_after", "0")
         connection.execute(
             "UPDATE guanying_session SET username_cipher = '', password_cipher = '', "
             "cookies_cipher = '', status = 'not_configured', last_error = '', "

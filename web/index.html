@@ -733,6 +733,7 @@
             </form>
             <form id="guanyingForm" class="panel stack storage-panel hidden" data-storage-content="guanying">
               <div class="storage-panel-head"><h3>观影账号与追更轮询</h3><p>主地址为 www.教父.com；备用地址只允许手动切换，登录信息加密保存。</p></div>
+              <p class="muted">登录状态失效时会自动尝试恢复一次；恢复失败后等待15分钟。需要点选验证码或检查账号密码时，请在这里重新登录，完成前暂停自动登录。</p>
               <label>站点地址<input id="guanyingBaseUrl" value="https://www.教父.com"></label>
               <div class="inline"><label>观影账号<input id="guanyingUsername" autocomplete="username" placeholder="已保存时可留空"></label><label>观影密码<input id="guanyingPassword" type="password" autocomplete="current-password" placeholder="已保存时可留空"></label></div>
               <div class="inline"><label>常规检查频率<select id="guanyingPollInterval"><option value="1800">每30分钟</option><option value="7200">每2小时</option><option value="21600">每6小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="guanyingEnabled" type="checkbox" style="width:auto">参与自动追更和洗版</label></div>
@@ -1849,6 +1850,7 @@
       $('guanyingPollInterval').value=String(guanying.poll_interval||21600);
       $('guanyingContinuousWash').checked=Boolean(guanying.continuous_wash);
       $('guanyingState').textContent=guanying.last_error?`上次错误：${guanying.last_error}`:guanying.authenticated?`已登录 · 最近检查 ${guanying.last_checked_at||'尚未轮询'}`:guanying.configured?'登录态需要恢复':'尚未配置账号';
+      if(guanying.recovery_retry_seconds>0&&guanying.status==='error')$('guanyingState').textContent+=` · 自动恢复冷却中，约 ${Math.ceil(guanying.recovery_retry_seconds/60)} 分钟后可重试`;
       document.querySelectorAll('[data-wash-group]').forEach(input=>{input.checked=(washRules[input.dataset.washGroup]||[]).includes(input.value);});
       $('washMinScoreGain').value=washRules.min_score_gain||12;$('washMinSizeGain').value=washRules.min_size_gain_percent??10;$('washDefaultDays').value=String(washRules.default_wash_days??7);
       $('washAllowEqual').checked=Boolean(washRules.allow_equal_quality);$('washMagnetFollow').checked=Boolean(washRules.magnet_auto_follow);$('washEd2kFollow').checked=Boolean(washRules.ed2k_auto_follow);$('washMagnetWash').checked=Boolean(washRules.magnet_auto_wash);$('washEd2kWash').checked=Boolean(washRules.ed2k_auto_wash);
