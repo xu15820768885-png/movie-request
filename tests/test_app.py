@@ -2096,6 +2096,35 @@ class MovieRequestTests(unittest.TestCase):
             ["https://115.com/s/swexample?password=a1b2"],
         )
 
+    def test_unlock_links_prefer_full_url_with_access_code(self):
+        links = app.extract_dian_transfer_links(
+            {
+                "payload": {
+                    "url": "https://115.com/s/example",
+                    "access_code": "x1y2",
+                    "full_url": "https://115.com/s/example?pwd=x1y2",
+                    "already_owned": True,
+                }
+            }
+        )
+
+        self.assertEqual(links, ["https://115.com/s/example?pwd=x1y2"])
+
+    def test_unlock_links_combine_url_and_access_code_without_full_url(self):
+        links = app.extract_dian_transfer_links(
+            {
+                "payload": {
+                    "url": "https://115.com/s/example",
+                    "access_code": "x1y2",
+                }
+            }
+        )
+
+        self.assertEqual(
+            links,
+            ["https://115.com/s/example?password=x1y2"],
+        )
+
     def test_dian_transfer_accepts_structured_115_unlock_payload(self):
         class FakeP115:
             def fs_files(self, _payload):
@@ -2872,6 +2901,32 @@ class MovieRequestTests(unittest.TestCase):
         )
         self.assertEqual(retried["id"], job["id"])
         self.assertEqual(retried["attempt_count"], 2)
+
+    def test_workflow_retries_stale_access_code_failure_immediately(self):
+        job = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-access-code",
+            tmdb_id=223911,
+            media_type="movie",
+            title="测试电影",
+        )
+        app.fail_workflow_job(int(job["id"]), "请输入访问码", retry_seconds=300)
+
+        retried = app.begin_workflow_job(
+            user_id=1,
+            destination="p115",
+            source="hdhive",
+            resource_key="share-access-code",
+            tmdb_id=223911,
+            media_type="movie",
+            title="测试电影",
+        )
+
+        self.assertEqual(retried["id"], job["id"])
+        self.assertEqual(retried["attempt_count"], 2)
+        self.assertEqual(retried["last_error"], "")
 
     def test_transfer_and_workflow_evidence_are_isolated_by_destination(self):
         job = app.begin_workflow_job(

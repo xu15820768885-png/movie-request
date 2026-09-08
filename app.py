@@ -2337,7 +2337,8 @@ def begin_workflow_job(
                 retry_at = datetime.fromisoformat(str(row["next_retry_at"]))
             except (TypeError, ValueError):
                 retry_at = datetime.min.replace(tzinfo=timezone.utc)
-            if retry_at > datetime.now(timezone.utc):
+            stale_access_code_failure = "访问码" in str(row["last_error"] or "")
+            if retry_at > datetime.now(timezone.utc) and not stale_access_code_failure:
                 raise HTTPException(409, f"这个资源等待重试：{row['last_error']}")
         connection.execute(
             "UPDATE media_workflow_jobs SET state = 'unlocking', last_error = '', "
@@ -2538,6 +2539,40 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
             if identity in visited:
                 return
             visited.add(identity)
+            full_url = str(
+                value.get("full_url") or value.get("fullUrl") or ""
+            ).strip()
+            access_code = str(
+                value.get("access_code")
+                or value.get("accessCode")
+                or value.get("receive_code")
+                or value.get("receiveCode")
+                or value.get("password")
+                or ""
+            ).strip()
+            direct_url = str(
+                value.get("url")
+                or value.get("share_url")
+                or value.get("shareUrl")
+                or ""
+            ).strip()
+            # The current HDHive unlock response contains url, access_code and
+            # full_url. Prefer full_url so 115 receives the access code instead
+            # of the bare share link. Some response variants omit full_url, so
+            # compose an equivalent URL from the sibling access-code field.
+            if full_url:
+                add_link(full_url)
+            elif direct_url:
+                if (
+                    is_115_share_url(direct_url)
+                    and access_code
+                    and not re.search(r"[?&](?:password|pwd)=", direct_url, re.I)
+                ):
+                    separator = "&" if "?" in direct_url else "?"
+                    direct_url += (
+                        f"{separator}password={quote(access_code, safe='')}"
+                    )
+                add_link(direct_url)
             share_code = str(
                 value.get("share_code")
                 or value.get("sharecode")
@@ -2545,7 +2580,9 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
                 or ""
             ).strip()
             receive_code = str(
-                value.get("receive_code")
+                value.get("access_code")
+                or value.get("accessCode")
+                or value.get("receive_code")
                 or value.get("receiveCode")
                 or value.get("password")
                 or ""
@@ -2585,7 +2622,14 @@ def extract_dian_transfer_links(data: dict[str, Any]) -> list[str]:
                     )
                 if share_url:
                     add_link(share_url)
-            for nested in value.values():
+            handled_fields = {
+                "full_url", "fullUrl", "url", "share_url", "shareUrl",
+                "access_code", "accessCode", "receive_code", "receiveCode",
+                "password",
+            }
+            for key, nested in value.items():
+                if key in handled_fields:
+                    continue
                 add(nested)
             return
         if isinstance(value, list):

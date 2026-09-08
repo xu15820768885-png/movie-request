@@ -400,7 +400,6 @@
       font-size: 11px; font-weight: 900;
     }
     .resource-tag.resource-subtitle { color: #ffe5b5; background: rgba(243,223,179,.14); }
-    .resource-tag.resource-points { color: #fff4d6; background: rgba(255,122,69,.24); border: 1px solid rgba(255,154,91,.45); }
     .resource-meta { margin-top: 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
     .resource-card .btn { min-width: 126px; }
     .resource-transfer { display: grid; justify-items: end; gap: 7px; }
@@ -1344,12 +1343,10 @@
         const scope='manual';
         const actionLabel='转存此资源';
         const official=provider==='hdhive'&&resource.is_official_group?'<span class="resource-tag accent">官组</span>':provider==='hdhive'&&resource.is_unlocked?'<span class="resource-tag accent">已解锁</span>':'';
-        const rawPoints=resource.actual_unlock_points??resource.unlock_points;
-        const points=provider==='hdhive'?`<span class="resource-tag resource-points">解锁积分 ${escapeHtml(resource.is_unlocked?'0':rawPoints??'未知')}</span>`:'';
         const size=resource.size_label||formatResourceSize(resource.size_gb);
         const known=value=>value&&!/(未标明|未知|待解锁后确认|^-$)/.test(String(value));
         const subtitle=known(resource.subtitle_label)?resource.subtitle_label:(resource.chn_sub?'中文字幕':'');
-        const tags=[official,points,resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:'',known(resource.res)?`<span class="resource-tag accent">${escapeHtml(resource.res)}</span>`:'',known(resource.codec)?`<span class="resource-tag">${escapeHtml(resource.codec)}</span>`:'',resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:'',size?`<span class="resource-tag resource-size" title="文件大小">文件大小 ${escapeHtml(size)}</span>`:'',subtitle?`<span class="resource-tag resource-subtitle">${escapeHtml(subtitle)}</span>`:''].join('');
+        const tags=[official,resource.share_type_label?`<span class="resource-tag">${escapeHtml(resource.share_type_label)}</span>`:'',known(resource.res)?`<span class="resource-tag accent">${escapeHtml(resource.res)}</span>`:'',known(resource.codec)?`<span class="resource-tag">${escapeHtml(resource.codec)}</span>`:'',resource.hdr?`<span class="resource-tag">${escapeHtml(resource.hdr)}</span>`:'',size?`<span class="resource-tag resource-size" title="文件大小">文件大小 ${escapeHtml(size)}</span>`:'',subtitle?`<span class="resource-tag resource-subtitle">${escapeHtml(subtitle)}</span>`:''].join('');
         const meta=[known(resource.audio)?resource.audio:'',known(resource.source)?resource.source:'',known(resource.files)?resource.files:'',provider==='dian'&&known(resource.hot)?`热度 ${resource.hot}`:''].filter(Boolean).map(escapeHtml).join(' · ');
         const sourceIndex=provider==='hdhive'?resource._sourceIndex:index;
         return `<article class="resource-card"><div><div class="resource-heading"><div class="resource-title">${escapeHtml(resource.title)}</div>${known(resource.episode_label)?`<span class="resource-episodes">${escapeHtml(resource.episode_label)}</span>`:''}</div>${tags?`<div class="resource-tags">${tags}</div>`:''}${meta?`<div class="resource-meta">${meta}</div>`:''}</div><div class="resource-transfer"><button class="btn btn-primary" data-provider="${provider}" data-transfer-index="${sourceIndex}" data-transfer-scope="${scope}">${actionLabel}</button><div class="resource-transfer-status" data-transfer-status="${provider}-${sourceIndex}"></div></div></article>`;
@@ -1416,11 +1413,6 @@
     }
     async function previewTransfer(resource,button,provider='dian') {
       const destination=currentUser?.storage_destination==='p123'?'p123':'p115';
-      if(provider==='hdhive'&&!resource.is_unlocked){
-        const rawPoints=resource.actual_unlock_points??resource.unlock_points;
-        const pointsLabel=rawPoints===null||rawPoints===undefined||rawPoints===''?'未知数量':String(rawPoints);
-        if(!confirm(`确认解锁并转存这个影巢资源？\n\n预计消耗：${pointsLabel} 积分`))return;
-      }
       if(preview){button.disabled=true;button.textContent='已加入转存';markInitialTransferComplete();return toast(`《${currentDetail.title}》已转存；未完结剧集现在可以开启追更`);}
       const index=button.dataset.transferIndex;
       const scope='manual';
