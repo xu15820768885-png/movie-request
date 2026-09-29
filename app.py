@@ -3000,7 +3000,11 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         return str(value or fallback)
 
     def first_value(*keys: str) -> Any:
-        for source in (item, details):
+        nested_media = item.get("media")
+        if not isinstance(nested_media, dict):
+            nested_media = details.get("media")
+        sources = (item, details, nested_media or {})
+        for source in sources:
             for key in keys:
                 value = source.get(key)
                 if value is not None and str(value).strip():
@@ -3148,6 +3152,17 @@ def normalize_hdhive_resource(item: dict[str, Any]) -> dict[str, Any]:
         "publisher": publisher,
         "media_url": str(item.get("media_url") or ""),
         "media_slug": str(item.get("media_slug") or ""),
+        # Keep the relationship fields returned by newer HDHive resource
+        # responses.  Native subscriptions need the internal media ID; do not
+        # force callers to scrape the public movie page when the API already
+        # supplied that relationship.
+        "target_key": str(
+            first_value("target_key", "subscription_target_key") or ""
+        ),
+        "target_id": first_value("target_id", "subscription_target_id"),
+        "media_id": first_value("media_id", "mediaId"),
+        "tv_id": first_value("tv_id", "tvId", "series_id", "seriesId"),
+        "movie_id": first_value("movie_id", "movieId", "film_id", "filmId"),
         "hot": "-",
     }
 
@@ -3424,6 +3439,7 @@ def hdhive_subscription_target(
     share_result: dict[str, Any],
     expected_tmdb_id: int,
     expected_media_type: str = "tv",
+    resource: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     data = hdhive_response_data(share_result)
     if not isinstance(data, dict):
@@ -3437,9 +3453,12 @@ def hdhive_subscription_target(
     # deployments have returned the relationship ID at different levels.
     # Prefer the explicit subscription contract, then media-specific IDs.
     candidates: list[dict[str, Any]] = [media, data]
-    for parent in (media, data):
+    if isinstance(resource, dict):
+        candidates.append(resource)
+    for parent in (media, data, resource or {}):
         for key in (
             expected_media_type,
+            "media",
             "media_resource",
             "resource",
             "share",
@@ -11787,8 +11806,25 @@ def bind_hdhive_follow_subscription(
             if str(error.detail) != "影巢分享详情缺少影片内部编号，无法创建订阅":
                 raise
             selected = resource or cached_hdhive_follow_resource(follow_id, slug)
+            # Some HDHive deployments return the subscription relationship on
+            # the resource record rather than on the share detail.  Use it
+            # before falling back to the public movie page, whose anti-bot
+            # protection can return HTTP 403 even while OpenAPI is healthy.
+            try:
+                target = hdhive_subscription_target(
+                    share_result,
+                    tmdb_id,
+                    media_type,
+                    resource=selected,
+                )
+            except HTTPException as resource_error:
+                if str(resource_error.detail) != "影巢分享详情缺少影片内部编号，无法创建订阅":
+                    raise
+                target = None
             media_url = hdhive_media_page_url(selected, share_result, media_type)
-            if not media_url:
+            if target is not None:
+                media_url = ""
+            elif not media_url:
                 resources_result = hdhive_call("resources", media_type, tmdb_id)
                 resources = normalize_supported_hdhive_resources(
                     extract_share_items(resources_result)
@@ -11807,18 +11843,29 @@ def bind_hdhive_follow_subscription(
                     share_result,
                     media_type,
                 )
-            if not media_url:
+                if not media_url:
+                    try:
+                        target = hdhive_subscription_target(
+                            share_result,
+                            tmdb_id,
+                            media_type,
+                            resource=selected,
+                        )
+                    except HTTPException:
+                        target = None
+            if target is None and not media_url:
                 raise HTTPException(
                     502,
                     "影巢资源没有返回影片页面，无法解析原生订阅目标",
                 ) from error
-            target = hdhive_subscription_target_from_page(
-                hdhive_media_page(media_url),
-                tmdb_id,
-                media_type,
-                str(follow["title"] or ""),
-            )
-            resolved_media_url = media_url
+            if target is None:
+                target = hdhive_subscription_target_from_page(
+                    hdhive_media_page(media_url),
+                    tmdb_id,
+                    media_type,
+                    str(follow["title"] or ""),
+                )
+                resolved_media_url = media_url
     created = hdhive_call(
         "create_subscription",
         target_type=target["target_type"],

@@ -207,14 +207,24 @@ class HDHiveOpenAPI:
             if self.proxy_url
             else None
         )
+        headers = {
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "User-Agent": "movie-request-hdhive/1.0",
+        }
+        # The media page is a same-origin HTML route, but some deployments
+        # protect it with the same bearer/API-key gate as OpenAPI.  Supplying
+        # the credentials here keeps page target resolution working without
+        # requiring a separate browser cookie session.
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
         try:
             response = self.session.request(
                 "GET",
                 self.base_url + page_path,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml",
-                    "User-Agent": "movie-request-hdhive/1.0",
-                },
+                headers=headers,
                 timeout=self.timeout,
                 proxies=proxies,
             )

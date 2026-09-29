@@ -488,6 +488,24 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(target["target_id"], 81)
         self.assertEqual(target["target_key"], "movie:81")
 
+    def test_subscription_target_uses_resource_relationship_before_page(self):
+        target = app.hdhive_subscription_target(
+            {
+                "data": {
+                    "media": {
+                        "type": "tv",
+                        "tmdb_id": 282326,
+                        "name": "兰香如故",
+                    },
+                }
+            },
+            282326,
+            "tv",
+            resource={"tv_id": 58395},
+        )
+        self.assertEqual(target["target_id"], 58395)
+        self.assertEqual(target["target_key"], "tv:58395")
+
     def test_subscription_target_reads_server_rendered_media_page(self):
         page_html = (
             '<script>self.__next_f.push([1,"'
