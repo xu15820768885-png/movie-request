@@ -305,6 +305,23 @@ class HDHiveFoundationTests(unittest.TestCase):
             "http://38.55.106.163:3128",
         )
 
+    def test_client_retries_media_page_without_proxy_after_forbidden(self):
+        session = FakeSession(
+            [
+                FakeResponse({}, status=403),
+                FakeResponse({}, text='<script>"target_key":"tv:5670"</script>'),
+            ]
+        )
+        client = HDHiveOpenAPI(
+            api_key="secret",
+            proxy_url="http://proxy",
+            session=session,
+        )
+        page = client.media_page("https://re0.me/tv/example")
+        self.assertIn("tv:5670", page)
+        self.assertEqual(session.calls[0][2]["proxies"]["https"], "http://proxy")
+        self.assertIsNone(session.calls[1][2]["proxies"])
+
     def test_client_rejects_external_media_page(self):
         session = FakeSession([])
         client = HDHiveOpenAPI(

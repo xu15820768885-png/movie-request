@@ -228,6 +228,18 @@ class HDHiveOpenAPI:
                 timeout=self.timeout,
                 proxies=proxies,
             )
+            # OpenAPI calls must use the approved fixed egress, but the
+            # public HTML route can apply a different WAF policy to that IP.
+            # Retry the same-origin page once without the service proxy before
+            # reporting 401/403; this only affects target-ID discovery.
+            if response.status_code in (401, 403) and proxies:
+                response = self.session.request(
+                    "GET",
+                    self.base_url + page_path,
+                    headers=headers,
+                    timeout=self.timeout,
+                    proxies=None,
+                )
         except requests.RequestException as error:
             raise HDHiveOpenAPIError(f"无法连接影巢：{error}") from error
         if not response.ok:
