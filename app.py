@@ -3444,7 +3444,37 @@ def hdhive_subscription_target(
     data = hdhive_response_data(share_result)
     if not isinstance(data, dict):
         raise HTTPException(502, "影巢分享详情没有返回可订阅的媒体信息")
+
+    def walk_dicts(value: Any) -> Iterable[dict[str, Any]]:
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from walk_dicts(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from walk_dicts(nested)
+
+    nested_dicts = list(walk_dicts(data))
     media = data.get("media")
+    if not isinstance(media, dict):
+        media = next(
+            (
+                candidate
+                for candidate in nested_dicts
+                if str(
+                    candidate.get("media_type")
+                    or candidate.get("type")
+                    or candidate.get("kind")
+                    or ""
+                ).lower()
+                in (("tv", "series", "television") if expected_media_type == "tv" else ("movie", "film"))
+                and (
+                    not candidate.get("tmdb_id")
+                    or str(candidate.get("tmdb_id")) == str(expected_tmdb_id)
+                )
+            ),
+            None,
+        )
     if not isinstance(media, dict):
         raise HTTPException(502, "这个影巢资源没有关联可订阅的电视剧")
 
@@ -3455,17 +3485,9 @@ def hdhive_subscription_target(
     candidates: list[dict[str, Any]] = [media, data]
     if isinstance(resource, dict):
         candidates.append(resource)
-    for parent in (media, data, resource or {}):
-        for key in (
-            expected_media_type,
-            "media",
-            "media_resource",
-            "resource",
-            "share",
-        ):
-            nested = parent.get(key)
-            if isinstance(nested, dict) and nested not in candidates:
-                candidates.append(nested)
+    for nested in (*nested_dicts, *walk_dicts(resource or {})):
+        if nested not in candidates:
+            candidates.append(nested)
 
     target_id = 0
     target_key = ""
