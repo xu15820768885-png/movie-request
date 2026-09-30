@@ -104,9 +104,18 @@
     .search-box input { width: 100%; min-height: 50px; border: 0; outline: 0; padding: 0 14px; color: var(--text); background: transparent; font-size: 16px; }
     .search-box input::placeholder { color: #7e746c; }
     .search-tip { margin: 11px 4px 0; color: #838a94; font-size: 12px; }
-    .tabs { display: flex; gap: 6px; margin: 36px 0 18px; overflow-x: auto; scrollbar-width: none; }
-    .tab { white-space: nowrap; padding: 9px 14px; border: 0; border-radius: 10px; color: var(--muted); background: transparent; }
-    .tab.active { color: var(--text); background: var(--panel-soft); }
+    .tabs { display: flex; align-items: stretch; gap: 10px; margin: 36px 0 18px; padding: 8px; overflow-x: auto; scrollbar-width: none; border: 1px solid rgba(255,255,255,.07); border-radius: 18px; background: rgba(23,25,30,.72); box-shadow: 0 14px 40px rgba(0,0,0,.14); }
+    .tabs::-webkit-scrollbar { display: none; }
+    .nav-group { display: flex; align-items: center; gap: 3px; padding-right: 9px; border-right: 1px solid rgba(255,255,255,.1); }
+    .nav-group:last-child { padding-right: 0; border-right: 0; }
+    .nav-group-label { padding: 0 7px 0 5px; color: #777f8b; font-size: 10px; font-weight: 900; letter-spacing: .12em; writing-mode: vertical-rl; }
+    .nav-group.admin-nav-group .nav-group-label { color: var(--orange-2); }
+    .tab { white-space: nowrap; min-height: 38px; padding: 8px 13px; border: 0; border-radius: 11px; color: var(--muted); background: transparent; transition: .18s ease; }
+    .tab:hover { color: var(--text); background: rgba(255,255,255,.055); }
+    .tab.active { color: #24160f; background: linear-gradient(135deg, #ffd092, var(--orange)); box-shadow: 0 7px 20px rgba(255,122,69,.2); font-weight: 900; }
+    .section-context { display:flex; align-items:center; justify-content:space-between; gap:16px; margin: 0 0 18px; padding: 13px 16px; border:1px solid rgba(255,255,255,.07); border-radius: 14px; background: linear-gradient(90deg, rgba(255,122,69,.08), rgba(255,255,255,.025)); }
+    .section-context strong { font-size: 13px; }
+    .section-context span { color: var(--muted); font-size: 12px; }
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 8px 0 16px; }
     .section-head h2 { margin: 0; font-size: 19px; }
     .section-head span { color: var(--muted); font-size: 12px; }
@@ -466,6 +475,7 @@
       border: 1px solid var(--line); border-radius: 16px; background: var(--panel);
     }
     .settings-nav-title { padding: 10px 11px 5px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+    .settings-nav-group-label { padding: 13px 11px 4px; color: #6f7782; font-size: 10px; font-weight: 900; letter-spacing: .12em; }
     .settings-nav-button {
       width: 100%; padding: 12px 13px; border: 0; border-radius: 10px;
       color: var(--muted); background: transparent; text-align: left; font-weight: 750;
@@ -524,6 +534,11 @@
       .hero p { font-size: 13px; }
       .search-box { grid-template-columns: 1fr; }
       .search-box .btn { width: 100%; }
+      .tabs { margin-top: 24px; padding: 6px; border-radius: 14px; }
+      .nav-group { padding-right: 5px; }
+      .nav-group-label { writing-mode: initial; padding: 0 5px; font-size: 9px; }
+      .tab { min-height: 36px; padding: 8px 10px; font-size: 12px; }
+      .section-context { align-items: flex-start; flex-direction: column; gap: 4px; margin-bottom: 14px; }
       .movie-grid { grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
       .detail-overlay { padding: 0; align-items: end; }
       .detail-card { width: 100%; max-height: 94vh; border-radius: 22px 22px 0 0; }
@@ -555,6 +570,7 @@
         scrollbar-width: none;
       }
       .settings-nav-title { display: none; }
+      .settings-nav-group-label { display: none; }
       .settings-nav-button { width: auto; flex: 0 0 auto; white-space: nowrap; padding: 10px 12px; }
       .settings-panel { min-height: 0; }
       .storage-panel { min-height: 0; }
@@ -637,17 +653,12 @@
         <button id="activityCompletedCard" class="activity-card" type="button"><span>历史已入库</span><strong id="activityCompleted">0</strong></button>
       </section>
 
-      <nav class="tabs">
-        <button id="discoverTab" class="tab active" data-view="discover">找片</button>
-        <button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button>
-        <button id="calendarTab" class="tab hidden" data-view="calendar">追剧日历</button>
-        <button id="followLogTab" class="tab hidden" data-view="followLog">管理日志</button>
-        <button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button>
-        <button id="adminTab" class="tab hidden" data-view="admin">管理需求 <span id="adminCount"></span></button>
-        <button id="storageTab" class="tab hidden" data-view="storage">资源和网盘</button>
-        <button id="familyTab" class="tab hidden" data-view="family">成员账号</button>
-        <button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button>
+      <nav class="tabs" aria-label="映单功能导航">
+        <div class="nav-group"><span class="nav-group-label">看片</span><button id="discoverTab" class="tab active" data-view="discover">找片</button><button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button><button id="calendarTab" class="tab hidden" data-view="calendar">追剧日历</button></div>
+        <div class="nav-group"><span class="nav-group-label">请求</span><button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button><button id="adminTab" class="tab hidden" data-view="admin">成员需求 <span id="adminCount"></span></button></div>
+        <div class="nav-group admin-nav-group"><span class="nav-group-label">运营</span><button id="followLogTab" class="tab hidden" data-view="followLog">处理记录</button><button id="storageTab" class="tab hidden" data-view="storage">资源中心</button><button id="familyTab" class="tab hidden" data-view="family">成员账号</button><button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button></div>
       </nav>
+      <div id="sectionContext" class="section-context"><strong>看片库</strong><span>搜索影片，确认海报、年份和类型后再提交</span></div>
 
       <section id="discoverView" class="view">
         <div class="section-head"><h2 id="resultTitle">搜一部想看的片</h2><span id="resultCount"></span></div>
@@ -688,11 +699,16 @@
         <div class="settings-layout">
           <nav class="settings-nav" aria-label="资源和网盘分类">
             <div class="settings-nav-title">资源分类</div>
+            <div class="settings-nav-group-label">总览</div>
             <button class="settings-nav-button active" type="button" data-storage-panel="overview">状态与测速</button>
+            <div class="settings-nav-group-label">资源来源</div>
             <button class="settings-nav-button" type="button" data-storage-panel="hdhive">影巢</button>
             <button class="settings-nav-button" type="button" data-storage-panel="guanying">观影</button>
-            <button class="settings-nav-button" type="button" data-storage-panel="wash">洗版规则</button>
             <button class="settings-nav-button" type="button" data-storage-panel="dian">癫影</button>
+            <div class="settings-nav-group-label">自动化</div>
+            <button class="settings-nav-button" type="button" data-storage-panel="wash">洗版规则</button>
+            <button class="settings-nav-button" type="button" data-storage-panel="channels">频道追更</button>
+            <div class="settings-nav-group-label">投递</div>
             <button class="settings-nav-button" type="button" data-storage-panel="p115">115 网盘</button>
             <button class="settings-nav-button" type="button" data-storage-panel="pansave">123</button>
           </nav>
@@ -776,6 +792,17 @@
               <div id="checkinResult" class="checkin-result">尚未执行签到</div>
               <div class="integration-actions"><button class="btn" type="submit">保存配置</button><button id="dianCheckinPreview" class="btn btn-primary" type="button">立即签到</button></div>
             </form>
+            <section class="panel stack storage-panel hidden" data-storage-content="channels">
+              <div class="storage-panel-head"><h3>Telegram 频道追更</h3><p>只处理映单中已经开启的追更；频道消息匹配 TMDB 和集数后，才会解锁并转存缺失集。</p></div>
+              <div class="inline"><label>检查间隔<select id="channelMonitorInterval"><option value="300">每5分钟</option><option value="900">每15分钟</option><option value="1800">每30分钟</option><option value="3600">每1小时</option></select></label><label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px"><input id="channelMonitorEnabled" type="checkbox" style="width:auto">启用频道追更</label></div>
+              <div class="checkin-result">影巢频道支持 re0.me/resource 链接；癫影频道支持 m.dian115.com/s/分享码。解锁使用当前已授权的影巢/癫影账号和额度。</div>
+              <form id="channelMonitorAddForm" class="stack" style="padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-soft)">
+                <div class="inline"><label>资源来源<select id="channelMonitorProvider"><option value="hdhive">影巢</option><option value="dian">癫影</option></select></label><label>频道名称<input id="channelMonitorName" placeholder="例如：MADOW 每日上新"></label></div>
+                <label>频道地址或用户名<input id="channelMonitorChannel" placeholder="例如：@channel_username 或 https://t.me/channel_username" required></label>
+                <div class="integration-actions"><button class="btn" id="channelMonitorTest" type="button">测试频道</button><button class="btn btn-primary" type="submit">添加频道</button></div>
+              </form>
+              <div id="channelMonitorList" class="stack"><div class="empty">尚未添加频道</div></div>
+            </section>
             <section class="panel storage-panel hidden" data-storage-content="p115">
               <div class="storage-panel-head"><h3>115 转存设置</h3><p>登录 115 并选择所有成员共用的转存目录。</p></div>
               <label>扫码设备<select id="p115App"></select></label>
@@ -1010,6 +1037,7 @@
       $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
       const admin=currentUser.role==='admin'; ['adminTab','followLogTab','storageTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      document.querySelector('.admin-nav-group').classList.toggle('hidden',!admin);
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
       $('followTab').classList.remove('hidden');
       $('calendarTab').classList.remove('hidden');
@@ -1023,6 +1051,8 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
+      const context={discover:['看片库','搜索影片，确认海报、年份和类型后再提交'],follow:['我的追更','按剧集查看最新集数、转存进度和 Emby 入库状态'],calendar:['追剧日历','按播出日期查看正在追更的剧集'],mine:['我的请求','查看自己提交的影片和管理员处理进度'],admin:['成员需求','集中处理家人的求片请求，并保留完整历史'],followLog:['处理记录','追踪识别、解锁、转存和入库的每一步'],storage:['资源中心','配置资源来源、频道追更和网盘投递线路'],family:['成员账号','管理家庭成员的账号、权限和默认网盘'],settings:['系统设置','调整通知、目录和站点基础选项']}[name]||['映单','家庭片库工作台'];
+      $('sectionContext').innerHTML=`<strong>${context[0]}</strong><span>${context[1]}</span>`;
       if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='calendar')loadCalendar(); if(name==='followLog')loadFollowEvents(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
     }
     function calendarMonthKey(date){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;}
@@ -1598,7 +1628,9 @@
           const countLabel=['unlock','transfer','library','complete','file_list','scan'].filter(key=>stageCounts[key]).map(key=>`${stageLabels[key]}日志 ${stageCounts[key]}条`).join(' · ');
           const unlockCounts=event.hdhive_unlock_counts;
           const unlockLabel=unlockCounts?`影巢解锁请求 ${unlockCounts.requests}次 · 成功 ${unlockCounts.successes}次（保留日志内）`:'';
-          const meta=[`TMDB ${Number(event.tmdb_id)}`,ownerLabel,resourceStatusLabel,unlockLabel,countLabel].filter(Boolean).join(' · ');
+          const sourceKey=String(event.detail?.source||'');
+          const sourceLabel=sourceKey==='telegram_channel'?`Telegram 频道 · ${event.detail?.provider==='dian'?'癫影':'影巢'}`:(sourceKey==='hdhive'||(!sourceKey&&event.detail?.resource_slug)?'影巢站内信轮询':'');
+          const meta=[`TMDB ${Number(event.tmdb_id)}`,sourceLabel,ownerLabel,resourceStatusLabel,unlockLabel,countLabel].filter(Boolean).join(' · ');
           const stageOrder=['unlock','transfer','library','complete','file_list','scan'];
           const stageGroups=stageOrder.filter(stageKey=>visible.some(item=>item.stage===stageKey)).map((stageKey,index)=>{
             const records=visible.filter(item=>item.stage===stageKey);const successCount=records.filter(item=>item.status==='success').length;const failedCount=records.filter(item=>item.status==='failed').length;const runningCount=records.filter(item=>item.status==='running').length;
@@ -1895,6 +1927,15 @@
       $('pansavePhone').value=settings.pansave_telegram_phone||'';
       $('pansaveBotUsername').value=settings.pansave_bot_username||'pansavenb_bot';
       $('pansaveProxy').value=settings.pansave_telegram_proxy||'';
+      await loadChannelMonitors();
+    }
+    async function loadChannelMonitors() {
+      const data=preview?{enabled:true,interval:900,monitors:[{id:1,name:'RE0 资源频道',provider:'hdhive',channel:'@example',enabled:1,last_message_id:123}]}:await api('/api/admin/telegram-channel-monitors');
+      $('channelMonitorEnabled').checked=Boolean(data.enabled);
+      $('channelMonitorInterval').value=String(data.interval||900);
+      $('channelMonitorList').innerHTML=(data.monitors||[]).map(item=>`<div class="integration-line"><div><div class="integration-label">${escapeHtml(item.name||item.channel)} · ${item.provider==='dian'?'癫影':'影巢'}</div><div class="muted">${escapeHtml(item.channel)} · ${item.enabled?'已启用':'已停用'} · 最近消息 ${item.last_message_id||'尚未读取'}${item.last_error?` · ${escapeHtml(item.last_error)}`:''}</div></div><div class="integration-actions"><button class="btn btn-small" data-channel-toggle="${item.id}" data-enabled="${item.enabled?'0':'1'}">${item.enabled?'停用':'启用'}</button><button class="btn btn-small btn-danger" data-channel-delete="${item.id}">删除</button></div></div>`).join('')||'<div class="empty">尚未添加频道</div>';
+      document.querySelectorAll('[data-channel-toggle]').forEach(button=>button.onclick=async()=>{if(preview)return;await api(`/api/admin/telegram-channel-monitors/${button.dataset.channelToggle}`,{method:'PATCH',body:JSON.stringify({enabled:button.dataset.enabled==='1'})});loadChannelMonitors();});
+      document.querySelectorAll('[data-channel-delete]').forEach(button=>button.onclick=async()=>{if(!confirm('确定删除这个频道监控吗？'))return;if(preview)return;await api(`/api/admin/telegram-channel-monitors/${button.dataset.channelDelete}`,{method:'DELETE'});loadChannelMonitors();});
     }
     async function testIntegration(service,button=null) {
       const ids={tmdb:'diagnosticTmdb',hdhive:'diagnosticHdhive',dian:'diagnosticDian'};
@@ -2061,6 +2102,9 @@
     $('testAllIntegrations').onclick=testAllIntegrations;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影追更与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,dian_follow_enabled:$('dianFollowEnabled').checked,dian_follow_interval:Number($('dianFollowInterval').value),p115_app:$('p115App').value})});toast('癫影追更与签到配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};
+    $('channelMonitorEnabled').onchange=$('channelMonitorInterval').onchange=async()=>{if(preview)return;try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({telegram_channel_monitor_enabled:$('channelMonitorEnabled').checked,telegram_channel_monitor_interval:Number($('channelMonitorInterval').value)})});toast('频道追更设置已保存');}catch(error){toast(error.message,true);}};
+    $('channelMonitorTest').onclick=async()=>{if(preview)return toast('预览模式：频道可读取');try{const result=await api('/api/admin/telegram-channel-monitors/test',{method:'POST',body:JSON.stringify({channel:$('channelMonitorChannel').value})});toast(`频道可读取：${result.title}`);}catch(error){toast(error.message,true);}};
+    $('channelMonitorAddForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：频道已添加');try{await api('/api/admin/telegram-channel-monitors',{method:'POST',body:JSON.stringify({name:$('channelMonitorName').value,provider:$('channelMonitorProvider').value,channel:$('channelMonitorChannel').value})});$('channelMonitorName').value='';$('channelMonitorChannel').value='';toast('频道已添加');loadChannelMonitors();}catch(error){toast(error.message,true);}};
     $('pansaveForm').onsubmit=async event=>{event.preventDefault();if(preview){$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');return toast('预览模式：Telegram 验证码已发送');}try{const result=await api('/api/admin/pansave/login/start',{method:'POST',body:JSON.stringify({api_id:$('pansaveApiId').value,api_hash:$('pansaveApiHash').value,phone:$('pansavePhone').value,bot_username:$('pansaveBotUsername').value,proxy_url:$('pansaveProxy').value})});$('pansaveVerifyPanel').classList.remove('hidden');$('pansaveVerifyActions').classList.remove('hidden');toast(result.message);}catch(error){toast(error.message,true);}};
     $('pansaveVerify').onclick=async()=>{if(preview){$('pansaveStatus').textContent='已登录';return toast('预览模式：Telegram 用户账号已登录');}try{const result=await api('/api/admin/pansave/login/verify',{method:'POST',body:JSON.stringify({code:$('pansaveCode').value,password:$('pansavePassword').value})});$('pansaveCode').value='';$('pansavePassword').value='';$('pansaveVerifyPanel').classList.add('hidden');$('pansaveVerifyActions').classList.add('hidden');toast(result.message);loadIntegrations();}catch(error){toast(error.message,true);}};
     $('pansaveTest').onclick=async()=>{if(preview)return toast('Telegram 会话正常，已找到 @pansavenb_bot');try{const result=await api('/api/admin/pansave/test',{method:'POST'});toast(result.message);}catch(error){toast(error.message,true);}};

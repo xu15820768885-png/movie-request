@@ -474,6 +474,34 @@ def init_db() -> None:
                 acknowledged_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS telegram_channel_monitors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT 'hdhive',
+                channel TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS telegram_channel_monitor_unique
+                ON telegram_channel_monitors(provider, channel);
+            CREATE TABLE IF NOT EXISTS telegram_channel_events (
+                monitor_id INTEGER NOT NULL REFERENCES telegram_channel_monitors(id) ON DELETE CASCADE,
+                message_id INTEGER NOT NULL,
+                tmdb_id INTEGER NOT NULL DEFAULT 0,
+                resource_key TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                detail TEXT NOT NULL DEFAULT '',
+                payload_json TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(monitor_id, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS telegram_channel_event_status_idx
+                ON telegram_channel_events(status, updated_at DESC);
             CREATE TABLE IF NOT EXISTS hdhive_follow_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 cycle_id TEXT NOT NULL DEFAULT '',
@@ -1999,6 +2027,327 @@ async def pansave_send_link(share_url: str) -> dict[str, Any]:
         raise HTTPException(502, f"发送给123失败：{error}") from error
     finally:
         await client.disconnect()
+
+
+CHANNEL_RESOURCE_RE = re.compile(
+    r"https?://(?:www\.)?(?:re0\.me|hdhive\.com)/resource/115/([A-Za-z0-9_-]+)", re.I
+)
+CHANNEL_DIAN_SHARE_RE = re.compile(
+    r"https?://(?:m\.)?dian115\.com/s/([A-Za-z0-9_-]+)", re.I
+)
+CHANNEL_TMDB_RE = re.compile(r"\bTMDB\s*(?:ID)?\s*[:：#]?\s*(\d+)\b", re.I)
+
+
+def parse_channel_resource_message(text: str) -> dict[str, Any]:
+    """Extract the stable fields used by a TgtoDrive-style channel post."""
+    body = str(text or "")
+    match = CHANNEL_RESOURCE_RE.search(body)
+    dian_match = CHANNEL_DIAN_SHARE_RE.search(body)
+    if not match and not dian_match:
+        return {}
+    tmdb_match = CHANNEL_TMDB_RE.search(body)
+    parsed = parse_episode_spec(body)
+    return {
+        "provider": "dian" if dian_match and not match else "hdhive",
+        "slug": match.group(1) if match else "",
+        "share_code": dian_match.group(1) if dian_match else "",
+        "url": (match or dian_match).group(0).rstrip(".,);]"),
+        "tmdb_id": int(tmdb_match.group(1)) if tmdb_match else 0,
+        "title": body.splitlines()[0][:200] if body.splitlines() else "",
+        "season_number": int(parsed.get("season_number") or 1),
+        "episode_numbers": sorted({int(v) for v in parsed.get("episode_numbers") or [] if int(v) > 0}),
+    }
+
+
+def channel_follow_missing(follow: Any, season: int, episodes: set[int]) -> set[int]:
+    baseline_season = int(follow["baseline_season"] or 1)
+    baseline_episode = int(follow["baseline_episode"] or 0)
+    current_season = int(follow["current_emby_season"] or 1)
+    current_episode = int(follow["current_emby_episode"] or 0)
+    transferred_season = int(follow["last_transferred_season"] or 0)
+    transferred_episode = int(follow["last_transferred_episode"] or 0)
+    present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
+    return {
+        episode for episode in episodes
+        if episode not in present
+        and (season, episode) > (baseline_season, baseline_episode)
+        and (season, episode) > (current_season, current_episode)
+        and (season, episode) > (transferred_season, transferred_episode)
+    }
+
+
+def channel_monitor_settings() -> dict[str, Any]:
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM telegram_channel_monitors ORDER BY id"
+        ).fetchall()
+        interval = int(setting(connection, "telegram_channel_monitor_interval") or 900)
+        enabled = setting(connection, "telegram_channel_monitor_enabled") == "1"
+    return {
+        "enabled": enabled,
+        "interval": max(300, min(21600, interval)),
+        "monitors": [dict(row) for row in rows],
+    }
+
+
+async def process_channel_hdhive_event(
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any],
+) -> str:
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    slug = str(payload.get("slug") or "").strip()
+    episodes = set(int(v) for v in payload.get("episode_numbers") or [] if int(v) > 0)
+    if not tmdb_id or not slug:
+        return "消息缺少 TMDB ID 或影巢资源 slug"
+    with db() as connection:
+        follows = connection.execute(
+            "SELECT * FROM tv_follows WHERE active = 1 AND media_type = 'tv' AND tmdb_id = ?",
+            (tmdb_id,),
+        ).fetchall()
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    if not follows:
+        return "未匹配到启用中的映单追更"
+    if not episodes:
+        return "已匹配追更，但消息没有可识别集数"
+    season = int(payload.get("season_number") or 1)
+    missing_by_follow = {
+        int(follow["id"]): channel_follow_missing(follow, season, episodes)
+        for follow in follows
+    }
+    if not any(missing_by_follow.values()):
+        return "所含集数均已存在，无需解锁"
+    unlocked = hdhive_call("unlock", slug)
+    data = hdhive_response_data(unlocked)
+    share_url = str(data.get("full_url") or data.get("url") or "").strip() if isinstance(data, dict) else ""
+    if not is_115_share_url(share_url):
+        return "影巢解锁成功，但没有返回有效 115 链接"
+    client = await asyncio.to_thread(p115_client)
+    tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+    transferred = 0
+    for follow in follows:
+        missing = {(season, episode) for episode in missing_by_follow[int(follow["id"])]}
+        if not missing:
+            continue
+        selected, selected_keys = select_largest_missing_episode_files_by_season(
+            tree, missing, fallback_season=int(payload.get("season_number") or 1)
+        )
+        ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
+        if not ids:
+            continue
+        before = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
+        received = await asyncio.to_thread(
+            p115_call, "接收频道资源失败", client.share_receive,
+            {"file_id": ",".join(dict.fromkeys(ids)), "cid": target_cid}, share_url=share_url,
+        )
+        if not response_ok(received):
+            continue
+        changed = await asyncio.to_thread(
+            wait_for_p115_change, lambda: p115_folder_snapshot(client, target_cid), before
+        )
+        if not changed:
+            continue
+        done = sorted(episode for _season, episode in selected_keys)
+        record_transfer(
+            user_id=int(follow["user_id"]), source="telegram_channel", resource_key=slug,
+            tmdb_id=tmdb_id, transfer_scope="follow", status="success",
+            detail=f"频道消息 {message_id} 解锁并转存完成", follow_id=int(follow["id"]),
+            season_number=int(payload.get("season_number") or 1), episode_numbers=done,
+            destination="p115",
+        )
+        log_hdhive_follow_event(
+            "transfer", "success", f"Telegram 频道 · 影巢：频道消息 {message_id} 解锁并转存完成",
+            follow=follow, detail={"source": "telegram_channel", "provider": "hdhive", "message_id": message_id, "episodes": done},
+        )
+        transferred += len(done)
+    return f"解锁成功，新增转存 {transferred} 集" if transferred else "解锁成功，但没有新的缺失集"
+
+
+def _nested_int(payload: Any, keys: tuple[str, ...]) -> int:
+    if isinstance(payload, dict):
+        for key in keys:
+            try:
+                value = int(payload.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                return value
+        for value in payload.values():
+            found = _nested_int(value, keys)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _nested_int(value, keys)
+            if found:
+                return found
+    return 0
+
+
+async def process_channel_dian_event(
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any],
+) -> str:
+    tmdb_id = int(payload.get("tmdb_id") or 0)
+    share_code = str(payload.get("share_code") or "").strip()
+    episodes = set(int(v) for v in payload.get("episode_numbers") or [] if int(v) > 0)
+    if not tmdb_id or not share_code:
+        return "消息缺少 TMDB ID 或癫影分享码"
+    with db() as connection:
+        follows = connection.execute(
+            "SELECT * FROM tv_follows WHERE active = 1 AND media_type = 'tv' AND tmdb_id = ?",
+            (tmdb_id,),
+        ).fetchall()
+        target_cid = setting(connection, "p115_target_cid") or "0"
+    if not follows:
+        return "未匹配到启用中的映单追更"
+    if not episodes:
+        return "已匹配追更，但消息没有可识别集数"
+    season = int(payload.get("season_number") or 1)
+    missing_by_follow = {
+        int(follow["id"]): channel_follow_missing(follow, season, episodes)
+        for follow in follows
+    }
+    if not any(missing_by_follow.values()):
+        return "所含集数均已存在，无需解锁"
+    checked = await asyncio.to_thread(dian_call, "check_sharecode", share_code)
+    share_id = _nested_int(checked, ("share_id", "shareId"))
+    resource_id = _nested_int(checked, ("resource_id", "resourceId"))
+    if not (share_id and resource_id):
+        listed = await asyncio.to_thread(dian_call, "list_shares", {
+            "tmdb_id": tmdb_id, "media_type": "tv", "page": 1, "size": 100,
+        })
+        for item in extract_share_items(listed):
+            normalized = normalize_dian_resource(item)
+            if str(normalized.get("dian_share_code") or "") != share_code:
+                continue
+            share_id = int(normalized.get("share_id") or 0)
+            resource_id = int(normalized.get("resource_id") or 0)
+            break
+    if not (share_id and resource_id):
+        return "癫影分享码未能对应资源编号，已跳过解锁"
+    unlock_payload = {"share_id": share_id, "resource_id": resource_id}
+    unlocked = await asyncio.to_thread(dian_call, "unlock", unlock_payload)
+    data = unlocked.get("data", unlocked) if isinstance(unlocked, dict) else unlocked
+    links = extract_dian_transfer_links({"payload": data})
+    if not links:
+        return "癫影解锁成功，但没有返回可用 115 链接"
+    share_url = links[0]
+    client = await asyncio.to_thread(p115_client)
+    tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+    transferred = 0
+    for follow in follows:
+        missing = {(season, episode) for episode in missing_by_follow[int(follow["id"])]}
+        selected, selected_keys = select_largest_missing_episode_files_by_season(tree, missing, fallback_season=season)
+        ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
+        if not ids:
+            continue
+        before = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
+        received = await asyncio.to_thread(
+            p115_call, "接收频道资源失败", client.share_receive,
+            {"file_id": ",".join(dict.fromkeys(ids)), "cid": target_cid}, share_url=share_url,
+        )
+        if not response_ok(received):
+            continue
+        changed = await asyncio.to_thread(wait_for_p115_change, lambda: p115_folder_snapshot(client, target_cid), before)
+        if not changed:
+            continue
+        done = sorted(episode for _season, episode in selected_keys)
+        record_transfer(
+            user_id=int(follow["user_id"]), source="telegram_channel", resource_key=share_code,
+            tmdb_id=tmdb_id, transfer_scope="follow", status="success",
+            detail=f"癫影频道消息 {message_id} 解锁并转存完成", follow_id=int(follow["id"]),
+            season_number=season, episode_numbers=done, destination="p115",
+        )
+        log_hdhive_follow_event(
+            "transfer", "success", f"Telegram 频道 · 癫影：频道消息 {message_id} 解锁并转存完成",
+            follow=follow, detail={"source": "telegram_channel", "provider": "dian", "message_id": message_id, "episodes": done},
+        )
+        transferred += len(done)
+    return f"癫影解锁成功，新增转存 {transferred} 集" if transferred else "癫影解锁成功，但没有新的缺失集"
+
+
+async def telegram_channel_monitor_once() -> dict[str, Any]:
+    settings = pansave_login_settings()
+    monitors = [item for item in channel_monitor_settings()["monitors"] if int(item.get("enabled") or 0)]
+    if not monitors:
+        return {"checked": 0, "processed": 0}
+    if not (settings["api_id"] and settings["api_hash"] and settings["session"]):
+        raise RuntimeError("尚未完成 Telegram 用户账号登录")
+    client = pansave_client(settings["api_id"], settings["api_hash"], settings["session"], settings["proxy_url"])
+    checked = processed = 0
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise RuntimeError("Telegram 用户会话已失效")
+        for monitor in monitors:
+            last_id = int(monitor.get("last_message_id") or 0)
+            entity = await client.get_entity(str(monitor["channel"]))
+            if last_id == 0:
+                latest = await client.get_messages(entity, limit=1)
+                latest_id = int(getattr(latest[0], "id", 0) or 0) if latest else 0
+                with db() as connection:
+                    connection.execute(
+                        "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
+                        (latest_id, now_iso(), now_iso(), int(monitor["id"])),
+                    )
+                continue
+            messages = []
+            async for message in client.iter_messages(entity, min_id=last_id, reverse=True, limit=100):
+                messages.append(message)
+            for message in messages:
+                checked += 1
+                message_id = int(getattr(message, "id", 0) or 0)
+                text_value = str(getattr(message, "message", "") or "")
+                for entity_item in getattr(message, "entities", None) or []:
+                    url = str(getattr(entity_item, "url", "") or "")
+                    if url:
+                        text_value += "\n" + url
+                for row in getattr(message, "buttons", None) or []:
+                    for button in row:
+                        url = str(getattr(button, "url", "") or "")
+                        if url:
+                            text_value += "\n" + url
+                payload = parse_channel_resource_message(text_value)
+                with db() as connection:
+                    exists = connection.execute(
+                        "SELECT 1 FROM telegram_channel_events WHERE monitor_id = ? AND message_id = ?",
+                        (int(monitor["id"]), message_id),
+                    ).fetchone()
+                if not exists and payload and payload.get("provider") == monitor.get("provider"):
+                    if payload["provider"] == "dian":
+                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload)
+                    else:
+                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload)
+                    with db() as connection:
+                        connection.execute(
+                            "INSERT INTO telegram_channel_events(monitor_id, message_id, tmdb_id, resource_key, status, detail, payload_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'processed', ?, ?, ?, ?)",
+                            (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
+                        )
+                    processed += 1
+                with db() as connection:
+                    connection.execute(
+                        "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
+                        (message_id, now_iso(), now_iso(), int(monitor["id"])),
+                    )
+    finally:
+        await client.disconnect()
+    return {"checked": checked, "processed": processed}
+
+
+def telegram_channel_monitor_loop() -> None:
+    while True:
+        try:
+            settings = channel_monitor_settings()
+            if settings["enabled"] and settings["monitors"]:
+                update_worker_health("telegram_channel_monitor", "running")
+                result = asyncio.run(telegram_channel_monitor_once())
+                update_worker_health("telegram_channel_monitor", "ok", detail=result)
+            else:
+                update_worker_health("telegram_channel_monitor", "idle", detail={"configured": bool(settings["monitors"])})
+        except Exception as error:
+            update_worker_health("telegram_channel_monitor", "error", error=str(error))
+            LOGGER.exception("Telegram channel monitor failed")
+        with db() as connection:
+            interval = int(setting(connection, "telegram_channel_monitor_interval") or 900)
+        time.sleep(max(300, min(21600, interval)))
 
 
 async def deliver_to_pansave(
@@ -9131,6 +9480,7 @@ def startup() -> None:
     Thread(target=configure_telegram_menu, name="telegram-menu", daemon=True).start()
     Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
+    Thread(target=telegram_channel_monitor_loop, name="telegram-channel-monitor", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(
         target=notification_outbox_loop,
@@ -13360,6 +13710,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
             dian_follow_interval = 21600
         dian_follow_last_checked_at = setting(connection, "dian_follow_last_checked_at")
         dian_follow_last_error = setting(connection, "dian_follow_last_error")
+        telegram_channel_monitor_enabled = setting(connection, "telegram_channel_monitor_enabled") == "1"
+        telegram_channel_monitor_interval = int(setting(connection, "telegram_channel_monitor_interval") or 900)
         p115_app = setting(connection, "p115_app") or "alipaymini"
         p115_target_cid = setting(connection, "p115_target_cid") or "0"
         p115_target_name = setting(connection, "p115_target_name") or "根目录"
@@ -13432,6 +13784,8 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
         "dian_follow_interval": dian_follow_interval,
         "dian_follow_last_checked_at": dian_follow_last_checked_at,
         "dian_follow_last_error": dian_follow_last_error,
+        "telegram_channel_monitor_enabled": telegram_channel_monitor_enabled,
+        "telegram_channel_monitor_interval": telegram_channel_monitor_interval,
         "p115_app": p115_app,
         "p115_app_name": P115_APPS.get(p115_app, p115_app),
         "p115_apps": P115_APPS,
@@ -13470,6 +13824,79 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
     }
 
 
+@APP.get("/api/admin/telegram-channel-monitors")
+def get_telegram_channel_monitors(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    return channel_monitor_settings()
+
+
+@APP.post("/api/admin/telegram-channel-monitors")
+async def create_telegram_channel_monitor(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    channel = str(payload.get("channel") or "").strip()
+    provider = str(payload.get("provider") or "hdhive").strip().lower()
+    name = str(payload.get("name") or channel).strip()[:120]
+    if not channel or provider not in {"hdhive", "dian"}:
+        raise HTTPException(400, "频道地址或资源来源无效")
+    now = now_iso()
+    try:
+        with db() as connection:
+            connection.execute(
+                "INSERT INTO telegram_channel_monitors(name, provider, channel, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+                (name, provider, channel, 1 if payload.get("enabled", True) else 0, now, now),
+            )
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(409, "这个来源和频道已经添加") from error
+    return {"ok": True, **channel_monitor_settings()}
+
+
+@APP.patch("/api/admin/telegram-channel-monitors/{monitor_id}")
+async def update_telegram_channel_monitor(monitor_id: int, request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    with db() as connection:
+        row = connection.execute("SELECT * FROM telegram_channel_monitors WHERE id = ?", (monitor_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "频道监控不存在")
+        connection.execute(
+            "UPDATE telegram_channel_monitors SET name = ?, provider = ?, channel = ?, enabled = ?, updated_at = ? WHERE id = ?",
+            (str(payload.get("name", row["name"]) or row["channel"]).strip()[:120], str(payload.get("provider", row["provider"])).lower(), str(payload.get("channel", row["channel"])).strip(), 1 if payload.get("enabled", bool(row["enabled"])) else 0, now_iso(), monitor_id),
+        )
+        if payload.get("reset_cursor"):
+            connection.execute("UPDATE telegram_channel_monitors SET last_message_id = 0 WHERE id = ?", (monitor_id,))
+    return {"ok": True, **channel_monitor_settings()}
+
+
+@APP.delete("/api/admin/telegram-channel-monitors/{monitor_id}")
+def delete_telegram_channel_monitor(monitor_id: int, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        connection.execute("DELETE FROM telegram_channel_monitors WHERE id = ?", (monitor_id,))
+    return {"ok": True, **channel_monitor_settings()}
+
+
+@APP.post("/api/admin/telegram-channel-monitors/test")
+async def test_telegram_channel_monitor(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    channel = str(payload.get("channel") or "").strip()
+    if not channel:
+        raise HTTPException(400, "请填写频道地址或用户名")
+    settings = pansave_login_settings()
+    if not (settings["api_id"] and settings["api_hash"] and settings["session"]):
+        raise HTTPException(503, "请先完成 Telegram 用户账号登录")
+    client = pansave_client(settings["api_id"], settings["api_hash"], settings["session"], settings["proxy_url"])
+    try:
+        await client.connect()
+        entity = await client.get_entity(channel)
+        return {"ok": True, "title": str(getattr(entity, "title", "") or getattr(entity, "username", "") or channel), "channel_id": str(getattr(entity, "id", "") or "")}
+    except Exception as error:
+        raise HTTPException(502, f"无法读取 Telegram 频道：{error}") from error
+    finally:
+        await client.disconnect()
+
+
 @APP.patch("/api/admin/settings")
 async def update_settings(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
@@ -13506,6 +13933,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "p123_emby_url", "p123_emby_api_key",
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "dian_follow_interval",
+            "telegram_channel_monitor_interval",
             "p115_target_cid", "p115_target_name",
             "p123_delivery_mode", "p123_staging_cid", "p123_staging_name",
             "wecom_corp_id", "wecom_agent_id",
@@ -13523,6 +13951,13 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
                 "dian_follow_enabled",
                 "1" if payload["dian_follow_enabled"] else "0",
             )
+        if "telegram_channel_monitor_enabled" in payload:
+            set_setting(connection, "telegram_channel_monitor_enabled", "1" if payload["telegram_channel_monitor_enabled"] else "0")
+        if "telegram_channel_monitor_interval" in payload:
+            interval = int(payload["telegram_channel_monitor_interval"])
+            if interval < 300 or interval > 21600:
+                raise HTTPException(400, "频道监控间隔必须在5分钟到6小时之间")
+            set_setting(connection, "telegram_channel_monitor_interval", str(interval))
         for key, destination in (
             ("emby_library_notification_enabled", "p115"),
             ("p123_emby_library_notification_enabled", "p123"),

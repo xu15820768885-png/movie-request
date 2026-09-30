@@ -43,6 +43,24 @@ class FakeRequest:
 
 
 class HDHiveFoundationTests(unittest.TestCase):
+    def test_channel_message_parser_supports_hdhive_and_dian_posts(self):
+        hdhive = app.parse_channel_resource_message(
+            "[剧集·115] 兰香如故 (2026)\nS01E01-E38 4K WEB-DL\nTMDB: 282326\n"
+            "https://re0.me/resource/115/25004d12e22d4d22925b71c9f595902c"
+        )
+        self.assertEqual(hdhive["provider"], "hdhive")
+        self.assertEqual(hdhive["slug"], "25004d12e22d4d22925b71c9f595902c")
+        self.assertEqual(hdhive["tmdb_id"], 282326)
+        self.assertEqual(hdhive["episode_numbers"], list(range(1, 39)))
+
+        dian = app.parse_channel_resource_message(
+            "兰香如故 · 2026\nTMDB ID 282326\n第 1 季 · 第 35–37 集\n"
+            "https://m.dian115.com/s/Bt0vgVbTOZVY1TSMRd1p3gWWbNILkQ"
+        )
+        self.assertEqual(dian["provider"], "dian")
+        self.assertEqual(dian["share_code"], "Bt0vgVbTOZVY1TSMRd1p3gWWbNILkQ")
+        self.assertEqual(dian["episode_numbers"], [35, 36, 37])
+
     def test_episode_parser_handles_single_and_range(self):
         single = app.parse_episode_spec("吞噬星空.S01E233.2160p.WEB-DL")
         self.assertEqual(single["season_number"], 1)
