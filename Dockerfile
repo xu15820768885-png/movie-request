@@ -19,6 +19,9 @@ COPY web ./web
 
 # Fail the image build if an application module was omitted from the image.
 RUN python -c "import app, workflow"
+# Fail the image build instead of shipping a container whose 115 transfer
+# client cannot be imported because of an incompatible transitive dependency.
+RUN python -c "from p115client import P115Client; print(P115Client.__name__)"
 
 EXPOSE 5056
 CMD ["python", "/app/app.py"]
