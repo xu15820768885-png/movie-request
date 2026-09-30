@@ -7922,8 +7922,7 @@ def hdhive_message_follow_ids(items: list[dict[str, Any]]) -> tuple[set[int], bo
     with db() as connection:
         rows = connection.execute(
             "SELECT id, media_type, tmdb_id, hdhive_subscription_id "
-            "FROM tv_follows WHERE active = 1 "
-            "AND hdhive_subscription_id IS NOT NULL"
+            "FROM tv_follows WHERE active = 1"
         ).fetchall()
         target_rows = (
             connection.execute(
@@ -7959,13 +7958,12 @@ def poll_hdhive_follow_messages(
     with db() as connection:
         active_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
-                "AND hdhive_subscription_id IS NOT NULL"
+                "SELECT COUNT(*) FROM tv_follows WHERE active = 1"
             ).fetchone()[0]
         )
     if not active_count:
         log_hdhive_follow_event(
-            "messages", "skipped", "当前没有已开启的影巢原生追更",
+            "messages", "skipped", "当前没有本地影巢追更",
             cycle_id=cycle_id,
         )
         return 0
