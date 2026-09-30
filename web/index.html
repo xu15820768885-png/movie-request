@@ -1448,11 +1448,22 @@
         follow.textContent='下一步：开启追更';
       }
     }
+    function subscriptionResourcePayload(resource) {
+      if(!resource)return null;
+      // Preserve the relationship fields returned by newer RE0 resource
+      // responses.  The share slug alone is insufficient for native
+      // subscriptions because RE0 requires its internal media id.
+      const fields=['slug','title','media_url','media_slug','target_type','target_id','target_key','media_id','mediaId','tv_id','tvId','series_id','seriesId','movie_id','movieId'];
+      const result={};
+      for(const field of fields){if(resource[field]!==undefined&&resource[field]!==null&&String(resource[field]).trim()!=='')result[field]=resource[field];}
+      if(resource.media&&typeof resource.media==='object')result.media=resource.media;
+      return result;
+    }
     async function createFollow(item,button,items=null,title='匹配结果',resource=null) {
       if(preview){item.is_following=true;item.hdhive_subscribed=true;if(items)renderMovies(items,title);else{button.disabled=true;button.textContent='✓ 已追更';}toast(`《${item.title}》已开启影巢追更`);return;}
       button.disabled=true;button.textContent='…';
       try {
-        const result=await api('/api/follows',{method:'POST',body:JSON.stringify({tmdb_id:item.tmdb_id,media_type:item.media_type,slug:resource?.slug||'',resource:resource?{slug:resource.slug,title:resource.title||'',media_url:resource.media_url||'',media_slug:resource.media_slug||''}:null})});
+        const result=await api('/api/follows',{method:'POST',body:JSON.stringify({tmdb_id:item.tmdb_id,media_type:item.media_type,slug:resource?.slug||'',resource:subscriptionResourcePayload(resource)})});
         item.is_following=true;
         item.hdhive_subscribed=Boolean(result.follow?.hdhive_subscribed);
         if(items)renderMovies(items,title);else{button.textContent='✓ 已追更';button.disabled=true;}
@@ -1670,7 +1681,7 @@
       if(!resource?.slug)return toast('这个资源缺少影巢标识，不能订阅',true);
       if(preview){follow.hdhive_subscribed=true;follow.hdhive_subscription_id=9001;follow.last_message=`已开启影巢原生订阅：${resource.title}`;toast('已模拟开启影巢原生订阅');return loadFollows();}
       button.disabled=true;button.textContent='正在订阅…';
-      try {await api(`/api/follows/${follow.id}/hdhive-subscription`,{method:'POST',body:JSON.stringify({slug:resource.slug})});toast(`《${follow.title}》已绑定影巢原生订阅`);loadFollows();}
+      try {await api(`/api/follows/${follow.id}/hdhive-subscription`,{method:'POST',body:JSON.stringify({slug:resource.slug,resource:subscriptionResourcePayload(resource)})});toast(`《${follow.title}》已绑定影巢原生订阅`);loadFollows();}
       catch(error){button.disabled=false;button.textContent='重新订阅';toast(error.message,true);}
     }
     async function stopFollowWash(button) {

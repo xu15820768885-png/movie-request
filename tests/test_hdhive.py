@@ -544,6 +544,11 @@ class HDHiveFoundationTests(unittest.TestCase):
         self.assertEqual(target["target_id"], 58395)
         self.assertEqual(target["target_key"], "tv:58395")
 
+    def test_resource_relationship_is_detected_without_guessing_share_id(self):
+        self.assertTrue(app.hdhive_resource_has_subscription_target({"tv_id": 119713}))
+        self.assertTrue(app.hdhive_resource_has_subscription_target({"target_key": "tv:119713"}))
+        self.assertFalse(app.hdhive_resource_has_subscription_target({"id": 119713, "slug": "share"}))
+
     def test_subscription_target_reads_server_rendered_media_page(self):
         page_html = (
             '<script>self.__next_f.push([1,"'

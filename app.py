@@ -3186,6 +3186,20 @@ def hdhive_resource_is_direct_115(resource: dict[str, Any]) -> bool:
     return "115" in pan_type and not bool(resource.get("is_offline"))
 
 
+def hdhive_resource_has_subscription_target(resource: dict[str, Any]) -> bool:
+    """Return whether a resource already carries a media relationship.
+
+    The public resource endpoint does not promise this field, but newer RE0
+    responses include it.  Only use explicit media relationship fields here;
+    a share/resource id is not a valid subscription target id.
+    """
+    target_key = str(resource.get("target_key") or "").strip().lower()
+    if re.fullmatch(r"(movie|tv):\d+", target_key):
+        return True
+    keys = ("tv_id", "tvId", "series_id", "seriesId", "movie_id", "movieId", "media_id", "mediaId")
+    return any(str(resource.get(key) or "").strip().isdigit() for key in keys)
+
+
 def normalize_supported_hdhive_resources(
     items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -7786,6 +7800,37 @@ def refresh_hdhive_subscribed_follows(
                 )
             continue
         cache_follow_resources(int(follow["id"]), "hdhive", resources)
+        # A resource response may contain the RE0 media relationship even
+        # though the share detail does not.  Bind it immediately so an
+        # existing local follow can recover without waiting for a new user
+        # action.  This is deliberately limited to explicit relationship
+        # fields; never guess from a share id or TMDB id.
+        if not int(follow["hdhive_subscription_id"] or 0):
+            subscription_resource = next(
+                (
+                    item for item in resources
+                    if str(item.get("slug") or "").strip()
+                    and hdhive_resource_has_subscription_target(item)
+                ),
+                None,
+            )
+            if subscription_resource is not None:
+                try:
+                    bind_hdhive_follow_subscription(
+                        int(follow["id"]),
+                        str(subscription_resource["slug"]),
+                        subscription_resource,
+                    )
+                    log_hdhive_follow_event(
+                        "subscription", "success", "已从影巢资源关系自动恢复原生订阅",
+                        follow=follow, cycle_id=cycle_id,
+                        detail={"slug": subscription_resource["slug"]},
+                    )
+                except HTTPException as error:
+                    log_hdhive_follow_event(
+                        "subscription", "failed", f"原生订阅自动恢复失败：{error.detail}",
+                        follow=follow, cycle_id=cycle_id,
+                    )
         wash_config = hdhive_wash_config()
         if wash_config["enabled"]:
             wash_result = auto_wash_hdhive_follow(
@@ -11938,10 +11983,14 @@ async def create_hdhive_follow_subscription(
 ) -> dict[str, Any]:
     require_admin(movie_session)
     payload = await request.json()
+    resource = payload.get("resource")
+    if not isinstance(resource, dict):
+        resource = None
     row = await asyncio.to_thread(
         bind_hdhive_follow_subscription,
         follow_id,
         str(payload.get("slug") or ""),
+        resource,
     )
     return {"ok": True, "follow": serialize_follow(row)}
 
