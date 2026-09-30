@@ -12126,6 +12126,29 @@ def follow_resources(
             ]
             hdhive_items.sort(key=hdhive_movie_resource_priority, reverse=True)
         cache_follow_resources(follow_id, "hdhive", hdhive_items)
+        # The follow page's "查看当前资源" action is also a valid recovery
+        # path for an older local follow that was created before native
+        # subscription binding succeeded.  Do not wait for the background
+        # worker: use an explicit relationship returned by the resource API
+        # and create the subscription immediately.
+        if not int(row["hdhive_subscription_id"] or 0):
+            subscription_resource = next(
+                (
+                    item for item in hdhive_items
+                    if str(item.get("slug") or "").strip()
+                    and hdhive_resource_has_subscription_target(item)
+                ),
+                None,
+            )
+            if subscription_resource is not None:
+                try:
+                    row = bind_hdhive_follow_subscription(
+                        follow_id,
+                        str(subscription_resource["slug"]),
+                        subscription_resource,
+                    )
+                except HTTPException as error:
+                    errors["hdhive_subscription"] = str(error.detail)
     except HTTPException as error:
         errors["hdhive"] = str(error.detail)
     try:
