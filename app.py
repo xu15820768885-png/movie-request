@@ -2213,14 +2213,16 @@ async def process_channel_hdhive_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
-    # Channel follows are incremental: always target the newest episode in
-    # the post when it is newer than the follow baseline. Historical transfer
-    # rows must not suppress a newly published episode.
+    # Channel follows are incremental: target every episode in the post that
+    # is newer than the follow baseline. Historical transfer rows must not
+    # suppress newly published episodes.
     if episodes:
-        latest_episode = max(episodes)
         for follow in follows:
-            if str(follow["media_type"]) == "tv" and latest_episode > int(follow["baseline_episode"] or 0):
-                missing_by_follow[int(follow["id"])] = {latest_episode}
+            if str(follow["media_type"]) == "tv":
+                baseline = int(follow["baseline_episode"] or 0)
+                missing_by_follow[int(follow["id"])] = {
+                    episode for episode in episodes if episode > baseline
+                }
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     unlocked = hdhive_call("unlock", slug)
@@ -2247,10 +2249,10 @@ async def process_channel_hdhive_event(
             tree_missing = channel_follow_missing(
                 follow, season, {episode for _season, episode in tree_episodes if _season == season}, emby_episodes
             )
-            latest_episode = max(episodes) if episodes else 0
+            baseline = int(follow["baseline_episode"] or 0)
             missing_by_follow[int(follow["id"])] = (
-                {latest_episode}
-                if latest_episode > int(follow["baseline_episode"] or 0)
+                {episode for episode in episodes if episode > baseline}
+                if episodes
                 else tree_missing
             )
     transferred = 0
@@ -2381,10 +2383,12 @@ async def process_channel_dian_event(
         for follow in follows
     }
     if episodes:
-        latest_episode = max(episodes)
         for follow in follows:
-            if str(follow["media_type"]) == "tv" and latest_episode > int(follow["baseline_episode"] or 0):
-                missing_by_follow[int(follow["id"])] = {latest_episode}
+            if str(follow["media_type"]) == "tv":
+                baseline = int(follow["baseline_episode"] or 0)
+                missing_by_follow[int(follow["id"])] = {
+                    episode for episode in episodes if episode > baseline
+                }
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     checked = await asyncio.to_thread(dian_call, "check_sharecode", share_code)
