@@ -2117,7 +2117,15 @@ def parse_channel_resource_message(text: str) -> dict[str, Any]:
 def channel_follow_missing(follow: Any, season: int, episodes: set[int]) -> set[int]:
     baseline_season = int(follow["baseline_season"] or 1)
     baseline_episode = int(follow["baseline_episode"] or 0)
-    present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
+    # The transfer log only proves that 115 accepted a transfer.  It does not
+    # prove that Emby indexed the episode.  Prefer the latest Emby progress
+    # stored on the follow so a stale transfer row cannot hide a missing item.
+    emby_season = int(follow["current_emby_season"] or 0)
+    emby_episode = int(follow["current_emby_episode"] or 0)
+    if emby_season == season and emby_episode >= 0:
+        present = {episode for episode in episodes if episode <= emby_episode}
+    else:
+        present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
     # The baseline prevents re-receiving episodes already present when the
     # follow was created. Do not use current/last-transferred as an upper
     # bound: those values can advance past a hole such as E35.
