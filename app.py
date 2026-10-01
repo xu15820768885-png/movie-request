@@ -2213,10 +2213,13 @@ async def process_channel_hdhive_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
-    if force_latest and episodes and not any(missing_by_follow.values()):
+    # Channel follows are incremental: always target the newest episode in
+    # the post when it is newer than the follow baseline. Historical transfer
+    # rows must not suppress a newly published episode.
+    if episodes:
         latest_episode = max(episodes)
         for follow in follows:
-            if str(follow["media_type"]) == "tv":
+            if str(follow["media_type"]) == "tv" and latest_episode > int(follow["baseline_episode"] or 0):
                 missing_by_follow[int(follow["id"])] = {latest_episode}
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
@@ -2244,10 +2247,16 @@ async def process_channel_hdhive_event(
             tree_missing = channel_follow_missing(
                 follow, season, {episode for _season, episode in tree_episodes if _season == season}, emby_episodes
             )
-            missing_by_follow[int(follow["id"])] = tree_missing or (
-                {max(episodes)} if force_latest and episodes else set()
+            latest_episode = max(episodes) if episodes else 0
+            missing_by_follow[int(follow["id"])] = (
+                {latest_episode}
+                if latest_episode > int(follow["baseline_episode"] or 0)
+                else tree_missing
             )
     transferred = 0
+    missing_total = sum(len(value) for value in missing_by_follow.values())
+    transfer_attempts = 0
+    transfer_failures = 0
     for follow in follows:
         missing = missing_by_follow[int(follow["id"])]
         if not missing:
@@ -2261,18 +2270,22 @@ async def process_channel_hdhive_event(
             )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
+            transfer_failures += 1
             continue
+        transfer_attempts += 1
         before = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
         received = await asyncio.to_thread(
             p115_call, "接收频道资源失败", client.share_receive,
             {"file_id": ",".join(dict.fromkeys(ids)), "cid": target_cid}, share_url=share_url,
         )
         if not response_ok(received):
+            transfer_failures += 1
             continue
         changed = await asyncio.to_thread(
             wait_for_p115_change, lambda: p115_folder_snapshot(client, target_cid), before
         )
         if not changed:
+            transfer_failures += 1
             continue
         done = sorted(episode for _season, episode in selected_keys if episode > 0)
         record_transfer(
@@ -2287,7 +2300,11 @@ async def process_channel_hdhive_event(
             follow=follow, detail={"source": "telegram_channel", "provider": "hdhive", "message_id": message_id, "episodes": done},
         )
         transferred += len(done) if done else (1 if str(follow["media_type"]) == "movie" else 0)
-    return f"解锁成功，新增转存 {transferred} 集" if transferred else "解锁成功，但没有新的缺失集"
+    if transferred:
+        return f"解锁成功，新增转存 {transferred} 集"
+    if missing_total:
+        return f"已检测到缺集 {missing_total} 集，但转存未完成（尝试 {transfer_attempts} 次，失败 {transfer_failures} 次）"
+    return "解锁成功，当前没有缺失集"
 
 
 def _nested_int(payload: Any, keys: tuple[str, ...]) -> int:
@@ -2363,10 +2380,10 @@ async def process_channel_dian_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
-    if force_latest and episodes and not any(missing_by_follow.values()):
+    if episodes:
         latest_episode = max(episodes)
         for follow in follows:
-            if str(follow["media_type"]) == "tv":
+            if str(follow["media_type"]) == "tv" and latest_episode > int(follow["baseline_episode"] or 0):
                 missing_by_follow[int(follow["id"])] = {latest_episode}
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
@@ -2396,6 +2413,9 @@ async def process_channel_dian_event(
     client = await asyncio.to_thread(p115_client)
     tree = await asyncio.to_thread(p115_share_tree, client, share_url)
     transferred = 0
+    missing_total = sum(len(value) for value in missing_by_follow.values())
+    transfer_attempts = 0
+    transfer_failures = 0
     for follow in follows:
         missing = missing_by_follow[int(follow["id"])]
         if str(follow["media_type"]) == "movie":
@@ -2405,16 +2425,20 @@ async def process_channel_dian_event(
             selected, selected_keys = select_largest_missing_episode_files_by_season(tree, missing, fallback_season=season)
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
+            transfer_failures += 1
             continue
+        transfer_attempts += 1
         before = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
         received = await asyncio.to_thread(
             p115_call, "接收频道资源失败", client.share_receive,
             {"file_id": ",".join(dict.fromkeys(ids)), "cid": target_cid}, share_url=share_url,
         )
         if not response_ok(received):
+            transfer_failures += 1
             continue
         changed = await asyncio.to_thread(wait_for_p115_change, lambda: p115_folder_snapshot(client, target_cid), before)
         if not changed:
+            transfer_failures += 1
             continue
         done = sorted(episode for _season, episode in selected_keys if episode > 0)
         record_transfer(
@@ -2428,7 +2452,11 @@ async def process_channel_dian_event(
             follow=follow, detail={"source": "telegram_channel", "provider": "dian", "message_id": message_id, "episodes": done},
         )
         transferred += len(done) if done else (1 if str(follow["media_type"]) == "movie" else 0)
-    return f"癫影解锁成功，新增转存 {transferred} 集" if transferred else "癫影解锁成功，但没有新的缺失集"
+    if transferred:
+        return f"癫影解锁成功，新增转存 {transferred} 集"
+    if missing_total:
+        return f"癫影解锁成功，已检测到缺集 {missing_total} 集，但转存未完成（尝试 {transfer_attempts} 次，失败 {transfer_failures} 次）"
+    return "癫影解锁成功，当前没有缺失集"
 
 
 async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reprocess: bool = False) -> dict[str, Any]:
