@@ -2361,7 +2361,7 @@ async def process_channel_dian_event(
     return f"癫影解锁成功，新增转存 {transferred} 集" if transferred else "癫影解锁成功，但没有新的缺失集"
 
 
-async def telegram_channel_monitor_once(*, recent_limit: int = 0) -> dict[str, Any]:
+async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reprocess: bool = False) -> dict[str, Any]:
     LOGGER.info("[Telegram频道] 开始检查频道监控")
     settings = pansave_login_settings()
     channel_settings = channel_monitor_settings()
@@ -2408,16 +2408,23 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0) -> dict[str, A
                         "SELECT 1 FROM telegram_channel_events WHERE monitor_id = ? AND message_id = ?",
                         (int(monitor["id"]), message_id),
                     ).fetchone()
-                if not exists and payload and payload.get("provider") == monitor.get("provider"):
+                if (not exists or force_reprocess) and payload and payload.get("provider") == monitor.get("provider"):
                     if payload["provider"] == "dian":
                         detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload)
                     else:
                         detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload)
                     with db() as connection:
-                        connection.execute(
-                            "INSERT INTO telegram_channel_events(monitor_id, message_id, tmdb_id, resource_key, status, detail, payload_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'processed', ?, ?, ?, ?)",
-                            (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
-                        )
+                        event_args = (int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), int(monitor["id"]), message_id)
+                        if exists:
+                            connection.execute(
+                                "UPDATE telegram_channel_events SET tmdb_id = ?, resource_key = ?, status = 'processed', detail = ?, payload_json = ?, updated_at = ? WHERE monitor_id = ? AND message_id = ?",
+                                event_args,
+                            )
+                        else:
+                            connection.execute(
+                                "INSERT INTO telegram_channel_events(monitor_id, message_id, tmdb_id, resource_key, status, detail, payload_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'processed', ?, ?, ?, ?)",
+                                (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
+                            )
                     processed += 1
                     LOGGER.info("[Telegram频道] %s 消息 %s：%s", monitor["channel"], message_id, detail)
                 with db() as connection:
@@ -14207,7 +14214,7 @@ async def run_telegram_channel_monitor(
     if not CHANNEL_MONITOR_LOCK.acquire(blocking=False):
         raise HTTPException(409, "频道监控正在运行，请稍后查看处理记录")
     try:
-        result = await telegram_channel_monitor_once(recent_limit=100)
+        result = await telegram_channel_monitor_once(recent_limit=100, force_reprocess=True)
         update_worker_health("telegram_channel_monitor", "ok", detail=result)
         return {"ok": True, **result}
     except Exception as error:
