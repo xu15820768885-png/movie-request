@@ -2114,7 +2114,12 @@ def parse_channel_resource_message(text: str) -> dict[str, Any]:
     }
 
 
-def channel_follow_missing(follow: Any, season: int, episodes: set[int]) -> set[int]:
+def channel_follow_missing(
+    follow: Any,
+    season: int,
+    episodes: set[int],
+    emby_episodes: Optional[dict[int, set[int]]] = None,
+) -> set[int]:
     baseline_season = int(follow["baseline_season"] or 1)
     baseline_episode = int(follow["baseline_episode"] or 0)
     # The transfer log only proves that 115 accepted a transfer.  It does not
@@ -2122,7 +2127,9 @@ def channel_follow_missing(follow: Any, season: int, episodes: set[int]) -> set[
     # stored on the follow so a stale transfer row cannot hide a missing item.
     emby_season = int(follow["current_emby_season"] or 0)
     emby_episode = int(follow["current_emby_episode"] or 0)
-    if emby_season == season and emby_episode >= 0:
+    if emby_episodes and season in emby_episodes:
+        present = set(emby_episodes[season]) & set(episodes)
+    elif emby_season == season and emby_episode >= 0:
         present = {episode for episode in episodes if episode <= emby_episode}
     else:
         present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
@@ -2181,8 +2188,17 @@ async def process_channel_hdhive_event(
     if not episodes and not movie_follows:
         return "已匹配追更，但消息没有可识别集数"
     season = int(payload.get("season_number") or 1)
+    emby_episodes: dict[int, set[int]] = {}
+    if any(str(follow["media_type"]) == "tv" for follow in follows):
+        progress = await asyncio.to_thread(
+            emby_series_episode_progress, tmdb_id, True, True, "p115"
+        )
+        emby_episodes = {
+            int(raw_season): {int(item) for item in raw_episodes}
+            for raw_season, raw_episodes in (progress.get("emby_episode_numbers") or {}).items()
+        }
     missing_by_follow = {
-        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes))
+        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
     if not any(missing_by_follow.values()):
@@ -2209,7 +2225,7 @@ async def process_channel_hdhive_event(
             if str(follow["media_type"]) != "tv":
                 continue
             missing_by_follow[int(follow["id"])] = channel_follow_missing(
-                follow, season, {episode for _season, episode in tree_episodes if _season == season}
+                follow, season, {episode for _season, episode in tree_episodes if _season == season}, emby_episodes
             )
     transferred = 0
     for follow in follows:
@@ -2302,8 +2318,17 @@ async def process_channel_dian_event(
     if not episodes and not movie_follows:
         return "已匹配追更，但消息没有可识别集数"
     season = int(payload.get("season_number") or 1)
+    emby_episodes: dict[int, set[int]] = {}
+    if any(str(follow["media_type"]) == "tv" for follow in follows):
+        progress = await asyncio.to_thread(
+            emby_series_episode_progress, tmdb_id, True, True, "p115"
+        )
+        emby_episodes = {
+            int(raw_season): {int(item) for item in raw_episodes}
+            for raw_season, raw_episodes in (progress.get("emby_episode_numbers") or {}).items()
+        }
     missing_by_follow = {
-        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes))
+        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
     if not any(missing_by_follow.values()):
