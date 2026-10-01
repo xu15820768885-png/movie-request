@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import logging
+from collections import deque
 import os
 import re
 import secrets
@@ -116,6 +117,18 @@ EMBY_WEBHOOK_PENDING: set[str] = set()
 EMBY_WEBHOOK_ITEMS: dict[str, dict[str, str]] = {}
 EMBY_WEBHOOK_GENERATIONS: dict[str, int] = {}
 LOGGER = logging.getLogger("uvicorn.error")
+LOG_PATH = DATA_DIR / "movie-request.log"
+try:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    LOG_PATH = Path("/tmp/movie-request.log")
+try:
+    if not any(isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == str(LOG_PATH) for handler in LOGGER.handlers):
+        _file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+        _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        LOGGER.addHandler(_file_handler)
+except OSError:
+    pass
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 GUANYING_SESSION_LOCK = RLock()
@@ -500,6 +513,34 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(monitor_id, message_id)
             );
+            CREATE TABLE IF NOT EXISTS chart_monitor_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chart_name TEXT NOT NULL UNIQUE,
+                top_n INTEGER NOT NULL DEFAULT 10,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chart_monitor_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chart_name TEXT NOT NULL,
+                tmdb_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                media_type TEXT NOT NULL DEFAULT 'tv',
+                current_rank INTEGER NOT NULL DEFAULT 0,
+                in_chart INTEGER NOT NULL DEFAULT 1,
+                keep_monitoring INTEGER NOT NULL DEFAULT 1,
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                UNIQUE(chart_name, tmdb_id)
+            );
+            CREATE TABLE IF NOT EXISTS chart_cache (
+                chart_name TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS telegram_channel_event_status_idx
                 ON telegram_channel_events(status, updated_at DESC);
             CREATE TABLE IF NOT EXISTS hdhive_follow_events (
@@ -748,6 +789,7 @@ def init_db() -> None:
                 "current_emby_episode = baseline_episode"
             )
         follow_column_sql = {
+            "monitor_mode": "TEXT NOT NULL DEFAULT 'both'",
             "guanying_enabled": "INTEGER NOT NULL DEFAULT 1",
             "guanying_last_checked_at": "TEXT NOT NULL DEFAULT ''",
             "guanying_next_check_at": "TEXT NOT NULL DEFAULT ''",
@@ -1757,12 +1799,20 @@ def p115_share_tree(
     parent_path: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     visited = visited or set()
-    result = p115_call(
-        "读取115分享文件失败",
-        client.share_snap,
-        cid,
-        share_url=share_url,
-    )
+    try:
+        result = p115_call(
+            "读取115分享文件失败", client.share_snap, cid,
+            # 115 分享快照默认分页很小（常见为 32）。资源包超过一页时，
+            # 不扩大分页会漏掉中间集，造成“1-38 只转存了 31-34、36-38”。
+            limit=1150, offset=0, share_url=share_url,
+        )
+    except HTTPException as error:
+        # 兼容旧版客户端和测试替身，它们可能只接受 cid/share_url。
+        if "unexpected keyword" not in str(error.detail) and "positional" not in str(error.detail):
+            raise
+        result = p115_call(
+            "读取115分享文件失败", client.share_snap, cid, share_url=share_url,
+        )
     if not response_ok(result):
         raise HTTPException(502, response_message(result, "无法读取115分享"))
     output: list[dict[str, Any]] = []
@@ -2062,17 +2112,14 @@ def parse_channel_resource_message(text: str) -> dict[str, Any]:
 def channel_follow_missing(follow: Any, season: int, episodes: set[int]) -> set[int]:
     baseline_season = int(follow["baseline_season"] or 1)
     baseline_episode = int(follow["baseline_episode"] or 0)
-    current_season = int(follow["current_emby_season"] or 1)
-    current_episode = int(follow["current_emby_episode"] or 0)
-    transferred_season = int(follow["last_transferred_season"] or 0)
-    transferred_episode = int(follow["last_transferred_episode"] or 0)
     present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
+    # The baseline prevents re-receiving episodes already present when the
+    # follow was created. Do not use current/last-transferred as an upper
+    # bound: those values can advance past a hole such as E35.
     return {
         episode for episode in episodes
         if episode not in present
-        and (season, episode) > (baseline_season, baseline_episode)
-        and (season, episode) > (current_season, current_episode)
-        and (season, episode) > (transferred_season, transferred_episode)
+        and (season > baseline_season or (season == baseline_season and episode > baseline_episode))
     }
 
 
@@ -2083,9 +2130,13 @@ def channel_monitor_settings() -> dict[str, Any]:
         ).fetchall()
         interval = int(setting(connection, "telegram_channel_monitor_interval") or 900)
         enabled = setting(connection, "telegram_channel_monitor_enabled") == "1"
+        history_backfill = setting(connection, "telegram_channel_history_backfill_enabled") == "1"
+        history_limit = int(setting(connection, "telegram_channel_history_backfill_limit") or 100)
     return {
         "enabled": enabled,
         "interval": max(300, min(21600, interval)),
+        "history_backfill": history_backfill,
+        "history_limit": max(10, min(1000, history_limit)),
         "monitors": [dict(row) for row in rows],
     }
 
@@ -2100,17 +2151,25 @@ async def process_channel_hdhive_event(
         return "消息缺少 TMDB ID 或影巢资源 slug"
     with db() as connection:
         follows = connection.execute(
-            "SELECT * FROM tv_follows WHERE active = 1 AND media_type = 'tv' AND tmdb_id = ?",
+            "SELECT * FROM tv_follows WHERE active = 1 AND media_type IN ('tv', 'movie') "
+            "AND monitor_mode IN ('channel', 'both') AND tmdb_id = ?",
             (tmdb_id,),
         ).fetchall()
+        follow_map = {}
+        for follow in follows:
+            key = (int(follow["user_id"]), int(follow["tmdb_id"]), str(follow["media_type"]))
+            if key not in follow_map or str(follow_map[key]["mode"] or "") == "chart":
+                follow_map[key] = follow
+        follows = list(follow_map.values())
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not follows:
         return "未匹配到启用中的映单追更"
-    if not episodes:
+    movie_follows = [follow for follow in follows if str(follow["media_type"]) == "movie"]
+    if not episodes and not movie_follows:
         return "已匹配追更，但消息没有可识别集数"
     season = int(payload.get("season_number") or 1)
     missing_by_follow = {
-        int(follow["id"]): channel_follow_missing(follow, season, episodes)
+        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes))
         for follow in follows
     }
     if not any(missing_by_follow.values()):
@@ -2122,14 +2181,35 @@ async def process_channel_hdhive_event(
         return "影巢解锁成功，但没有返回有效 115 链接"
     client = await asyncio.to_thread(p115_client)
     tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+    # 影巢经常把“第5集更新”打包成 S01E01-E05；解锁后按分享内实际文件
+    # 回填此前缺失的集数。癫影单集资源则只会返回实际存在的那一集。
+    tree_episodes = {
+        (season_number, episode)
+        for item in tree
+        if not item.get("_share_is_dir")
+        for season_number in [next(iter(parse_episode_spec(item.get("_share_name")).get("season_numbers") or [season]), season)]
+        for episode in parse_episode_spec(item.get("_share_name")).get("episode_numbers") or []
+        if int(episode) > 0 and int(episode) <= max(episodes or {0})
+    }
+    if tree_episodes:
+        for follow in follows:
+            if str(follow["media_type"]) != "tv":
+                continue
+            missing_by_follow[int(follow["id"])] = channel_follow_missing(
+                follow, season, {episode for _season, episode in tree_episodes if _season == season}
+            )
     transferred = 0
     for follow in follows:
-        missing = {(season, episode) for episode in missing_by_follow[int(follow["id"])]}
+        missing = missing_by_follow[int(follow["id"])]
         if not missing:
             continue
-        selected, selected_keys = select_largest_missing_episode_files_by_season(
-            tree, missing, fallback_season=int(payload.get("season_number") or 1)
-        )
+        if str(follow["media_type"]) == "movie":
+            selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
+            selected_keys = {(0, 0)} if selected else set()
+        else:
+            selected, selected_keys = select_largest_missing_episode_files_by_season(
+                tree, missing, fallback_season=int(payload.get("season_number") or 1)
+            )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
             continue
@@ -2145,19 +2225,19 @@ async def process_channel_hdhive_event(
         )
         if not changed:
             continue
-        done = sorted(episode for _season, episode in selected_keys)
+        done = sorted(episode for _season, episode in selected_keys if episode > 0)
         record_transfer(
             user_id=int(follow["user_id"]), source="telegram_channel", resource_key=slug,
             tmdb_id=tmdb_id, transfer_scope="follow", status="success",
             detail=f"频道消息 {message_id} 解锁并转存完成", follow_id=int(follow["id"]),
-            season_number=int(payload.get("season_number") or 1), episode_numbers=done,
+            season_number=int(payload.get("season_number") or 0), episode_numbers=done,
             destination="p115",
         )
         log_hdhive_follow_event(
             "transfer", "success", f"Telegram 频道 · 影巢：频道消息 {message_id} 解锁并转存完成",
             follow=follow, detail={"source": "telegram_channel", "provider": "hdhive", "message_id": message_id, "episodes": done},
         )
-        transferred += len(done)
+        transferred += len(done) if done else (1 if str(follow["media_type"]) == "movie" else 0)
     return f"解锁成功，新增转存 {transferred} 集" if transferred else "解锁成功，但没有新的缺失集"
 
 
@@ -2192,17 +2272,25 @@ async def process_channel_dian_event(
         return "消息缺少 TMDB ID 或癫影分享码"
     with db() as connection:
         follows = connection.execute(
-            "SELECT * FROM tv_follows WHERE active = 1 AND media_type = 'tv' AND tmdb_id = ?",
+            "SELECT * FROM tv_follows WHERE active = 1 AND media_type IN ('tv', 'movie') "
+            "AND monitor_mode IN ('channel', 'both') AND tmdb_id = ?",
             (tmdb_id,),
         ).fetchall()
+        follow_map = {}
+        for follow in follows:
+            key = (int(follow["user_id"]), int(follow["tmdb_id"]), str(follow["media_type"]))
+            if key not in follow_map or str(follow_map[key]["mode"] or "") == "chart":
+                follow_map[key] = follow
+        follows = list(follow_map.values())
         target_cid = setting(connection, "p115_target_cid") or "0"
     if not follows:
         return "未匹配到启用中的映单追更"
-    if not episodes:
+    movie_follows = [follow for follow in follows if str(follow["media_type"]) == "movie"]
+    if not episodes and not movie_follows:
         return "已匹配追更，但消息没有可识别集数"
     season = int(payload.get("season_number") or 1)
     missing_by_follow = {
-        int(follow["id"]): channel_follow_missing(follow, season, episodes)
+        int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes))
         for follow in follows
     }
     if not any(missing_by_follow.values()):
@@ -2234,8 +2322,12 @@ async def process_channel_dian_event(
     tree = await asyncio.to_thread(p115_share_tree, client, share_url)
     transferred = 0
     for follow in follows:
-        missing = {(season, episode) for episode in missing_by_follow[int(follow["id"])]}
-        selected, selected_keys = select_largest_missing_episode_files_by_season(tree, missing, fallback_season=season)
+        missing = missing_by_follow[int(follow["id"])]
+        if str(follow["media_type"]) == "movie":
+            selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
+            selected_keys = {(0, 0)} if selected else set()
+        else:
+            selected, selected_keys = select_largest_missing_episode_files_by_season(tree, missing, fallback_season=season)
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
             continue
@@ -2249,24 +2341,26 @@ async def process_channel_dian_event(
         changed = await asyncio.to_thread(wait_for_p115_change, lambda: p115_folder_snapshot(client, target_cid), before)
         if not changed:
             continue
-        done = sorted(episode for _season, episode in selected_keys)
+        done = sorted(episode for _season, episode in selected_keys if episode > 0)
         record_transfer(
             user_id=int(follow["user_id"]), source="telegram_channel", resource_key=share_code,
             tmdb_id=tmdb_id, transfer_scope="follow", status="success",
             detail=f"癫影频道消息 {message_id} 解锁并转存完成", follow_id=int(follow["id"]),
-            season_number=season, episode_numbers=done, destination="p115",
+            season_number=season if str(follow["media_type"]) == "tv" else 0, episode_numbers=done, destination="p115",
         )
         log_hdhive_follow_event(
             "transfer", "success", f"Telegram 频道 · 癫影：频道消息 {message_id} 解锁并转存完成",
             follow=follow, detail={"source": "telegram_channel", "provider": "dian", "message_id": message_id, "episodes": done},
         )
-        transferred += len(done)
+        transferred += len(done) if done else (1 if str(follow["media_type"]) == "movie" else 0)
     return f"癫影解锁成功，新增转存 {transferred} 集" if transferred else "癫影解锁成功，但没有新的缺失集"
 
 
 async def telegram_channel_monitor_once() -> dict[str, Any]:
+    LOGGER.info("[Telegram频道] 开始检查频道监控")
     settings = pansave_login_settings()
-    monitors = [item for item in channel_monitor_settings()["monitors"] if int(item.get("enabled") or 0)]
+    channel_settings = channel_monitor_settings()
+    monitors = [item for item in channel_settings["monitors"] if int(item.get("enabled") or 0)]
     if not monitors:
         return {"checked": 0, "processed": 0}
     if not (settings["api_id"] and settings["api_hash"] and settings["session"]):
@@ -2280,7 +2374,7 @@ async def telegram_channel_monitor_once() -> dict[str, Any]:
         for monitor in monitors:
             last_id = int(monitor.get("last_message_id") or 0)
             entity = await client.get_entity(str(monitor["channel"]))
-            if last_id == 0:
+            if last_id == 0 and not channel_settings["history_backfill"]:
                 latest = await client.get_messages(entity, limit=1)
                 latest_id = int(getattr(latest[0], "id", 0) or 0) if latest else 0
                 with db() as connection:
@@ -2290,7 +2384,10 @@ async def telegram_channel_monitor_once() -> dict[str, Any]:
                     )
                 continue
             messages = []
-            async for message in client.iter_messages(entity, min_id=last_id, reverse=True, limit=100):
+            iterator_kwargs = {"reverse": True, "limit": channel_settings["history_limit"] if last_id == 0 else 100}
+            if last_id:
+                iterator_kwargs["min_id"] = last_id
+            async for message in client.iter_messages(entity, **iterator_kwargs):
                 messages.append(message)
             for message in messages:
                 checked += 1
@@ -2329,6 +2426,7 @@ async def telegram_channel_monitor_once() -> dict[str, Any]:
                     )
     finally:
         await client.disconnect()
+    LOGGER.info("[Telegram频道] 频道检查完成 checked=%s processed=%s", checked, processed)
     return {"checked": checked, "processed": processed}
 
 
@@ -8061,7 +8159,8 @@ def refresh_hdhive_subscribed_follows(
     with db() as connection:
         query = (
             "SELECT f.*, u.storage_destination FROM tv_follows f "
-            "JOIN users u ON u.id = f.user_id WHERE f.active = 1"
+            "JOIN users u ON u.id = f.user_id WHERE f.active = 1 "
+            "AND f.monitor_mode IN ('inbox', 'both')"
         )
         if only_unsubscribed:
             query += " AND f.hdhive_subscription_id IS NULL"
@@ -8307,7 +8406,8 @@ def poll_hdhive_follow_messages(
     with db() as connection:
         active_count = int(
             connection.execute(
-                "SELECT COUNT(*) FROM tv_follows WHERE active = 1"
+                "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
+                "AND monitor_mode IN ('inbox', 'both')"
             ).fetchone()[0]
         )
     if not active_count:
@@ -8582,7 +8682,7 @@ def hdhive_follow_loop() -> None:
                 unsubscribed_count = int(
                     connection.execute(
                         "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
-                        "AND hdhive_subscription_id IS NULL"
+                        "AND monitor_mode IN ('inbox', 'both') AND hdhive_subscription_id IS NULL"
                     ).fetchone()[0]
                 )
                 configured = bool(
@@ -8610,6 +8710,7 @@ def hdhive_follow_loop() -> None:
                 and time.time() - last_time >= interval
                 and time.time() >= next_time
             ):
+                LOGGER.info("[影巢站内信轮询] 开始检查 interval=%s", interval)
                 cycle_id = secrets.token_hex(8)
                 run_hdhive_follow_cycle(
                     authorized_scopes=authorized_scopes,
@@ -9481,6 +9582,7 @@ def startup() -> None:
     Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=telegram_channel_monitor_loop, name="telegram-channel-monitor", daemon=True).start()
+    Thread(target=chart_monitor_loop, name="chart-monitor", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(
         target=notification_outbox_loop,
@@ -10215,9 +10317,7 @@ def search(
     }
 
 
-@APP.get("/api/charts/{chart_name}")
-def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    user = require_user(movie_session)
+def _fetch_chart_results(chart_name: str, user: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     douban_config = {
         "douban_movies": ("/subject_collection/movie_hot_gaia/items", "movie", "豆瓣热门电影"),
         "douban_tv": ("/subject_collection/tv_hot/items", "tv", "豆瓣热门剧集"),
@@ -10226,13 +10326,13 @@ def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None))
         path, media_type, title = douban_config[chart_name]
         data = douban_get(
             path,
-            {"start": 0, "count": 20, "items_only": 1, "for_mobile": 1},
+            {"start": 0, "count": 100, "items_only": 1, "for_mobile": 1},
         )
         items = data.get("subject_collection_items") or []
         return {
             "title": title,
             "source": "douban",
-            "results": [douban_media_item(item, media_type) for item in items[:20]],
+            "results": [douban_media_item(item, media_type) for item in items[:100]],
         }
     chart_config = {
         "trending": ("/trending/all/week", None, "本周热门"),
@@ -10243,16 +10343,161 @@ def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None))
         raise HTTPException(404, "没有找到这个榜单")
     path, fixed_type, title = chart_config[chart_name]
     data = tmdb_get(path, {"language": "zh-CN", "page": 1})
-    library_ids = destination_emby_ids(
-        user["storage_destination"], prefer_cached=True
-    )
+    if path in {"/movie/popular", "/tv/popular", "/trending/all/week"}:
+        pages = [data]
+        for page in range(2, 6):
+            pages.append(tmdb_get(path, {"language": "zh-CN", "page": page}))
+        merged = []
+        seen_ids = set()
+        for page in pages:
+            for item in page.get("results", []):
+                item_id = (item.get("media_type") or fixed_type or "", int(item.get("id") or 0))
+                if item_id in seen_ids:
+                    continue
+                seen_ids.add(item_id)
+                merged.append(item)
+        data = {"results": merged}
+    library_ids = destination_emby_ids(user["storage_destination"], prefer_cached=True) if user else set()
     results = []
     for item in data.get("results", []):
         media_type = fixed_type or item.get("media_type")
         if media_type not in ("movie", "tv"):
             continue
         results.append(tmdb_media_item(item, media_type, library_ids))
-    return {"title": title, "results": results[:20]}
+    return {"title": title, "results": results[:100]}
+
+
+def chart_results(
+    chart_name: str,
+    user: Optional[dict[str, Any]] = None,
+    *,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Return a cached chart immediately; refreshes are written by the worker."""
+    if not force_refresh:
+        with db() as connection:
+            row = connection.execute(
+                "SELECT payload_json, fetched_at, expires_at FROM chart_cache WHERE chart_name = ?",
+                (chart_name,),
+            ).fetchone()
+        if row:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+                if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                    payload["cached_at"] = str(row["fetched_at"] or "")
+                    payload["stale"] = str(row["expires_at"] or "") < now_iso()
+                    return payload
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+    payload = _fetch_chart_results(chart_name, user)
+    with db() as connection:
+        fetched = now_iso()
+        expires = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+        connection.execute(
+            "INSERT INTO chart_cache(chart_name, payload_json, fetched_at, expires_at) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(chart_name) DO UPDATE SET payload_json=excluded.payload_json, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+            (chart_name, json.dumps(payload, ensure_ascii=False), fetched, expires),
+        )
+    payload["cached_at"] = fetched
+    payload["stale"] = False
+    return payload
+
+
+@APP.get("/api/charts/{chart_name}")
+def charts(chart_name: str, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    user = require_user(movie_session)
+    return chart_results(chart_name, user)
+
+
+def resolve_chart_item_to_tmdb(item: dict[str, Any]) -> dict[str, Any]:
+    if int(item.get("tmdb_id") or 0):
+        return item
+    media_type = str(item.get("media_type") or "tv")
+    title = str(item.get("title") or "").strip()
+    if not title or media_type not in {"tv", "movie"}:
+        return {}
+    data = tmdb_get(f"/search/{media_type}", {"language": "zh-CN", "query": title, "page": 1})
+    candidates = data.get("results") or []
+    year = str(item.get("year") or "")[:4]
+    candidates.sort(key=lambda value: (str(value.get("first_air_date") or value.get("release_date") or "").startswith(year), float(value.get("popularity") or 0)), reverse=True)
+    if not candidates:
+        return {}
+    matched = candidates[0]
+    return {**item, "tmdb_id": int(matched.get("id") or 0), "poster_path": matched.get("poster_path") or item.get("poster_path") or "", "media_type": media_type}
+
+
+def chart_monitor_once() -> dict[str, int]:
+    with db() as connection:
+        rules = [dict(row) for row in connection.execute("SELECT * FROM chart_monitor_rules WHERE enabled = 1").fetchall()]
+        admin = connection.execute("SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1").fetchone()
+    if not admin:
+        return {"rules": 0, "created": 0, "kept": 0}
+    created = kept = 0
+    for rule in rules:
+        try:
+            results = chart_results(str(rule["chart_name"]), None, force_refresh=True).get("results", [])[:int(rule["top_n"] or 10)]
+            resolved = [resolve_chart_item_to_tmdb(item) for item in results]
+            resolved = [item for item in resolved if int(item.get("tmdb_id") or 0)]
+            seen = {int(item["tmdb_id"]) for item in resolved}
+            with db() as connection:
+                for rank, item in enumerate(resolved, start=1):
+                    tmdb_id = int(item["tmdb_id"])
+                    connection.execute(
+                        "INSERT INTO chart_monitor_items(chart_name, tmdb_id, title, media_type, current_rank, in_chart, last_seen_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(chart_name, tmdb_id) DO UPDATE SET title=excluded.title, media_type=excluded.media_type, current_rank=excluded.current_rank, in_chart=1, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at",
+                        (rule["chart_name"], tmdb_id, item.get("title") or "", item.get("media_type") or "tv", rank, now_iso(), now_iso()),
+                    )
+                    existing = connection.execute(
+                        "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
+                        "AND active = 1 AND mode != 'chart' AND monitor_mode IN ('channel', 'both')",
+                        (int(admin["id"]), tmdb_id),
+                    ).fetchone()
+                    chart_follow = connection.execute(
+                        "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'",
+                        (int(admin["id"]), tmdb_id),
+                    ).fetchone()
+                    if not existing and not chart_follow:
+                        connection.execute(
+                            "INSERT INTO tv_follows(user_id, tmdb_id, media_type, title, original_title, year, poster_path, mode, monitor_mode, baseline_episode, current_emby_episode, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'chart', 'channel', 0, 0, ?, ?)",
+                            (int(admin["id"]), tmdb_id, item.get("media_type") or "tv", item.get("title") or "", item.get("original_title") or "", str(item.get("year") or "")[:4], item.get("poster_path") or "", now_iso(), now_iso()),
+                        )
+                        created += 1
+                    elif chart_follow:
+                        item_state = connection.execute(
+                            "SELECT keep_monitoring FROM chart_monitor_items WHERE chart_name = ? AND tmdb_id = ?",
+                            (rule["chart_name"], tmdb_id),
+                        ).fetchone()
+                        if item_state and int(item_state["keep_monitoring"]):
+                            connection.execute(
+                                "UPDATE tv_follows SET active = 1, monitor_mode = 'channel', updated_at = ? WHERE id = ?",
+                                (now_iso(), int(chart_follow["id"])),
+                            )
+                    kept += 1
+                old = connection.execute("SELECT * FROM chart_monitor_items WHERE chart_name = ?", (rule["chart_name"],)).fetchall()
+                for row in old:
+                    if int(row["tmdb_id"]) not in seen:
+                        connection.execute("UPDATE chart_monitor_items SET in_chart = 0, current_rank = 0, updated_at = ? WHERE id = ?", (now_iso(), int(row["id"])))
+                        if not int(row["keep_monitoring"]):
+                            connection.execute("UPDATE tv_follows SET active = 0, updated_at = ? WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'", (now_iso(), int(admin["id"]), int(row["tmdb_id"])))
+        except Exception as error:
+            LOGGER.exception("[榜单监控] chart=%s failed: %s", rule.get("chart_name"), error)
+    return {"rules": len(rules), "created": created, "kept": kept}
+
+
+def get_chart_monitors_snapshot() -> list[dict[str, Any]]:
+    with db() as connection:
+        return [dict(row) for row in connection.execute("SELECT * FROM chart_monitor_rules WHERE enabled = 1").fetchall()]
+
+
+def chart_monitor_loop() -> None:
+    while True:
+        try:
+            settings = get_chart_monitors_snapshot()
+            if settings:
+                LOGGER.info("[榜单监控] 开始刷新 %s 个榜单", len(settings))
+                chart_monitor_once()
+        except Exception:
+            LOGGER.exception("[榜单监控] 后台刷新失败")
+        time.sleep(3600)
 
 
 @APP.get("/api/douban/resolve/{media_type}/{douban_id}")
@@ -11691,10 +11936,10 @@ def list_follows(
         )
         values: tuple[Any, ...] = ()
         if user["role"] != "admin":
-            query += "WHERE f.active = 1 AND f.user_id = ? "
+            query += "WHERE f.active = 1 AND f.mode != 'chart' AND f.user_id = ? "
             values = (user["id"],)
         else:
-            query += "WHERE f.active = 1 "
+            query += "WHERE f.active = 1 AND f.mode != 'chart' "
         query += "ORDER BY f.active DESC, f.updated_at DESC"
         rows = connection.execute(query, values).fetchall()
     items = [serialize_follow(row) for row in rows]
@@ -11904,6 +12149,30 @@ async def update_follow_wash_window(
                     int(wash["season_number"]), int(wash["episode_number"]),
                 ),
             )
+    return {"ok": True, "follow": serialize_follow(updated)}
+
+
+@APP.patch("/api/follows/{follow_id}/monitor-mode")
+async def update_follow_monitor_mode(
+    follow_id: int,
+    request: Request,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    user = require_user(movie_session)
+    mode = str((await request.json()).get("mode") or "").strip().lower()
+    if mode not in {"inbox", "channel", "both", "off"}:
+        raise HTTPException(400, "追更方式无效")
+    with db() as connection:
+        follow = connection.execute(
+            "SELECT * FROM tv_follows WHERE id = ? AND active = 1", (follow_id,)
+        ).fetchone()
+        if not follow or (user["role"] != "admin" and int(follow["user_id"]) != int(user["id"])):
+            raise HTTPException(404, "没有找到这条追更")
+        connection.execute(
+            "UPDATE tv_follows SET monitor_mode = ?, updated_at = ? WHERE id = ?",
+            (mode, now_iso(), follow_id),
+        )
+        updated = connection.execute("SELECT * FROM tv_follows WHERE id = ?", (follow_id,)).fetchone()
     return {"ok": True, "follow": serialize_follow(updated)}
 
 
@@ -13036,6 +13305,14 @@ async def hdhive_transfer(
             requested_keys = {
                 (season_number, episode) for episode in wanted_episodes
             }
+            missing_from_share = requested_keys - available_keys
+            LOGGER.info(
+                "[115分享树] 资源=%s 请求=%s 分享树识别=%s 分享树缺失=%s",
+                slug,
+                compact_episode_numbers(wanted_episodes),
+                compact_episode_numbers({episode for _season, episode in available_keys if _season == season_number}),
+                compact_episode_numbers({episode for _season, episode in missing_from_share if _season == season_number}),
+            )
             candidate_keys = (available_keys & requested_keys) or requested_keys
             completed_keys: set[tuple[int, int]] = set()
             for candidate_season in {season for season, _episode in candidate_keys}:
@@ -13824,6 +14101,110 @@ def get_settings(movie_session: Optional[str] = Cookie(default=None)) -> dict[st
     }
 
 
+@APP.get("/api/admin/system-log")
+def get_system_log(
+    lines: int = 500,
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    require_admin(movie_session)
+    limit = max(50, min(5000, int(lines or 500)))
+    try:
+        content = LOG_PATH.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        content = ""
+    rows = content.splitlines()[-limit:]
+    return {"lines": rows, "total": len(rows), "path": str(LOG_PATH)}
+
+
+@APP.get("/api/admin/system-log/download")
+def download_system_log(movie_session: Optional[str] = Cookie(default=None)) -> Response:
+    require_admin(movie_session)
+    if not LOG_PATH.exists():
+        LOG_PATH.write_text("", encoding="utf-8")
+    return FileResponse(LOG_PATH, media_type="text/plain", filename="movie-request.log")
+
+
+@APP.get("/api/admin/chart-monitors")
+def get_chart_monitors(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        rows = connection.execute("SELECT * FROM chart_monitor_rules ORDER BY id").fetchall()
+    if enabled:
+        Thread(target=chart_monitor_once, name="chart-monitor-now", daemon=True).start()
+    return {"rules": [dict(row) for row in rows]}
+
+
+@APP.patch("/api/admin/chart-monitors")
+async def update_chart_monitors(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    chart_name = str(payload.get("chart_name") or "").strip()
+    if chart_name not in {"douban_tv", "douban_movies", "tv", "movies", "trending"}:
+        raise HTTPException(400, "榜单类型无效")
+    top_n = max(1, min(100, int(payload.get("top_n") or 10)))
+    enabled = 1 if payload.get("enabled") else 0
+    with db() as connection:
+        connection.execute(
+            "INSERT INTO chart_monitor_rules(chart_name, top_n, enabled, updated_at) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(chart_name) DO UPDATE SET top_n=excluded.top_n, enabled=excluded.enabled, updated_at=excluded.updated_at",
+            (chart_name, top_n, enabled, now_iso()),
+        )
+        rows = connection.execute("SELECT * FROM chart_monitor_rules ORDER BY id").fetchall()
+    return {"rules": [dict(row) for row in rows]}
+
+
+@APP.get("/api/admin/chart-monitor-items")
+def get_chart_monitor_items(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM chart_monitor_items ORDER BY in_chart DESC, chart_name, current_rank, title"
+        ).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
+@APP.post("/api/admin/chart-monitor-items/sync")
+async def sync_chart_monitor_items(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    payload = await request.json()
+    chart_name = str(payload.get("chart_name") or "").strip()
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    seen: set[int] = set()
+    with db() as connection:
+        for index, item in enumerate(items[:100], start=1):
+            tmdb_id = int(item.get("tmdb_id") or 0)
+            if tmdb_id <= 0:
+                continue
+            seen.add(tmdb_id)
+            connection.execute(
+                "INSERT INTO chart_monitor_items(chart_name, tmdb_id, title, media_type, current_rank, in_chart, last_seen_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?) "
+                "ON CONFLICT(chart_name, tmdb_id) DO UPDATE SET title=excluded.title, media_type=excluded.media_type, current_rank=excluded.current_rank, in_chart=1, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at",
+                (chart_name, tmdb_id, str(item.get("title") or ""), str(item.get("media_type") or "tv"), index, now_iso(), now_iso()),
+            )
+        rows = connection.execute("SELECT id, tmdb_id FROM chart_monitor_items WHERE chart_name = ?", (chart_name,)).fetchall()
+        for row in rows:
+            if int(row["tmdb_id"]) not in seen:
+                connection.execute("UPDATE chart_monitor_items SET in_chart = 0, current_rank = 0, updated_at = ? WHERE id = ?", (now_iso(), int(row["id"])))
+    return {"ok": True}
+
+
+@APP.patch("/api/admin/chart-monitor-items/{item_id}")
+async def update_chart_monitor_item(item_id: int, request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
+    require_admin(movie_session)
+    keep = 1 if (await request.json()).get("keep_monitoring") else 0
+    with db() as connection:
+        connection.execute("UPDATE chart_monitor_items SET keep_monitoring = ?, updated_at = ? WHERE id = ?", (keep, now_iso(), item_id))
+        if not keep:
+            row = connection.execute("SELECT tmdb_id FROM chart_monitor_items WHERE id = ?", (item_id,)).fetchone()
+            admin = connection.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
+            if row and admin:
+                connection.execute(
+                    "UPDATE tv_follows SET active = 0, updated_at = ? WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'",
+                    (now_iso(), int(admin["id"]), int(row["tmdb_id"])),
+                )
+    return {"ok": True}
+
+
 @APP.get("/api/admin/telegram-channel-monitors")
 def get_telegram_channel_monitors(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
     require_admin(movie_session)
@@ -13934,6 +14315,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "dian_follow_interval",
             "telegram_channel_monitor_interval",
+            "telegram_channel_history_backfill_limit",
             "p115_target_cid", "p115_target_name",
             "p123_delivery_mode", "p123_staging_cid", "p123_staging_name",
             "wecom_corp_id", "wecom_agent_id",
@@ -13958,6 +14340,17 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             if interval < 300 or interval > 21600:
                 raise HTTPException(400, "频道监控间隔必须在5分钟到6小时之间")
             set_setting(connection, "telegram_channel_monitor_interval", str(interval))
+        if "telegram_channel_history_backfill_limit" in payload:
+            history_limit = int(payload["telegram_channel_history_backfill_limit"])
+            if history_limit < 10 or history_limit > 1000:
+                raise HTTPException(400, "频道历史补扫数量必须在10到1000之间")
+            set_setting(connection, "telegram_channel_history_backfill_limit", str(history_limit))
+        if "telegram_channel_history_backfill_enabled" in payload:
+            set_setting(
+                connection,
+                "telegram_channel_history_backfill_enabled",
+                "1" if payload["telegram_channel_history_backfill_enabled"] else "0",
+            )
         for key, destination in (
             ("emby_library_notification_enabled", "p115"),
             ("p123_emby_library_notification_enabled", "p123"),
