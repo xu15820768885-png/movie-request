@@ -604,7 +604,6 @@
     }
     @media (hover: none), (pointer: coarse) { .poster::after { opacity: .82; } }
 
-    .chart-shell{display:flex;flex-direction:column;gap:14px}.chart-source-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.chart-source-tab{display:flex;align-items:center;gap:12px;text-align:left;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel);color:var(--text);cursor:pointer;transition:.18s}.chart-source-tab:hover,.chart-source-tab.active{border-color:var(--accent);box-shadow:0 8px 24px rgba(0,0,0,.16);transform:translateY(-1px)}.chart-source-tab.active{background:linear-gradient(135deg,rgba(255,145,88,.16),transparent)}.chart-source-tab>span:nth-child(2){display:flex;flex-direction:column;gap:3px;flex:1}.chart-source-tab strong{font-size:17px}.chart-source-tab small,.chart-source-tab em{font-size:12px;color:var(--muted);font-style:normal}.chart-source-icon{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;font-size:21px;font-weight:800;color:#fff}.chart-source-icon.douban{background:#42b883}.chart-source-icon.maoyan{background:#ee3d36}.chart-source-icon.tencent{background:#27b8a5}.chart-category-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.chart-category-card{display:flex;flex-direction:column;gap:7px;padding:14px;border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);text-align:left;cursor:pointer}.chart-category-card.active{border-color:var(--accent);background:rgba(255,145,88,.1)}.chart-category-card strong{font-size:15px}.chart-category-card small{color:var(--muted);font-size:12px}.chart-control-panel{padding:18px;border:1px solid var(--line);border-radius:16px;background:var(--panel)}.chart-control-title,.chart-actions{display:flex;align-items:center;justify-content:space-between;gap:14px}.chart-control-title h3{margin:0 0 4px}.chart-control-title span,.chart-actions>span{font-size:12px;color:var(--muted)}.status-pill{padding:5px 10px;border-radius:999px;background:rgba(66,184,131,.14);color:#6ed6a2;font-size:12px;white-space:nowrap}.chart-control-grid{display:grid;grid-template-columns:1.1fr .9fr 1.5fr;gap:12px;margin:18px 0}.chart-control-grid>label,.chart-api-status{display:flex;flex-direction:column;gap:7px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.chart-control-grid input[type=number]{width:100%;box-sizing:border-box}.chart-control-grid small,.chart-api-status span{color:var(--muted);font-size:12px}.chart-toggle-label input{width:42px;height:22px;accent-color:var(--accent)}.chart-rank-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.chart-rank-card{display:flex;gap:14px;padding:14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);min-height:210px}.chart-rank-card:hover{border-color:var(--accent)}.chart-rank-poster{width:118px;min-width:118px;height:174px;border-radius:10px;object-fit:cover;background:var(--surface)}.chart-rank-number{font-size:32px;font-weight:800;color:var(--accent);line-height:1}.chart-rank-body{display:flex;flex-direction:column;gap:9px;min-width:0}.chart-rank-body h3{margin:0;font-size:18px}.chart-rank-meta{color:var(--muted);font-size:13px}.chart-rank-tags{display:flex;flex-wrap:wrap;gap:6px}.chart-rank-tags span{padding:4px 8px;border-radius:999px;background:var(--surface);color:var(--muted);font-size:11px}.chart-rank-body .btn{margin-top:auto;align-self:flex-start}.chart-monitor-table{display:flex;flex-direction:column;gap:8px}.chart-monitor-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}.chart-monitor-row .muted{font-size:12px}.chart-monitor-row label{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;white-space:nowrap}@media(max-width:800px){.chart-source-tabs,.chart-category-grid,.chart-rank-grid{grid-template-columns:1fr}.chart-control-grid{grid-template-columns:1fr}.chart-actions{align-items:flex-start;flex-direction:column}.chart-rank-card{min-height:170px}.chart-rank-poster{width:92px;min-width:92px;height:138px}}
 </style>
 </head>
 <body translate="no">
@@ -660,7 +659,7 @@
       <nav class="tabs" aria-label="映单功能导航">
         <div class="nav-group"><span class="nav-group-label">看片</span><button id="discoverTab" class="tab active" data-view="discover">找片</button><button id="followTab" class="tab hidden" data-view="follow">我的追更 <span id="followCount"></span></button><button id="calendarTab" class="tab hidden" data-view="calendar">追剧日历</button></div>
         <div class="nav-group"><span class="nav-group-label">请求</span><button id="mineTab" class="tab" data-view="mine">我的请求 <span id="mineCount"></span></button><button id="adminTab" class="tab hidden" data-view="admin">成员需求 <span id="adminCount"></span></button></div>
-        <div class="nav-group admin-nav-group"><span class="nav-group-label">运营</span><button id="followLogTab" class="tab hidden" data-view="followLog">处理记录</button><button id="storageTab" class="tab hidden" data-view="storage">资源中心</button><button id="chartMonitorTab" class="tab hidden" data-view="chartMonitor">榜单监控</button><button id="systemLogTab" class="tab hidden" data-view="systemLog">系统日志</button><button id="familyTab" class="tab hidden" data-view="family">成员账号</button><button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button></div>
+        <div class="nav-group admin-nav-group"><span class="nav-group-label">运营</span><button id="followLogTab" class="tab hidden" data-view="followLog">处理记录</button><button id="storageTab" class="tab hidden" data-view="storage">资源中心</button><button id="systemLogTab" class="tab hidden" data-view="systemLog">系统日志</button><button id="familyTab" class="tab hidden" data-view="family">成员账号</button><button id="settingsTab" class="tab hidden" data-view="settings">系统设置</button></div>
       </nav>
       <div id="sectionContext" class="section-context"><strong>看片库</strong><span>搜索影片，确认海报、年份和类型后再提交</span></div>
 
@@ -688,31 +687,6 @@
           <summary><div class="message-inbox-head"><div><h3>影巢更新通知</h3><div class="muted" style="font-size:11px">不常用，展开后查看影巢实际推送的站内信及处理结果</div></div><span id="hdhiveMessageCount" class="muted" style="font-size:11px"></span></div></summary>
           <div id="hdhiveMessageList" class="message-list"><div class="empty">展开后读取影巢更新通知</div></div>
         </details>
-      </section>
-      <section id="chartMonitorView" class="view hidden">
-        <div class="section-head chart-page-head"><div><h2>榜单监控</h2><span>参考 PanSave 与 TTD：选择来源、分类和前 N 名，命中后自动建立频道追更。</span></div><button id="chartRefresh" class="btn btn-small" type="button">↻ 刷新榜单</button></div>
-        <div class="chart-shell">
-          <div class="chart-source-tabs" id="chartSourceTabs">
-            <button class="chart-source-tab active" data-chart-source="douban"><span class="chart-source-icon douban">豆</span><span><strong>豆瓣</strong><small>热门剧集 / 电影</small></span><em>公开榜单</em></button>
-            <button class="chart-source-tab" data-chart-source="maoyan"><span class="chart-source-icon maoyan">猫</span><span><strong>猫眼</strong><small>电视剧 / 电影</small></span><em>公开榜单适配</em></button>
-            <button class="chart-source-tab" data-chart-source="tencent"><span class="chart-source-icon tencent">腾</span><span><strong>腾讯视频</strong><small>热播电视剧</small></span><em>公开榜单适配</em></button>
-          </div>
-          <div class="chart-category-grid" id="chartCategoryGrid"></div>
-          <div class="chart-control-panel">
-            <div class="chart-control-title"><div><h3 id="chartConfigTitle">榜单设置</h3><span id="chartConfigHint">榜单只负责发现资源，频道解锁仍按你的追更和频道设置执行。</span></div><span id="chartSourceStatus" class="status-pill">公开榜单</span></div>
-            <div class="chart-control-grid">
-              <label>自动监控前几名<input id="chartTopN" type="number" min="1" max="100" step="1" value="10" inputmode="numeric" placeholder="例如 8、10、15"><small>可填写任意 1–100 的整数</small></label>
-              <label class="chart-toggle-label"><span>榜单监控</span><input id="chartAutoEnabled" type="checkbox"><small>开启后自动建立 / 维护追更</small></label>
-              <div class="chart-api-status"><strong>Telegram 频道</strong><span>使用“频道追更”中已启用的影巢 / 癫影频道</span></div>
-            </div>
-            <div class="chart-actions"><button id="chartSave" class="btn btn-primary" type="button">保存并开始监控</button><span>不会绕过资源权限；解锁仍消耗对应账号积分。</span></div>
-          </div>
-        </div>
-        <div class="section-head chart-results-head"><div><h3 id="chartResultsTitle">豆瓣热门剧集</h3><span id="chartResultsHint">榜单前 10 名 · 匹配 TMDB 后可加入频道追更</span></div><span id="chartResultsStatus" class="muted"></span></div>
-        <div id="chartResults" class="chart-rank-grid"><div class="empty">正在读取榜单…</div></div>
-        <div class="section-head chart-monitor-head"><div><h3>监控清单</h3><span>掉出榜单的未完结资源会继续显示；关闭“继续监控”后才停止追更。</span></div></div>
-        <div id="chartMonitorItems" class="chart-monitor-table"><div class="empty">尚未建立监控清单</div></div>
-        <select id="chartSelect" class="hidden" aria-hidden="true"><option value="douban_tv">豆瓣热门剧集</option></select>
       </section>
       <section id="systemLogView" class="view hidden">
         <div class="section-head"><div><h2>系统日志</h2><span>保留最新 5000 行，便于定位 Telegram、榜单、解锁和转存问题。</span></div><div class="integration-actions"><button id="systemLogRefresh" class="btn btn-small" type="button">立即刷新</button><a id="systemLogDownload" class="btn btn-primary btn-small" href="/api/admin/system-log/download">下载日志</a></div></div>
@@ -1078,7 +1052,7 @@
     function showApp() {
       $('authOverlay').classList.add('hidden'); $('app').classList.remove('hidden');
       $('userLabel').textContent=currentUser.display_name; $('avatar').textContent=(currentUser.display_name||'家').slice(0,1);
-      const admin=currentUser.role==='admin'; ['adminTab','followLogTab','storageTab','chartMonitorTab','systemLogTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
+      const admin=currentUser.role==='admin'; ['adminTab','followLogTab','storageTab','systemLogTab','familyTab','settingsTab'].forEach(id=>$(id).classList.toggle('hidden',!admin));
       document.querySelector('.admin-nav-group').classList.toggle('hidden',!admin);
       $('discoverTab').classList.remove('hidden'); $('mineTab').classList.toggle('hidden',admin);
       $('followTab').classList.remove('hidden');
@@ -1093,9 +1067,9 @@
     function switchView(name) {
       document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.view===name));
       document.querySelectorAll('.view').forEach(view=>view.classList.add('hidden')); $(`${name}View`).classList.remove('hidden');
-      const context={discover:['看片库','搜索影片，确认海报、年份和类型后再提交'],follow:['我的追更','按剧集查看最新集数、转存进度和 Emby 入库状态'],calendar:['追剧日历','按播出日期查看正在追更的剧集'],mine:['我的请求','查看自己提交的影片和管理员处理进度'],admin:['成员需求','集中处理家人的求片请求，并保留完整历史'],followLog:['处理记录','追踪识别、解锁、转存和入库的每一步'],storage:['资源中心','配置资源来源、频道追更和网盘投递线路'],chartMonitor:['榜单监控','从豆瓣等榜单选择前几名，建立可控的频道追更'],systemLog:['系统日志','查看映单当前正在执行的操作和错误'],family:['成员账号','管理家庭成员的账号、权限和默认网盘'],settings:['系统设置','调整通知、目录和站点基础选项']}[name]||['映单','家庭片库工作台'];
+      const context={discover:['看片库','搜索影片，确认海报、年份和类型后再提交'],follow:['我的追更','按剧集查看最新集数、转存进度和 Emby 入库状态'],calendar:['追剧日历','按播出日期查看正在追更的剧集'],mine:['我的请求','查看自己提交的影片和管理员处理进度'],admin:['成员需求','集中处理家人的求片请求，并保留完整历史'],followLog:['处理记录','追踪识别、解锁、转存和入库的每一步'],storage:['资源中心','配置资源来源、频道追更和网盘投递线路'],systemLog:['系统日志','查看映单当前正在执行的操作和错误'],family:['成员账号','管理家庭成员的账号、权限和默认网盘'],settings:['系统设置','调整通知、目录和站点基础选项']}[name]||['映单','家庭片库工作台'];
       $('sectionContext').innerHTML=`<strong>${context[0]}</strong><span>${context[1]}</span>`;
-      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='calendar')loadCalendar(); if(name==='followLog')loadFollowEvents(); if(name==='chartMonitor')loadChartMonitor(); if(name==='systemLog')loadSystemLog(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
+      if(name==='mine'||name==='admin') loadRequests(); if(name==='follow') loadFollows(); if(name==='calendar')loadCalendar(); if(name==='followLog')loadFollowEvents(); if(name==='systemLog')loadSystemLog(); if(name==='family') loadUsers(); if(name==='settings') loadSettings(); if(name==='storage'){loadIntegrations();loadHealth();}
     }
     function calendarMonthKey(date){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}`;}
     async function loadCalendar(){
@@ -1687,37 +1661,6 @@
         }).join(''):'<div class="empty">当前没有需要关注的影片处理记录。例行后台检查不会显示在这里。</div>';
       } catch(error) {root.innerHTML=`<div class="empty">处理记录读取失败：${escapeHtml(error.message)}</div>`;}
     }
-    async function loadChartMonitor() {
-      const sources={
-        douban:{label:'豆瓣',items:[['douban_tv','热门剧集','电视剧榜'],['douban_movies','热门电影','电影榜']]},
-        maoyan:{label:'猫眼',items:[['maoyan_tv','电视剧热度','电视剧'],['maoyan_movies','电影榜','电影']]},
-        tencent:{label:'腾讯视频',items:[['tencent_tv','热播电视剧','电视剧']]}
-      };
-      let sourceKey=window.chartSourceKey||'douban';
-      let chartName=$('chartSelect').value||sources[sourceKey].items[0][0];
-      const renderCategories=()=>{
-        const source=sources[sourceKey];
-        $('chartCategoryGrid').innerHTML=source.items.map(([name,title,sub])=>`<button class="chart-category-card ${name===chartName?'active':''}" data-chart-name="${name}"><strong>${title}</strong><small>${sub} · 点击查看榜单</small></button>`).join('');
-        $('chartSourceTabs').querySelectorAll('[data-chart-source]').forEach(button=>button.classList.toggle('active',button.dataset.chartSource===sourceKey));
-        $('chartCategoryGrid').querySelectorAll('[data-chart-name]').forEach(button=>button.onclick=()=>{chartName=button.dataset.chartName;$('chartSelect').value=chartName;renderCategories();loadChartMonitorData();});
-        $('chartSourceTabs').querySelectorAll('[data-chart-source]').forEach(button=>button.onclick=()=>{sourceKey=button.dataset.chartSource;window.chartSourceKey=sourceKey;chartName=sources[sourceKey].items[0][0];$('chartSelect').value=chartName;renderCategories();loadChartMonitorData();});
-      };
-      const loadChartMonitorData=async()=>{
-        renderCategories();
-        if(!preview){try{const config=await api('/api/admin/chart-monitors');const current=(config.rules||[]).find(item=>item.chart_name===chartName);$('chartTopN').value=String(current?.top_n||10);$('chartAutoEnabled').checked=Boolean(current?.enabled);}catch(error){}}
-        const root=$('chartResults');root.innerHTML='<div class="empty">正在读取榜单…</div>';
-        try{
-          const data=preview?{title:'豆瓣热门剧集',source_label:'豆瓣',results:demoMovies.slice(0,10).map((item,i)=>({...item,rank:i+1,source:'douban'}))}:await api(`/api/charts/${chartName}`);
-          const items=(data.results||[]).slice(0,Math.max(1,Math.min(100,Number($('chartTopN').value||10))));
-          $('chartResultsTitle').textContent=data.title||'榜单';$('chartResultsHint').textContent=`榜单前 ${items.length} 名 · 匹配 TMDB 后可加入频道追更`;$('chartResultsStatus').textContent=data.source_status||data.source_label||'';$('chartConfigTitle').textContent=`${data.title||'榜单'}设置`;$('chartSourceStatus').textContent=data.source_type==='public_adapter'?'公开榜单适配':'公开榜单';
-          root.innerHTML=items.length?items.map((item,index)=>{const poster=item.poster_url||'';const matched=Number(item.tmdb_id||0)>0;const tags=[item.media_type==='tv'?'剧集':'电影',item.platform||data.source_label||'',matched?'已关联 TMDB':'待匹配 TMDB'].filter(Boolean);return `<article class="chart-rank-card"><div class="chart-rank-number">${String(index+1).padStart(2,'0')}</div>${poster?`<img class="chart-rank-poster" src="${escapeHtml(poster)}" alt="${escapeHtml(item.title||'')}海报" loading="lazy">`:'<div class="chart-rank-poster poster-empty">映</div>'}<div class="chart-rank-body"><h3>${escapeHtml(item.title||'未命名')}</h3><div class="chart-rank-meta">${escapeHtml(item.year||'')} ${item.score?` · 热度 ${escapeHtml(String(item.score))}`:''}</div><div class="chart-rank-tags">${tags.map(tag=>`<span>${escapeHtml(String(tag))}</span>`).join('')}</div><button class="btn btn-small btn-primary" data-chart-follow='${escapeHtml(JSON.stringify(item))}'>加入频道追更</button></div></article>`;}).join(''):'<div class="empty">当前榜单没有可展示内容</div>';
-          root.querySelectorAll('[data-chart-follow]').forEach(button=>button.onclick=async()=>{const item=JSON.parse(button.dataset.chartFollow);if(preview)return toast('预览模式：已加入频道追更');try{const resolved=item.source==='douban'?await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`):item;if(Number(resolved.tmdb_id||0)){await api('/api/follows',{method:'POST',body:JSON.stringify({tmdb_id:resolved.tmdb_id,media_type:resolved.media_type||item.media_type})});toast(`《${item.title}》已加入追更`);}else toast('暂未匹配到 TMDB，请稍后重试',true);}catch(error){toast(error.message,true);}});
-          if(!preview){const syncItems=[];for(const item of items){if(item.source==='douban'&&item.douban_id){try{syncItems.push({...await api(`/api/douban/resolve/${item.media_type}/${item.douban_id}`),title:item.title});}catch(error){}}else if(item.tmdb_id)syncItems.push(item);}try{await api('/api/admin/chart-monitor-items/sync',{method:'POST',body:JSON.stringify({chart_name:chartName,items:syncItems})});}catch(error){}}
-          const monitor=preview?{items:[]}:await api('/api/admin/chart-monitor-items');$('chartMonitorItems').innerHTML=(monitor.items||[]).map(item=>`<div class="chart-monitor-row"><div><strong>${escapeHtml(item.title)}</strong><div class="muted">${item.in_chart?`当前榜单第${item.current_rank}名`:'已掉出当前榜单'} · ${item.media_type==='tv'?'剧集':'电影'} · ${escapeHtml(item.chart_name)}</div></div><label>继续监控<input type="checkbox" data-chart-keep="${item.id}" ${item.keep_monitoring?'checked':''}></label></div>`).join('')||'<div class="empty">尚未建立监控清单</div>';$('chartMonitorItems').querySelectorAll('[data-chart-keep]').forEach(input=>input.onchange=async()=>{try{await api(`/api/admin/chart-monitor-items/${input.dataset.chartKeep}`,{method:'PATCH',body:JSON.stringify({keep_monitoring:input.checked})});}catch(error){toast(error.message,true);}});
-        }catch(error){root.innerHTML=`<div class="empty">榜单读取失败：${escapeHtml(error.message)}</div>`;}
-      };
-      renderCategories();await loadChartMonitorData();
-    }
     async function loadSystemLog() { try { const data=preview?{lines:['2026-10-01 INFO [telegram-channel-monitor] 等待下一轮频道检查','2026-10-01 INFO [app] 映单后台已启动']}:await api('/api/admin/system-log?lines=5000'); $('systemLogContent').textContent=(data.lines||[]).join('\n'); $('systemLogSummary').textContent=`当前显示 ${Number(data.total||0)} 行；下载按钮可获取完整日志文件`; const root=$('systemLogContent'); root.scrollTop=root.scrollHeight; } catch(error) { $('systemLogContent').textContent=error.message; } }
     async function refreshFollowEmbyProgress(follows) {
       if(preview)return;
@@ -2180,8 +2123,6 @@
     $('embyTest').onclick=async()=>{if(preview)return toast('Emby 连接成功，共匹配到 428 条资源');try{const result=await api('/api/admin/emby-test',{method:'POST'});toast(`${result.server_name} 连接成功，共匹配 ${result.library_tmdb_count} 条资源`);}catch(error){toast(error.message,true);}};
     $('embySync').onclick=async()=>{if(preview)return toast('Emby 检查完成，已标记1条需求为已入库');try{const result=await api('/api/admin/emby-sync',{method:'POST'});toast(`检查完成，已标记${result.completed}条需求为已入库`);loadRequests();loadActivity();}catch(error){toast(error.message,true);}};
     $('testAllIntegrations').onclick=testAllIntegrations;
-    $('chartRefresh').onclick=loadChartMonitor; $('chartSelect').onchange=loadChartMonitor; $('chartTopN').onchange=loadChartMonitor;
-    $('chartSave').onclick=async()=>{if(preview)return toast('预览模式：榜单监控设置已保存');try{await api('/api/admin/chart-monitors',{method:'PATCH',body:JSON.stringify({chart_name:$('chartSelect').value,top_n:Number($('chartTopN').value),enabled:$('chartAutoEnabled').checked})});toast('榜单监控设置已保存');}catch(error){toast(error.message,true);}};
     $('systemLogRefresh').onclick=loadSystemLog;
     document.querySelectorAll('[data-test-integration]').forEach(button=>button.onclick=()=>testIntegration(button.dataset.testIntegration,button));
     $('integrationForm').onsubmit=async event=>{event.preventDefault();if(preview)return toast('预览模式：癫影追更与签到配置已保存');try{await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({dian_base_url:$('dianBaseUrl').value,dian_api_key:$('dianApiKey').value,dian_signin_enabled:$('dianSigninEnabled').checked,dian_signin_time:$('dianSigninTime').value,dian_signin_mode:$('dianSigninMode').value,dian_follow_enabled:$('dianFollowEnabled').checked,dian_follow_interval:Number($('dianFollowInterval').value),p115_app:$('p115App').value})});toast('癫影追更与签到配置已保存');loadIntegrations();}catch(error){toast(error.message,true);}};

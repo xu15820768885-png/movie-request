@@ -9582,7 +9582,6 @@ def startup() -> None:
     Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=telegram_channel_monitor_loop, name="telegram-channel-monitor", daemon=True).start()
-    Thread(target=chart_monitor_loop, name="chart-monitor", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(
         target=notification_outbox_loop,
@@ -10480,79 +10479,6 @@ def resolve_chart_item_to_tmdb(item: dict[str, Any]) -> dict[str, Any]:
     matched = candidates[0]
     return {**item, "tmdb_id": int(matched.get("id") or 0), "poster_path": matched.get("poster_path") or item.get("poster_path") or "", "media_type": media_type}
 
-
-def chart_monitor_once() -> dict[str, int]:
-    with db() as connection:
-        rules = [dict(row) for row in connection.execute("SELECT * FROM chart_monitor_rules WHERE enabled = 1").fetchall()]
-        admin = connection.execute("SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id LIMIT 1").fetchone()
-    if not admin:
-        return {"rules": 0, "created": 0, "kept": 0}
-    created = kept = 0
-    for rule in rules:
-        try:
-            results = chart_results(str(rule["chart_name"]), None, force_refresh=True).get("results", [])[:int(rule["top_n"] or 10)]
-            resolved = [resolve_chart_item_to_tmdb(item) for item in results]
-            resolved = [item for item in resolved if int(item.get("tmdb_id") or 0)]
-            seen = {int(item["tmdb_id"]) for item in resolved}
-            with db() as connection:
-                for rank, item in enumerate(resolved, start=1):
-                    tmdb_id = int(item["tmdb_id"])
-                    connection.execute(
-                        "INSERT INTO chart_monitor_items(chart_name, tmdb_id, title, media_type, current_rank, in_chart, last_seen_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(chart_name, tmdb_id) DO UPDATE SET title=excluded.title, media_type=excluded.media_type, current_rank=excluded.current_rank, in_chart=1, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at",
-                        (rule["chart_name"], tmdb_id, item.get("title") or "", item.get("media_type") or "tv", rank, now_iso(), now_iso()),
-                    )
-                    existing = connection.execute(
-                        "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? "
-                        "AND active = 1 AND mode != 'chart' AND monitor_mode IN ('channel', 'both')",
-                        (int(admin["id"]), tmdb_id),
-                    ).fetchone()
-                    chart_follow = connection.execute(
-                        "SELECT id FROM tv_follows WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'",
-                        (int(admin["id"]), tmdb_id),
-                    ).fetchone()
-                    if not existing and not chart_follow:
-                        connection.execute(
-                            "INSERT INTO tv_follows(user_id, tmdb_id, media_type, title, original_title, year, poster_path, mode, monitor_mode, baseline_episode, current_emby_episode, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'chart', 'channel', 0, 0, ?, ?)",
-                            (int(admin["id"]), tmdb_id, item.get("media_type") or "tv", item.get("title") or "", item.get("original_title") or "", str(item.get("year") or "")[:4], item.get("poster_path") or "", now_iso(), now_iso()),
-                        )
-                        created += 1
-                    elif chart_follow:
-                        item_state = connection.execute(
-                            "SELECT keep_monitoring FROM chart_monitor_items WHERE chart_name = ? AND tmdb_id = ?",
-                            (rule["chart_name"], tmdb_id),
-                        ).fetchone()
-                        if item_state and int(item_state["keep_monitoring"]):
-                            connection.execute(
-                                "UPDATE tv_follows SET active = 1, monitor_mode = 'channel', updated_at = ? WHERE id = ?",
-                                (now_iso(), int(chart_follow["id"])),
-                            )
-                    kept += 1
-                old = connection.execute("SELECT * FROM chart_monitor_items WHERE chart_name = ?", (rule["chart_name"],)).fetchall()
-                for row in old:
-                    if int(row["tmdb_id"]) not in seen:
-                        connection.execute("UPDATE chart_monitor_items SET in_chart = 0, current_rank = 0, updated_at = ? WHERE id = ?", (now_iso(), int(row["id"])))
-                        if not int(row["keep_monitoring"]):
-                            connection.execute("UPDATE tv_follows SET active = 0, updated_at = ? WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'", (now_iso(), int(admin["id"]), int(row["tmdb_id"])))
-        except Exception as error:
-            LOGGER.exception("[榜单监控] chart=%s failed: %s", rule.get("chart_name"), error)
-    return {"rules": len(rules), "created": created, "kept": kept}
-
-
-def get_chart_monitors_snapshot() -> list[dict[str, Any]]:
-    with db() as connection:
-        return [dict(row) for row in connection.execute("SELECT * FROM chart_monitor_rules WHERE enabled = 1").fetchall()]
-
-
-def chart_monitor_loop() -> None:
-    while True:
-        try:
-            settings = get_chart_monitors_snapshot()
-            if settings:
-                LOGGER.info("[榜单监控] 开始刷新 %s 个榜单", len(settings))
-                chart_monitor_once()
-        except Exception:
-            LOGGER.exception("[榜单监控] 后台刷新失败")
-        time.sleep(3600)
 
 
 @APP.get("/api/douban/resolve/{media_type}/{douban_id}")
@@ -14177,87 +14103,6 @@ def download_system_log(movie_session: Optional[str] = Cookie(default=None)) -> 
     if not LOG_PATH.exists():
         LOG_PATH.write_text("", encoding="utf-8")
     return FileResponse(LOG_PATH, media_type="text/plain", filename="movie-request.log")
-
-
-@APP.get("/api/admin/chart-monitors")
-def get_chart_monitors(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    with db() as connection:
-        rows = connection.execute("SELECT * FROM chart_monitor_rules ORDER BY id").fetchall()
-    if enabled:
-        Thread(target=chart_monitor_once, name="chart-monitor-now", daemon=True).start()
-    return {"rules": [dict(row) for row in rows]}
-
-
-@APP.patch("/api/admin/chart-monitors")
-async def update_chart_monitors(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    payload = await request.json()
-    chart_name = str(payload.get("chart_name") or "").strip()
-    if chart_name not in {"douban_tv", "douban_movies", "maoyan_tv", "maoyan_movies", "tencent_tv", "tv", "movies", "trending"}:
-        raise HTTPException(400, "榜单类型无效")
-    top_n = max(1, min(100, int(payload.get("top_n") or 10)))
-    enabled = 1 if payload.get("enabled") else 0
-    with db() as connection:
-        connection.execute(
-            "INSERT INTO chart_monitor_rules(chart_name, top_n, enabled, updated_at) VALUES(?, ?, ?, ?) "
-            "ON CONFLICT(chart_name) DO UPDATE SET top_n=excluded.top_n, enabled=excluded.enabled, updated_at=excluded.updated_at",
-            (chart_name, top_n, enabled, now_iso()),
-        )
-        rows = connection.execute("SELECT * FROM chart_monitor_rules ORDER BY id").fetchall()
-    return {"rules": [dict(row) for row in rows]}
-
-
-@APP.get("/api/admin/chart-monitor-items")
-def get_chart_monitor_items(movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    with db() as connection:
-        rows = connection.execute(
-            "SELECT * FROM chart_monitor_items ORDER BY in_chart DESC, chart_name, current_rank, title"
-        ).fetchall()
-    return {"items": [dict(row) for row in rows]}
-
-
-@APP.post("/api/admin/chart-monitor-items/sync")
-async def sync_chart_monitor_items(request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    payload = await request.json()
-    chart_name = str(payload.get("chart_name") or "").strip()
-    items = payload.get("items") if isinstance(payload.get("items"), list) else []
-    seen: set[int] = set()
-    with db() as connection:
-        for index, item in enumerate(items[:100], start=1):
-            tmdb_id = int(item.get("tmdb_id") or 0)
-            if tmdb_id <= 0:
-                continue
-            seen.add(tmdb_id)
-            connection.execute(
-                "INSERT INTO chart_monitor_items(chart_name, tmdb_id, title, media_type, current_rank, in_chart, last_seen_at, updated_at) VALUES(?, ?, ?, ?, ?, 1, ?, ?) "
-                "ON CONFLICT(chart_name, tmdb_id) DO UPDATE SET title=excluded.title, media_type=excluded.media_type, current_rank=excluded.current_rank, in_chart=1, last_seen_at=excluded.last_seen_at, updated_at=excluded.updated_at",
-                (chart_name, tmdb_id, str(item.get("title") or ""), str(item.get("media_type") or "tv"), index, now_iso(), now_iso()),
-            )
-        rows = connection.execute("SELECT id, tmdb_id FROM chart_monitor_items WHERE chart_name = ?", (chart_name,)).fetchall()
-        for row in rows:
-            if int(row["tmdb_id"]) not in seen:
-                connection.execute("UPDATE chart_monitor_items SET in_chart = 0, current_rank = 0, updated_at = ? WHERE id = ?", (now_iso(), int(row["id"])))
-    return {"ok": True}
-
-
-@APP.patch("/api/admin/chart-monitor-items/{item_id}")
-async def update_chart_monitor_item(item_id: int, request: Request, movie_session: Optional[str] = Cookie(default=None)) -> dict[str, Any]:
-    require_admin(movie_session)
-    keep = 1 if (await request.json()).get("keep_monitoring") else 0
-    with db() as connection:
-        connection.execute("UPDATE chart_monitor_items SET keep_monitoring = ?, updated_at = ? WHERE id = ?", (keep, now_iso(), item_id))
-        if not keep:
-            row = connection.execute("SELECT tmdb_id FROM chart_monitor_items WHERE id = ?", (item_id,)).fetchone()
-            admin = connection.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
-            if row and admin:
-                connection.execute(
-                    "UPDATE tv_follows SET active = 0, updated_at = ? WHERE user_id = ? AND tmdb_id = ? AND mode = 'chart'",
-                    (now_iso(), int(admin["id"]), int(row["tmdb_id"])),
-                )
-    return {"ok": True}
 
 
 @APP.get("/api/admin/telegram-channel-monitors")
