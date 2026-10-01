@@ -2190,8 +2190,20 @@ async def process_channel_hdhive_event(
     season = int(payload.get("season_number") or 1)
     emby_episodes: dict[int, set[int]] = {}
     if any(str(follow["media_type"]) == "tv" for follow in follows):
+        with db() as connection:
+            user_row = connection.execute(
+                "SELECT storage_destination FROM users WHERE id = ?",
+                (int(follows[0]["user_id"]),),
+            ).fetchone()
+        emby_destination = storage_destination(
+            user_row["storage_destination"] if user_row else "p115"
+        )
         progress = await asyncio.to_thread(
-            emby_series_episode_progress, tmdb_id, True, True, "p115"
+            destination_episode_progress,
+            emby_destination,
+            tmdb_id,
+            known_in_library=True,
+            force=True,
         )
         emby_episodes = {
             int(raw_season): {int(item) for item in raw_episodes}
@@ -2320,8 +2332,20 @@ async def process_channel_dian_event(
     season = int(payload.get("season_number") or 1)
     emby_episodes: dict[int, set[int]] = {}
     if any(str(follow["media_type"]) == "tv" for follow in follows):
+        with db() as connection:
+            user_row = connection.execute(
+                "SELECT storage_destination FROM users WHERE id = ?",
+                (int(follows[0]["user_id"]),),
+            ).fetchone()
+        emby_destination = storage_destination(
+            user_row["storage_destination"] if user_row else "p115"
+        )
         progress = await asyncio.to_thread(
-            emby_series_episode_progress, tmdb_id, True, True, "p115"
+            destination_episode_progress,
+            emby_destination,
+            tmdb_id,
+            known_in_library=True,
+            force=True,
         )
         emby_episodes = {
             int(raw_season): {int(item) for item in raw_episodes}
