@@ -2152,17 +2152,19 @@ def channel_monitor_settings() -> dict[str, Any]:
         enabled = setting(connection, "telegram_channel_monitor_enabled") == "1"
         history_backfill = setting(connection, "telegram_channel_history_backfill_enabled") == "1"
         history_limit = int(setting(connection, "telegram_channel_history_backfill_limit") or 100)
+        transfer_mode = setting(connection, "telegram_channel_transfer_mode") or "all"
     return {
         "enabled": enabled,
         "interval": max(300, min(21600, interval)),
         "history_backfill": history_backfill,
         "history_limit": max(10, min(1000, history_limit)),
+        "transfer_mode": transfer_mode if transfer_mode in {"all", "missing"} else "all",
         "monitors": [dict(row) for row in rows],
     }
 
 
 async def process_channel_hdhive_event(
-    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False,
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False, transfer_mode: str = "missing",
 ) -> str:
     tmdb_id = int(payload.get("tmdb_id") or 0)
     slug = str(payload.get("slug") or "").strip()
@@ -2216,9 +2218,14 @@ async def process_channel_hdhive_event(
     # Channel follows are incremental: target every episode in the post that
     # is newer than the follow baseline. Historical transfer rows must not
     # suppress newly published episodes.
-    if episodes:
+    if transfer_mode == "all" and episodes:
         for follow in follows:
             if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = set(episodes)
+    elif episodes:
+        for follow in follows:
+            if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = set(episodes)
                 baseline = int(follow["baseline_episode"] or 0)
                 if emby_episodes and season in emby_episodes:
                     missing_by_follow[int(follow["id"])] = set(episodes) - emby_episodes[season]
@@ -2254,13 +2261,17 @@ async def process_channel_hdhive_event(
             )
             baseline = int(follow["baseline_episode"] or 0)
             missing_by_follow[int(follow["id"])] = (
-                (
-                    set(episodes) - emby_episodes[season]
-                    if emby_episodes and season in emby_episodes
-                    else {episode for episode in episodes if episode > baseline}
+                set(episodes)
+                if transfer_mode == "all" and episodes
+                else (
+                    (
+                        set(episodes) - emby_episodes[season]
+                        if emby_episodes and season in emby_episodes
+                        else {episode for episode in episodes if episode > baseline}
+                    )
+                    if episodes
+                    else tree_missing
                 )
-                if episodes
-                else tree_missing
             )
     transferred = 0
     missing_total = sum(len(value) for value in missing_by_follow.values())
@@ -2274,9 +2285,19 @@ async def process_channel_hdhive_event(
             selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
             selected_keys = {(0, 0)} if selected else set()
         else:
-            selected, selected_keys = select_largest_missing_episode_files_by_season(
-                tree, missing, fallback_season=int(payload.get("season_number") or 1)
-            )
+            if transfer_mode == "all":
+                selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
+                selected_keys = {
+                    (season_number, episode)
+                    for item in selected
+                    for season_number in [next(iter(parse_episode_spec(item.get("_share_name")).get("season_numbers") or [season]), season)]
+                    for episode in parse_episode_spec(item.get("_share_name")).get("episode_numbers") or []
+                    if int(episode) > 0
+                }
+            else:
+                selected, selected_keys = select_largest_missing_episode_files_by_season(
+                    tree, missing, fallback_season=season
+                )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
             transfer_failures += 1
@@ -2338,7 +2359,7 @@ def _nested_int(payload: Any, keys: tuple[str, ...]) -> int:
 
 
 async def process_channel_dian_event(
-    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False,
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False, transfer_mode: str = "missing",
 ) -> str:
     tmdb_id = int(payload.get("tmdb_id") or 0)
     share_code = str(payload.get("share_code") or "").strip()
@@ -2389,9 +2410,14 @@ async def process_channel_dian_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
-    if episodes:
+    if transfer_mode == "all" and episodes:
         for follow in follows:
             if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = set(episodes)
+    elif episodes:
+        for follow in follows:
+            if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = set(episodes)
                 baseline = int(follow["baseline_episode"] or 0)
                 if emby_episodes and season in emby_episodes:
                     missing_by_follow[int(follow["id"])] = set(episodes) - emby_episodes[season]
@@ -2436,7 +2462,19 @@ async def process_channel_dian_event(
             selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
             selected_keys = {(0, 0)} if selected else set()
         else:
-            selected, selected_keys = select_largest_missing_episode_files_by_season(tree, missing, fallback_season=season)
+            if transfer_mode == "all":
+                selected = [item for item in tree if not item.get("_share_is_dir") and item.get("_share_id")]
+                selected_keys = {
+                    (season_number, episode)
+                    for item in selected
+                    for season_number in [next(iter(parse_episode_spec(item.get("_share_name")).get("season_numbers") or [season]), season)]
+                    for episode in parse_episode_spec(item.get("_share_name")).get("episode_numbers") or []
+                    if int(episode) > 0
+                }
+            else:
+                selected, selected_keys = select_largest_missing_episode_files_by_season(
+                    tree, missing, fallback_season=season
+                )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
             transfer_failures += 1
@@ -2522,9 +2560,9 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
                     ).fetchone()
                 if (not exists or force_reprocess) and payload and payload.get("provider") == monitor.get("provider"):
                     if payload["provider"] == "dian":
-                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess)
+                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
                     else:
-                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess)
+                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
                     with db() as connection:
                         event_args = (int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), int(monitor["id"]), message_id)
                         if exists:
@@ -14378,6 +14416,7 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             "dian_signin_time", "dian_signin_mode", "p115_app",
             "dian_follow_interval",
             "telegram_channel_monitor_interval",
+            "telegram_channel_transfer_mode",
             "telegram_channel_history_backfill_limit",
             "p115_target_cid", "p115_target_name",
             "p123_delivery_mode", "p123_staging_cid", "p123_staging_name",
@@ -14403,6 +14442,11 @@ async def update_settings(request: Request, movie_session: Optional[str] = Cooki
             if interval < 300 or interval > 21600:
                 raise HTTPException(400, "频道监控间隔必须在5分钟到6小时之间")
             set_setting(connection, "telegram_channel_monitor_interval", str(interval))
+        if "telegram_channel_transfer_mode" in payload:
+            mode = str(payload["telegram_channel_transfer_mode"] or "all")
+            if mode not in {"all", "missing"}:
+                raise HTTPException(400, "频道转存模式无效")
+            set_setting(connection, "telegram_channel_transfer_mode", mode)
         if "telegram_channel_history_backfill_limit" in payload:
             history_limit = int(payload["telegram_channel_history_backfill_limit"])
             if history_limit < 10 or history_limit > 1000:
