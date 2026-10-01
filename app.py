@@ -2162,7 +2162,7 @@ def channel_monitor_settings() -> dict[str, Any]:
 
 
 async def process_channel_hdhive_event(
-    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any],
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False,
 ) -> str:
     tmdb_id = int(payload.get("tmdb_id") or 0)
     slug = str(payload.get("slug") or "").strip()
@@ -2213,6 +2213,11 @@ async def process_channel_hdhive_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
+    if force_latest and episodes and not any(missing_by_follow.values()):
+        latest_episode = max(episodes)
+        for follow in follows:
+            if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = {latest_episode}
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     unlocked = hdhive_call("unlock", slug)
@@ -2236,8 +2241,11 @@ async def process_channel_hdhive_event(
         for follow in follows:
             if str(follow["media_type"]) != "tv":
                 continue
-            missing_by_follow[int(follow["id"])] = channel_follow_missing(
+            tree_missing = channel_follow_missing(
                 follow, season, {episode for _season, episode in tree_episodes if _season == season}, emby_episodes
+            )
+            missing_by_follow[int(follow["id"])] = tree_missing or (
+                {max(episodes)} if force_latest and episodes else set()
             )
     transferred = 0
     for follow in follows:
@@ -2304,7 +2312,7 @@ def _nested_int(payload: Any, keys: tuple[str, ...]) -> int:
 
 
 async def process_channel_dian_event(
-    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any],
+    *, monitor: dict[str, Any], message_id: int, payload: dict[str, Any], force_latest: bool = False,
 ) -> str:
     tmdb_id = int(payload.get("tmdb_id") or 0)
     share_code = str(payload.get("share_code") or "").strip()
@@ -2355,6 +2363,11 @@ async def process_channel_dian_event(
         int(follow["id"]): ({0} if str(follow["media_type"]) == "movie" else channel_follow_missing(follow, season, episodes, emby_episodes))
         for follow in follows
     }
+    if force_latest and episodes and not any(missing_by_follow.values()):
+        latest_episode = max(episodes)
+        for follow in follows:
+            if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] = {latest_episode}
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     checked = await asyncio.to_thread(dian_call, "check_sharecode", share_code)
@@ -2467,9 +2480,9 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
                     ).fetchone()
                 if (not exists or force_reprocess) and payload and payload.get("provider") == monitor.get("provider"):
                     if payload["provider"] == "dian":
-                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload)
+                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess)
                     else:
-                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload)
+                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess)
                     with db() as connection:
                         event_args = (int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), int(monitor["id"]), message_id)
                         if exists:
@@ -2484,10 +2497,10 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
                             )
                     processed += 1
                     resource_title = str(payload.get("title") or "未知资源").strip().replace("\n", " ")
-                    episode_label = ",".join(str(item) for item in payload.get("episode_numbers") or [])
+                    episode_label = compact_episode_numbers(set(payload.get("episode_numbers") or [])).replace("–", "-")
                     if episode_label:
                         resource_title = f"{resource_title} [{episode_label}]"
-                    LOGGER.info("[Telegram频道] %s：%s（消息%s）：%s", monitor["channel"], resource_title, message_id, detail)
+                    LOGGER.info("[Telegram频道] %s：%s：%s", monitor["channel"], resource_title, detail)
                 with db() as connection:
                     connection.execute(
                         "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
