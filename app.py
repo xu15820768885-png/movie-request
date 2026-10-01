@@ -10332,8 +10332,63 @@ def _fetch_chart_results(chart_name: str, user: Optional[dict[str, Any]] = None)
         return {
             "title": title,
             "source": "douban",
+            "source_label": "豆瓣",
+            "source_type": "official_public_page",
             "results": [douban_media_item(item, media_type) for item in items[:100]],
         }
+    public_config = {
+        "maoyan_tv": ("https://zbo.hk/api/public/maoyan-heat", "tv", "猫眼电视剧热度榜", "猫眼"),
+        "maoyan_movies": ("https://api.nxvav.cn/api/maoyan/movie/", "movie", "猫眼电影榜", "猫眼"),
+        "tencent_tv": ("https://free.wqwlkj.cn/wqwlapi/tx_hot.php?type=json", "tv", "腾讯视频热播榜", "腾讯视频"),
+    }
+    if chart_name in public_config:
+        endpoint, media_type, title, source_label = public_config[chart_name]
+        try:
+            response = requests.get(
+                endpoint,
+                headers={"User-Agent": "Mozilla/5.0 (映单公开榜单适配)", "Accept": "application/json"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            raise HTTPException(502, f"{source_label}公开榜单暂时无法连接") from exc
+        rows = payload if isinstance(payload, list) else None
+        if rows is None and isinstance(payload, dict):
+            for key in ("data", "list", "results", "items", "result"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    rows = value
+                    break
+        rows = rows or []
+        normalized = []
+        for index, row in enumerate(rows[:100], start=1):
+            if isinstance(row, str):
+                name = row.strip()
+                row = {}
+            elif isinstance(row, dict):
+                name = str(row.get("title") or row.get("name") or row.get("seriesName") or row.get("filmName") or row.get("videoName") or "").strip()
+            else:
+                continue
+            if not name:
+                continue
+            poster = str((row or {}).get("poster_url") or (row or {}).get("poster") or (row or {}).get("cover") or (row or {}).get("image") or "")
+            rank = int((row or {}).get("rank") or (row or {}).get("top") or (row or {}).get("order") or index)
+            year = str((row or {}).get("year") or (row or {}).get("releaseYear") or "")[:4]
+            normalized.append({
+                "title": name,
+                "media_type": media_type,
+                "tmdb_id": 0,
+                "poster_url": poster,
+                "year": year,
+                "rank": rank,
+                "score": (row or {}).get("score") or (row or {}).get("heat") or (row or {}).get("currHeat") or "",
+                "platform": (row or {}).get("platform") or (row or {}).get("platformDesc") or source_label,
+                "source": chart_name,
+                "source_label": source_label,
+                "source_type": "public_adapter",
+            })
+        return {"title": title, "source": chart_name, "source_label": source_label, "source_type": "public_adapter", "results": normalized, "source_status": "公开榜单适配"}
     chart_config = {
         "trending": ("/trending/all/week", None, "本周热门"),
         "movies": ("/movie/popular", "movie", "热门电影"),
@@ -14139,7 +14194,7 @@ async def update_chart_monitors(request: Request, movie_session: Optional[str] =
     require_admin(movie_session)
     payload = await request.json()
     chart_name = str(payload.get("chart_name") or "").strip()
-    if chart_name not in {"douban_tv", "douban_movies", "tv", "movies", "trending"}:
+    if chart_name not in {"douban_tv", "douban_movies", "maoyan_tv", "maoyan_movies", "tencent_tv", "tv", "movies", "trending"}:
         raise HTTPException(400, "榜单类型无效")
     top_n = max(1, min(100, int(payload.get("top_n") or 10)))
     enabled = 1 if payload.get("enabled") else 0
