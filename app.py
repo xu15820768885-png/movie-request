@@ -2220,9 +2220,12 @@ async def process_channel_hdhive_event(
         for follow in follows:
             if str(follow["media_type"]) == "tv":
                 baseline = int(follow["baseline_episode"] or 0)
-                missing_by_follow[int(follow["id"])] = {
-                    episode for episode in episodes if episode > baseline
-                }
+                if emby_episodes and season in emby_episodes:
+                    missing_by_follow[int(follow["id"])] = set(episodes) - emby_episodes[season]
+                else:
+                    missing_by_follow[int(follow["id"])] = {
+                        episode for episode in episodes if episode > baseline
+                    }
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     unlocked = hdhive_call("unlock", slug)
@@ -2251,7 +2254,11 @@ async def process_channel_hdhive_event(
             )
             baseline = int(follow["baseline_episode"] or 0)
             missing_by_follow[int(follow["id"])] = (
-                {episode for episode in episodes if episode > baseline}
+                (
+                    set(episodes) - emby_episodes[season]
+                    if emby_episodes and season in emby_episodes
+                    else {episode for episode in episodes if episode > baseline}
+                )
                 if episodes
                 else tree_missing
             )
@@ -2386,9 +2393,12 @@ async def process_channel_dian_event(
         for follow in follows:
             if str(follow["media_type"]) == "tv":
                 baseline = int(follow["baseline_episode"] or 0)
-                missing_by_follow[int(follow["id"])] = {
-                    episode for episode in episodes if episode > baseline
-                }
+                if emby_episodes and season in emby_episodes:
+                    missing_by_follow[int(follow["id"])] = set(episodes) - emby_episodes[season]
+                else:
+                    missing_by_follow[int(follow["id"])] = {
+                        episode for episode in episodes if episode > baseline
+                    }
     if not any(missing_by_follow.values()):
         return "所含集数均已存在，无需解锁"
     checked = await asyncio.to_thread(dian_call, "check_sharecode", share_code)
