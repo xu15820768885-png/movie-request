@@ -2434,7 +2434,11 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
                                 (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
                             )
                     processed += 1
-                    LOGGER.info("[Telegram频道] %s 消息 %s：%s", monitor["channel"], message_id, detail)
+                    resource_title = str(payload.get("title") or "未知资源").strip().replace("\n", " ")
+                    episode_label = ",".join(str(item) for item in payload.get("episode_numbers") or [])
+                    if episode_label:
+                        resource_title = f"{resource_title} [{episode_label}]"
+                    LOGGER.info("[Telegram频道] %s：%s（消息%s）：%s", monitor["channel"], resource_title, message_id, detail)
                 with db() as connection:
                     connection.execute(
                         "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
