@@ -118,17 +118,22 @@ EMBY_WEBHOOK_ITEMS: dict[str, dict[str, str]] = {}
 EMBY_WEBHOOK_GENERATIONS: dict[str, int] = {}
 LOGGER = logging.getLogger("uvicorn.error")
 LOG_PATH = DATA_DIR / "movie-request.log"
-try:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-except OSError:
-    LOG_PATH = Path("/tmp/movie-request.log")
-try:
-    if not any(isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == str(LOG_PATH) for handler in LOGGER.handlers):
-        _file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
-        _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-        LOGGER.addHandler(_file_handler)
-except OSError:
-    pass
+CHANNEL_MONITOR_LOCK = Lock()
+
+
+def configure_file_logging() -> None:
+    """Attach after Uvicorn configures logging, which replaces import-time handlers."""
+    global LOG_PATH
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        LOG_PATH = Path("/tmp/movie-request.log")
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if any(isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", "") == str(LOG_PATH) for handler in LOGGER.handlers):
+        return
+    handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    LOGGER.addHandler(handler)
 QR_LOGIN_LOCK = Lock()
 QR_LOGIN_TOKENS: dict[str, dict[str, Any]] = {}
 GUANYING_SESSION_LOCK = RLock()
@@ -2356,7 +2361,7 @@ async def process_channel_dian_event(
     return f"癫影解锁成功，新增转存 {transferred} 集" if transferred else "癫影解锁成功，但没有新的缺失集"
 
 
-async def telegram_channel_monitor_once() -> dict[str, Any]:
+async def telegram_channel_monitor_once(*, recent_limit: int = 0) -> dict[str, Any]:
     LOGGER.info("[Telegram频道] 开始检查频道监控")
     settings = pansave_login_settings()
     channel_settings = channel_monitor_settings()
@@ -2374,25 +2379,20 @@ async def telegram_channel_monitor_once() -> dict[str, Any]:
         for monitor in monitors:
             last_id = int(monitor.get("last_message_id") or 0)
             entity = await client.get_entity(str(monitor["channel"]))
-            if last_id == 0 and not channel_settings["history_backfill"]:
-                latest = await client.get_messages(entity, limit=1)
-                latest_id = int(getattr(latest[0], "id", 0) or 0) if latest else 0
-                with db() as connection:
-                    connection.execute(
-                        "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
-                        (latest_id, now_iso(), now_iso(), int(monitor["id"])),
-                    )
-                continue
             messages = []
-            iterator_kwargs = {"reverse": True, "limit": channel_settings["history_limit"] if last_id == 0 else 100}
-            if last_id:
-                iterator_kwargs["min_id"] = last_id
-            async for message in client.iter_messages(entity, **iterator_kwargs):
-                messages.append(message)
+            if recent_limit or last_id == 0:
+                # The first poll must process recent posts. Seeding the cursor to
+                # the latest ID silently discarded a post published just before
+                # a monitor was added or the worker first became available.
+                limit = recent_limit or (channel_settings["history_limit"] if channel_settings["history_backfill"] else 20)
+                messages = list(reversed(await client.get_messages(entity, limit=limit)))
+            else:
+                async for message in client.iter_messages(entity, reverse=True, limit=100, min_id=last_id):
+                    messages.append(message)
             for message in messages:
                 checked += 1
                 message_id = int(getattr(message, "id", 0) or 0)
-                text_value = str(getattr(message, "message", "") or "")
+                text_value = str(getattr(message, "raw_text", None) or getattr(message, "message", "") or "")
                 for entity_item in getattr(message, "entities", None) or []:
                     url = str(getattr(entity_item, "url", "") or "")
                     if url:
@@ -2419,10 +2419,18 @@ async def telegram_channel_monitor_once() -> dict[str, Any]:
                             (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
                         )
                     processed += 1
+                    LOGGER.info("[Telegram频道] %s 消息 %s：%s", monitor["channel"], message_id, detail)
                 with db() as connection:
                     connection.execute(
                         "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
-                        (message_id, now_iso(), now_iso(), int(monitor["id"])),
+                        (max(last_id, message_id), now_iso(), now_iso(), int(monitor["id"])),
+                    )
+                last_id = max(last_id, message_id)
+            if not messages:
+                with db() as connection:
+                    connection.execute(
+                        "UPDATE telegram_channel_monitors SET last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
+                        (now_iso(), now_iso(), int(monitor["id"])),
                     )
     finally:
         await client.disconnect()
@@ -2435,8 +2443,14 @@ def telegram_channel_monitor_loop() -> None:
         try:
             settings = channel_monitor_settings()
             if settings["enabled"] and settings["monitors"]:
+                if not CHANNEL_MONITOR_LOCK.acquire(blocking=False):
+                    time.sleep(1)
+                    continue
                 update_worker_health("telegram_channel_monitor", "running")
-                result = asyncio.run(telegram_channel_monitor_once())
+                try:
+                    result = asyncio.run(telegram_channel_monitor_once())
+                finally:
+                    CHANNEL_MONITOR_LOCK.release()
                 update_worker_health("telegram_channel_monitor", "ok", detail=result)
             else:
                 update_worker_health("telegram_channel_monitor", "idle", detail={"configured": bool(settings["monitors"])})
@@ -9574,6 +9588,12 @@ def p115_offline_monitor_loop() -> None:
 @APP.on_event("startup")
 def startup() -> None:
     init_db()
+    try:
+        configure_file_logging()
+        LOGGER.info("映单后台已启动，系统日志写入 %s", LOG_PATH)
+    except OSError as error:
+        update_worker_health("system_log", "error", error=str(error))
+        LOGGER.error("系统日志文件不可写：%s", error)
     recovered = recover_stale_workflow_jobs()
     update_worker_health(
         "workflow_recovery", "ok", detail={"recovered_jobs": recovered}
@@ -14176,6 +14196,26 @@ async def test_telegram_channel_monitor(request: Request, movie_session: Optiona
         raise HTTPException(502, f"无法读取 Telegram 频道：{error}") from error
     finally:
         await client.disconnect()
+
+
+@APP.post("/api/admin/telegram-channel-monitors/run")
+async def run_telegram_channel_monitor(
+    movie_session: Optional[str] = Cookie(default=None),
+) -> dict[str, Any]:
+    """Run a bounded recent scan now so an admin can recover a missed post."""
+    require_admin(movie_session)
+    if not CHANNEL_MONITOR_LOCK.acquire(blocking=False):
+        raise HTTPException(409, "频道监控正在运行，请稍后查看处理记录")
+    try:
+        result = await telegram_channel_monitor_once(recent_limit=100)
+        update_worker_health("telegram_channel_monitor", "ok", detail=result)
+        return {"ok": True, **result}
+    except Exception as error:
+        update_worker_health("telegram_channel_monitor", "error", error=str(error))
+        LOGGER.exception("手动频道检查失败")
+        raise HTTPException(502, f"频道检查失败：{error}") from error
+    finally:
+        CHANNEL_MONITOR_LOCK.release()
 
 
 @APP.patch("/api/admin/settings")
