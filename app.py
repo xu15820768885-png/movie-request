@@ -2129,10 +2129,10 @@ def channel_follow_missing(
     emby_episode = int(follow["current_emby_episode"] or 0)
     if emby_episodes and season in emby_episodes:
         present = set(emby_episodes[season]) & set(episodes)
-    elif emby_season == season and emby_episode >= 0:
-        present = {episode for episode in episodes if episode <= emby_episode}
     else:
-        present = completed_episode_numbers(int(follow["tmdb_id"]), season, episodes)
+        # A historical transfer row is not proof that Emby has the episode.
+        # Fall back to the follow baseline when live Emby progress is absent.
+        present = {episode for episode in episodes if episode <= baseline_episode}
     # The baseline prevents re-receiving episodes already present when the
     # follow was created. Do not use current/last-transferred as an upper
     # bound: those values can advance past a hole such as E35.
