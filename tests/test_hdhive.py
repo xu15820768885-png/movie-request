@@ -711,6 +711,81 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.data_patch.stop()
         self.temporary.cleanup()
 
+    def test_ended_follow_stops_only_after_final_episode_is_received(self):
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            follow_id = connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, media_type, "
+                "hdhive_subscription_id, active, created_at, updated_at) "
+                "VALUES(?, 282326, '兰香如故', 'tv', 77, 1, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            ).lastrowid
+
+        detail = {
+            "status": "Ended", "next_episode_to_air": None,
+            "seasons": [{"season_number": 0, "episode_count": 1},
+                        {"season_number": 1, "episode_count": 3}],
+        }
+        progress = {"emby_episode_numbers": {"1": [1, 2]}}
+        with patch.object(app, "tmdb_get", return_value=detail), patch.object(
+            app, "destination_episode_progress", return_value=progress
+        ), patch.object(app, "delete_hdhive_subscription_if_present") as unsubscribe:
+            self.assertEqual(app.stop_completed_follows_once()["stopped"], 0)
+            unsubscribe.assert_not_called()
+            app.record_transfer(
+                user_id=user_id, follow_id=follow_id, source="telegram_channel",
+                resource_key="bundle", tmdb_id=282326, transfer_scope="follow",
+                status="success", detail="已接收", season_number=1,
+                episode_numbers=[3], destination="p115",
+            )
+            self.assertEqual(app.stop_completed_follows_once()["stopped"], 1)
+            self.assertEqual(app.stop_completed_follows_once()["stopped"], 0)
+            unsubscribe.assert_called_once_with(77)
+
+        with app.db() as connection:
+            follow = connection.execute(
+                "SELECT active, hdhive_subscription_id, last_message FROM tv_follows WHERE id = ?",
+                (follow_id,),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT stage, detail_json FROM hdhive_follow_events WHERE follow_id = ? "
+                "ORDER BY id DESC LIMIT 1", (follow_id,),
+            ).fetchone()
+        self.assertEqual(follow["active"], 0)
+        self.assertIsNone(follow["hdhive_subscription_id"])
+        self.assertIn("自动停止追更", follow["last_message"])
+        self.assertEqual(event["stage"], "complete")
+        self.assertEqual(json.loads(event["detail_json"])["resource_status"], "completed")
+
+    def test_ongoing_follow_does_not_stop_when_all_current_episodes_are_received(self):
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, media_type, "
+                "active, created_at, updated_at) VALUES(?, 282326, '兰香如故', 'tv', 1, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+        with patch.object(app, "tmdb_get", return_value={
+            "status": "Returning Series", "seasons": [{"season_number": 1, "episode_count": 3}],
+        }), patch.object(app, "destination_episode_progress") as progress:
+            self.assertEqual(app.stop_completed_follows_once()["stopped"], 0)
+            progress.assert_not_called()
+
+    def test_ended_follow_waits_when_tmdb_episode_count_lags_received_files(self):
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, media_type, "
+                "active, created_at, updated_at) VALUES(?, 282326, '兰香如故', 'tv', 1, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+        with patch.object(app, "tmdb_get", return_value={
+            "status": "Ended", "seasons": [{"season_number": 1, "episode_count": 3}],
+        }), patch.object(app, "destination_episode_progress", return_value={
+            "emby_episode_numbers": {"1": [1, 2, 3, 4]},
+        }):
+            self.assertEqual(app.stop_completed_follows_once()["stopped"], 0)
+
     def test_channel_unlock_uses_access_code_and_transfers_lanxiang_new_episodes(self):
         with app.db() as connection:
             user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]

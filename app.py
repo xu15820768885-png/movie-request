@@ -3181,11 +3181,11 @@ def cleanup_hdhive_follow_events(keep: int = 5000) -> None:
 
 def management_resource_status(payload: dict[str, Any], has_follow: bool = False) -> str:
     """Normalize the completed/ongoing label stored with management events."""
-    if has_follow:
-        return "ongoing"
     value = str(payload.get("resource_status") or "").strip().lower()
     if value in {"ongoing", "completed"}:
         return value
+    if has_follow:
+        return "ongoing"
     return "completed" if str(payload.get("media_type") or "") == "movie" else ""
 
 
@@ -7210,6 +7210,113 @@ def telegram_poll_loop() -> None:
             time.sleep(5)
 
 
+def stop_completed_follows_once() -> dict[str, int]:
+    """Stop an ended TV follow only after every official episode is received."""
+    with db() as connection:
+        follows = connection.execute(
+            "SELECT f.*, u.storage_destination FROM tv_follows f "
+            "JOIN users u ON u.id = f.user_id "
+            "WHERE f.active = 1 AND f.media_type = 'tv' AND f.mode != 'chart'"
+        ).fetchall()
+    details: dict[int, dict[str, Any]] = {}
+    progress_cache: dict[tuple[str, int], dict[str, Any]] = {}
+    stopped = errors = 0
+    for follow in follows:
+        follow_id = int(follow["id"])
+        tmdb_id = int(follow["tmdb_id"])
+        destination = storage_destination(follow["storage_destination"])
+        try:
+            if tmdb_id not in details:
+                details[tmdb_id] = tmdb_get(
+                    f"/tv/{tmdb_id}", {"language": "zh-CN"}, force_refresh=True
+                )
+            detail = details[tmdb_id]
+            if str(detail.get("status") or "") != "Ended" or detail.get("next_episode_to_air"):
+                continue
+            seasons = [
+                season for season in detail.get("seasons") or []
+                if int(season.get("season_number") or 0) > 0
+            ]
+            if not seasons or any(int(season.get("episode_count") or 0) <= 0 for season in seasons):
+                continue
+            expected = {
+                int(season["season_number"]): set(range(1, int(season["episode_count"]) + 1))
+                for season in seasons
+            }
+            cache_key = (destination, tmdb_id)
+            if cache_key not in progress_cache:
+                progress_cache[cache_key] = destination_episode_progress(
+                    destination, tmdb_id, known_in_library=True, force=True
+                )
+            present = {
+                int(season): {int(episode) for episode in episodes}
+                for season, episodes in (progress_cache[cache_key].get("emby_episode_numbers") or {}).items()
+            }
+            if destination == "p115":
+                with db() as connection:
+                    transfers = connection.execute(
+                        "SELECT season_number, episode_number FROM resource_transfer_log "
+                        "WHERE user_id = ? AND tmdb_id = ? AND destination = 'p115' "
+                        "AND status = 'success' AND season_number > 0 AND episode_number > 0",
+                        (int(follow["user_id"]), tmdb_id),
+                    ).fetchall()
+                for transfer in transfers:
+                    present.setdefault(int(transfer["season_number"]), set()).add(
+                        int(transfer["episode_number"])
+                    )
+            # TMDB sometimes lags a newly published resource. Do not stop while
+            # we have received episodes beyond its purported final count.
+            if any(
+                season > 0 and (season not in expected or not episodes <= expected[season])
+                for season, episodes in present.items()
+            ):
+                continue
+            if any(not episodes <= present.get(season, set()) for season, episodes in expected.items()):
+                continue
+            subscription_id = int(follow["hdhive_subscription_id"] or 0)
+            if subscription_id:
+                with db() as connection:
+                    shared = connection.execute(
+                        "SELECT COUNT(*) FROM tv_follows WHERE active = 1 "
+                        "AND id != ? AND hdhive_subscription_id = ?",
+                        (follow_id, subscription_id),
+                    ).fetchone()[0]
+                if not shared:
+                    delete_hdhive_subscription_if_present(subscription_id)
+            message = "TMDB确认全剧完结且全部集数已接收，已自动停止追更"
+            with db() as connection:
+                updated = connection.execute(
+                    "UPDATE tv_follows SET active = 0, hdhive_subscription_id = NULL, "
+                    "last_message = ?, last_checked_at = ?, updated_at = ? "
+                    "WHERE id = ? AND active = 1",
+                    (message, now_iso(), now_iso(), follow_id),
+                ).rowcount
+            if updated:
+                log_hdhive_follow_event(
+                    "complete", "success", message, follow=follow,
+                    detail={"resource_status": "completed", "episode_counts": {
+                        str(season): len(episodes) for season, episodes in expected.items()
+                    }},
+                )
+                stopped += 1
+        except Exception as error:
+            errors += 1
+            LOGGER.warning("[追更完结检查] TMDB %s 追更 %s 检查失败：%s", tmdb_id, follow_id, error)
+    return {"checked": len(follows), "stopped": stopped, "errors": errors}
+
+
+def completed_follow_loop() -> None:
+    while True:
+        try:
+            update_worker_health("completed_follow", "running")
+            result = stop_completed_follows_once()
+            update_worker_health("completed_follow", "ok", detail=result)
+        except Exception as error:
+            update_worker_health("completed_follow", "error", error=str(error))
+            LOGGER.exception("completed follow check failed")
+        time.sleep(3600)
+
+
 def emby_sync_loop() -> None:
     while True:
         try:
@@ -9829,6 +9936,7 @@ def startup() -> None:
     Thread(target=configure_wecom_menu, name="wecom-menu", daemon=True).start()
     Thread(target=telegram_poll_loop, name="telegram-bot", daemon=True).start()
     Thread(target=telegram_channel_monitor_loop, name="telegram-channel-monitor", daemon=True).start()
+    Thread(target=completed_follow_loop, name="completed-follow", daemon=True).start()
     Thread(target=emby_sync_loop, name="emby-sync", daemon=True).start()
     Thread(
         target=notification_outbox_loop,
@@ -11468,8 +11576,10 @@ def hdhive_follow_events(
         values.append(int(follow_id))
     if resource_status:
         conditions.append(
-            "CASE WHEN e.follow_id IS NOT NULL THEN 'ongoing' "
-            "ELSE COALESCE(json_extract(e.detail_json, '$.resource_status'), '') "
+            "CASE WHEN json_extract(e.detail_json, '$.resource_status') "
+            "IN ('ongoing', 'completed') THEN json_extract(e.detail_json, '$.resource_status') "
+            "WHEN e.follow_id IS NOT NULL THEN 'ongoing' "
+            "ELSE '' "
             "END = ?"
         )
         values.append(resource_status)
