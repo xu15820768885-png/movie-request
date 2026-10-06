@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import app
 from hdhive_openapi import HDHiveOpenAPI, TokenSet
@@ -710,6 +710,118 @@ class HDHiveFollowRouteTests(unittest.TestCase):
     def tearDown(self):
         self.data_patch.stop()
         self.temporary.cleanup()
+
+    def test_channel_unlock_uses_access_code_and_transfers_lanxiang_new_episodes(self):
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, media_type, monitor_mode, "
+                "baseline_season, baseline_episode, active, created_at, updated_at) "
+                "VALUES(?, 282326, '兰香如故', 'tv', 'channel', 1, 39, 1, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+
+        class FakeP115:
+            def share_receive(self, payload, **kwargs):
+                self.received = payload
+                self.share_url = kwargs["share_url"]
+                return {"state": True}
+
+        client = FakeP115()
+        tree = [
+            {"_share_id": "40", "_share_name": "兰香如故.S01E40.mkv", "_share_is_dir": False},
+            {"_share_id": "41", "_share_name": "兰香如故.S01E41.mkv", "_share_is_dir": False},
+        ]
+        def share_tree_for_code(_client, share_url):
+            return tree if "password=aB12" in share_url else []
+
+        with patch.object(app, "destination_episode_progress", return_value={
+            "emby_episode_numbers": {"1": list(range(1, 40))},
+        }), patch.object(app, "hdhive_call", return_value={
+            "data": {"url": "https://115.com/s/lanxiang", "access_code": "aB12"},
+        }), patch.object(app, "p115_client", return_value=client), patch.object(
+            app, "p115_share_tree", side_effect=share_tree_for_code
+        ) as share_tree, patch.object(app, "p115_folder_snapshot", return_value=set()), patch.object(
+            app, "wait_for_p115_change", return_value=True
+        ):
+            detail = asyncio.run(app.process_channel_hdhive_event(
+                monitor={"id": 1}, message_id=123,
+                payload={"provider": "hdhive", "tmdb_id": 282326, "slug": "lanxiang",
+                         "season_number": 1, "episode_numbers": list(range(1, 42))},
+                transfer_mode="missing",
+            ))
+
+        self.assertIn("新增转存 2 集", detail)
+        self.assertEqual(share_tree.call_args.args[1], "https://115.com/s/lanxiang?password=aB12")
+        self.assertEqual(client.received["file_id"], "40,41")
+
+    def test_channel_scan_retries_legacy_failed_transfer_and_isolates_bad_post(self):
+        with app.db() as connection:
+            stamp = app.now_iso()
+            monitor_id = connection.execute(
+                "INSERT INTO telegram_channel_monitors(name, provider, channel, enabled, "
+                "last_message_id, created_at, updated_at) VALUES('测试', 'hdhive', "
+                "'https://t.me/example', 1, 102, ?, ?)", (stamp, stamp),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO telegram_channel_events(monitor_id, message_id, status, detail, "
+                "created_at, updated_at) VALUES(?, 100, 'processed', "
+                "'已检测到缺集 2 集，但转存未完成（尝试 0 次，失败 1 次）', ?, ?)",
+                (monitor_id, stamp, stamp),
+            )
+
+        class Message:
+            def __init__(self, message_id):
+                self.id = message_id
+                self.raw_text = (
+                    "兰香如故 S01E01-E41 TMDB: 282326 "
+                    f"https://re0.me/resource/115/slug{message_id}"
+                )
+                self.entities = []
+                self.buttons = []
+
+        class FakeTelegram:
+            async def connect(self):
+                pass
+
+            async def disconnect(self):
+                pass
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_entity(self, channel):
+                return channel
+
+            async def get_messages(self, entity, *, ids):
+                return [Message(message_id) for message_id in ids]
+
+            async def iter_messages(self, entity, **kwargs):
+                yield Message(103)
+                yield Message(104)
+
+        settings = {"enabled": True, "monitors": [{"id": monitor_id, "channel": "https://t.me/example",
+                                                   "provider": "hdhive", "enabled": 1, "last_message_id": 102}],
+                    "transfer_mode": "all", "history_backfill": False, "history_limit": 100}
+        handler = AsyncMock(side_effect=["解锁成功，新增转存 2 集",
+                                         app.HTTPException(404, "影巢接口：资源不存在"),
+                                         "未匹配到启用中的映单追更"])
+        with patch.object(app, "channel_monitor_settings", return_value=settings), patch.object(
+            app, "pansave_login_settings", return_value={"api_id": "1", "api_hash": "x",
+                                                       "session": "x", "proxy_url": ""}
+        ), patch.object(app, "pansave_client", return_value=FakeTelegram()), patch.object(
+            app, "process_channel_hdhive_event", handler
+        ):
+            result = asyncio.run(app.telegram_channel_monitor_once())
+
+        self.assertEqual(result, {"checked": 3, "processed": 2, "failed": 1})
+        with app.db() as connection:
+            rows = connection.execute(
+                "SELECT message_id, status FROM telegram_channel_events "
+                "WHERE monitor_id = ? ORDER BY message_id", (monitor_id,),
+            ).fetchall()
+            self.assertEqual([(row["message_id"], row["status"]) for row in rows],
+                             [(100, "processed"), (103, "failed"), (104, "processed")])
 
     def test_follow_feature_reports_saved_polling_state(self):
         with app.db() as connection:

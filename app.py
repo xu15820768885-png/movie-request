@@ -2237,7 +2237,12 @@ async def process_channel_hdhive_event(
         return "所含集数均已存在，无需解锁"
     unlocked = hdhive_call("unlock", slug)
     data = hdhive_response_data(unlocked)
-    share_url = str(data.get("full_url") or data.get("url") or "").strip() if isinstance(data, dict) else ""
+    # Unlock responses can supply the 115 password separately from the URL.
+    # The bare URL may list no files even though the unlock itself succeeded.
+    share_url = next(
+        (url for url in extract_dian_transfer_links({"payload": data}) if is_115_share_url(url)),
+        "",
+    )
     if not is_115_share_url(share_url):
         return "影巢解锁成功，但没有返回有效 115 链接"
     client = await asyncio.to_thread(p115_client)
@@ -2296,7 +2301,7 @@ async def process_channel_hdhive_event(
                 }
             else:
                 selected, selected_keys = select_largest_missing_episode_files_by_season(
-                    tree, missing, fallback_season=season
+                    tree, {(season, episode) for episode in missing}, fallback_season=season
                 )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
@@ -2333,7 +2338,11 @@ async def process_channel_hdhive_event(
     if transferred:
         return f"解锁成功，新增转存 {transferred} 集"
     if missing_total:
-        return f"已检测到缺集 {missing_total} 集，但转存未完成（尝试 {transfer_attempts} 次，失败 {transfer_failures} 次）"
+        file_count = sum(not item.get("_share_is_dir") for item in tree)
+        return (
+            f"已检测到缺集 {missing_total} 集，但转存未完成"
+            f"（分享文件 {file_count} 个，尝试 {transfer_attempts} 次，失败 {transfer_failures} 次）"
+        )
     return "解锁成功，当前没有缺失集"
 
 
@@ -2473,7 +2482,7 @@ async def process_channel_dian_event(
                 }
             else:
                 selected, selected_keys = select_largest_missing_episode_files_by_season(
-                    tree, missing, fallback_season=season
+                    tree, {(season, episode) for episode in missing}, fallback_season=season
                 )
         ids = [str(item.get("_share_id") or "") for item in selected if item.get("_share_id")]
         if not ids:
@@ -2521,7 +2530,7 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
     if not (settings["api_id"] and settings["api_hash"] and settings["session"]):
         raise RuntimeError("尚未完成 Telegram 用户账号登录")
     client = pansave_client(settings["api_id"], settings["api_hash"], settings["session"], settings["proxy_url"])
-    checked = processed = 0
+    checked = processed = failed = 0
     try:
         await client.connect()
         if not await client.is_user_authorized():
@@ -2539,6 +2548,25 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
             else:
                 async for message in client.iter_messages(entity, reverse=True, limit=100, min_id=last_id):
                     messages.append(message)
+            # Older releases marked unsuccessful transfers as processed. Retry
+            # those records as well as failures written by this release, even
+            # when the channel cursor has moved past their message IDs.
+            with db() as connection:
+                retry_ids = [int(row[0]) for row in connection.execute(
+                    "SELECT message_id FROM telegram_channel_events WHERE monitor_id = ? "
+                    "AND (status = 'failed' OR detail LIKE '%转存未完成%' "
+                    "OR detail LIKE '%没有返回有效 115 链接%') "
+                    "ORDER BY message_id DESC LIMIT 100",
+                    (int(monitor["id"]),),
+                )]
+            if retry_ids:
+                retry_messages = await client.get_messages(entity, ids=retry_ids)
+                seen_ids = {int(getattr(message, "id", 0) or 0) for message in messages}
+                messages = [
+                    message for message in retry_messages
+                    if message and int(getattr(message, "id", 0) or 0) not in seen_ids
+                ] + messages
+            monitor_error = ""
             for message in messages:
                 checked += 1
                 message_id = int(getattr(message, "id", 0) or 0)
@@ -2554,49 +2582,59 @@ async def telegram_channel_monitor_once(*, recent_limit: int = 0, force_reproces
                             text_value += "\n" + url
                 payload = parse_channel_resource_message(text_value)
                 with db() as connection:
-                    exists = connection.execute(
-                        "SELECT 1 FROM telegram_channel_events WHERE monitor_id = ? AND message_id = ?",
+                    existing = connection.execute(
+                        "SELECT status, detail FROM telegram_channel_events WHERE monitor_id = ? AND message_id = ?",
                         (int(monitor["id"]), message_id),
                     ).fetchone()
-                if (not exists or force_reprocess) and payload and payload.get("provider") == monitor.get("provider"):
-                    if payload["provider"] == "dian":
-                        detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
-                    else:
-                        detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
-                    with db() as connection:
-                        event_args = (int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), int(monitor["id"]), message_id)
-                        if exists:
-                            connection.execute(
-                                "UPDATE telegram_channel_events SET tmdb_id = ?, resource_key = ?, status = 'processed', detail = ?, payload_json = ?, updated_at = ? WHERE monitor_id = ? AND message_id = ?",
-                                event_args,
-                            )
+                retry_failed = bool(existing and (
+                    existing["status"] == "failed"
+                    or "转存未完成" in str(existing["detail"] or "")
+                    or "没有返回有效 115 链接" in str(existing["detail"] or "")
+                ))
+                if (not existing or retry_failed or force_reprocess) and payload and payload.get("provider") == monitor.get("provider"):
+                    try:
+                        if payload["provider"] == "dian":
+                            detail = await process_channel_dian_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
                         else:
-                            connection.execute(
-                                "INSERT INTO telegram_channel_events(monitor_id, message_id, tmdb_id, resource_key, status, detail, payload_json, created_at, updated_at) VALUES(?, ?, ?, ?, 'processed', ?, ?, ?, ?)",
-                                (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0), str(payload.get("slug") or payload.get("share_code") or ''), detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
-                            )
-                    processed += 1
+                            detail = await process_channel_hdhive_event(monitor=monitor, message_id=message_id, payload=payload, force_latest=force_reprocess, transfer_mode=channel_settings["transfer_mode"])
+                        status = "failed" if (
+                            "转存未完成" in detail or "没有返回有效 115 链接" in detail
+                        ) else "processed"
+                    except Exception as error:
+                        detail = str(getattr(error, "detail", error))[:500]
+                        status = "failed"
+                        LOGGER.exception("[Telegram频道] %s 消息 %s 处理失败", monitor["channel"], message_id)
+                    if status == "failed":
+                        failed += 1
+                        monitor_error = detail
+                    with db() as connection:
+                        connection.execute(
+                            "INSERT INTO telegram_channel_events(monitor_id, message_id, tmdb_id, resource_key, status, detail, payload_json, created_at, updated_at) "
+                            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(monitor_id, message_id) DO UPDATE SET tmdb_id = excluded.tmdb_id, "
+                            "resource_key = excluded.resource_key, status = excluded.status, "
+                            "detail = excluded.detail, payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+                            (int(monitor["id"]), message_id, int(payload.get("tmdb_id") or 0),
+                             str(payload.get("slug") or payload.get("share_code") or ''), status,
+                             detail, json.dumps(payload, ensure_ascii=False), now_iso(), now_iso()),
+                        )
+                    if status == "processed":
+                        processed += 1
                     resource_title = str(payload.get("title") or "未知资源").strip().replace("\n", " ")
                     episode_label = compact_episode_numbers(set(payload.get("episode_numbers") or [])).replace("–", "-")
                     if episode_label:
                         resource_title = f"{resource_title} [{episode_label}]"
                     LOGGER.info("[Telegram频道] %s：%s：%s", monitor["channel"], resource_title, detail)
-                with db() as connection:
-                    connection.execute(
-                        "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
-                        (max(last_id, message_id), now_iso(), now_iso(), int(monitor["id"])),
-                    )
                 last_id = max(last_id, message_id)
-            if not messages:
-                with db() as connection:
-                    connection.execute(
-                        "UPDATE telegram_channel_monitors SET last_checked_at = ?, last_error = '', updated_at = ? WHERE id = ?",
-                        (now_iso(), now_iso(), int(monitor["id"])),
-                    )
+            with db() as connection:
+                connection.execute(
+                    "UPDATE telegram_channel_monitors SET last_message_id = ?, last_checked_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                    (last_id, now_iso(), monitor_error, now_iso(), int(monitor["id"])),
+                )
     finally:
         await client.disconnect()
-    LOGGER.info("[Telegram频道] 频道检查完成 checked=%s processed=%s", checked, processed)
-    return {"checked": checked, "processed": processed}
+    LOGGER.info("[Telegram频道] 频道检查完成 checked=%s processed=%s failed=%s", checked, processed, failed)
+    return {"checked": checked, "processed": processed, "failed": failed}
 
 
 def telegram_channel_monitor_loop() -> None:
