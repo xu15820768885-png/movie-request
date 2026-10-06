@@ -2187,9 +2187,21 @@ async def process_channel_hdhive_event(
     if not follows:
         return "未匹配到启用中的映单追更"
     movie_follows = [follow for follow in follows if str(follow["media_type"]) == "movie"]
-    if not episodes and not movie_follows:
-        return "已匹配追更，但消息没有可识别集数"
     season = int(payload.get("season_number") or 1)
+    if not episodes and not movie_follows:
+        # Bundle posts often omit the episode range even when their 115 file
+        # list contains new episodes. Inspect the source files before skipping.
+        file_data = hdhive_response_data(hdhive_call("resource_file_list", slug))
+        files = file_data.get("files") if isinstance(file_data, dict) else []
+        for item in files if isinstance(files, list) else []:
+            if not isinstance(item, dict):
+                continue
+            parsed = parse_episode_spec(item.get("name") or item.get("path"))
+            seasons = parsed.get("season_numbers") or {season}
+            if season in seasons:
+                episodes.update(int(value) for value in parsed.get("episode_numbers") or [] if int(value) > 0)
+        if not episodes:
+            return "已匹配追更，但资源文件没有可识别集数，转存未完成"
     emby_episodes: dict[int, set[int]] = {}
     if any(str(follow["media_type"]) == "tv" for follow in follows):
         with db() as connection:
@@ -2247,6 +2259,18 @@ async def process_channel_hdhive_event(
         return "影巢解锁成功，但没有返回有效 115 链接"
     client = await asyncio.to_thread(p115_client)
     tree = await asyncio.to_thread(p115_share_tree, client, share_url)
+    if transfer_mode == "missing" and episodes:
+        target_files = await asyncio.to_thread(p115_folder_snapshot, client, target_cid)
+        target_episodes = {
+            episode
+            for _file_id, name, _size in target_files
+            for parsed in [parse_episode_spec(name)]
+            if season in (parsed.get("season_numbers") or {season})
+            for episode in parsed.get("episode_numbers") or []
+        }
+        for follow in follows:
+            if str(follow["media_type"]) == "tv":
+                missing_by_follow[int(follow["id"])] -= target_episodes
     # 影巢经常把“第5集更新”打包成 S01E01-E05；解锁后按分享内实际文件
     # 回填此前缺失的集数。癫影单集资源则只会返回实际存在的那一集。
     tree_episodes = {
@@ -2278,6 +2302,8 @@ async def process_channel_hdhive_event(
                     else tree_missing
                 )
             )
+            if transfer_mode == "missing":
+                missing_by_follow[int(follow["id"])] -= target_episodes
     transferred = 0
     missing_total = sum(len(value) for value in missing_by_follow.values())
     transfer_attempts = 0
@@ -2335,6 +2361,8 @@ async def process_channel_hdhive_event(
             follow=follow, detail={"source": "telegram_channel", "provider": "hdhive", "message_id": message_id, "episodes": done},
         )
         transferred += len(done) if done else (1 if str(follow["media_type"]) == "movie" else 0)
+    if transferred and transferred < missing_total:
+        return f"已检测到缺集 {missing_total} 集，新增转存 {transferred} 集，转存未完成"
     if transferred:
         return f"解锁成功，新增转存 {transferred} 集"
     if missing_total:

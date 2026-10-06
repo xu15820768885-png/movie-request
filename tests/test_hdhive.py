@@ -755,6 +755,51 @@ class HDHiveFollowRouteTests(unittest.TestCase):
         self.assertEqual(share_tree.call_args.args[1], "https://115.com/s/lanxiang?password=aB12")
         self.assertEqual(client.received["file_id"], "40,41")
 
+    def test_channel_bundle_without_episode_range_uses_file_list_and_skips_target_files(self):
+        with app.db() as connection:
+            user_id = connection.execute("SELECT id FROM users WHERE username = 'member'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO tv_follows(user_id, tmdb_id, title, media_type, monitor_mode, "
+                "baseline_season, baseline_episode, active, created_at, updated_at) "
+                "VALUES(?, 282326, '兰香如故', 'tv', 'channel', 1, 41, 1, ?, ?)",
+                (user_id, app.now_iso(), app.now_iso()),
+            )
+
+        class FakeP115:
+            def share_receive(self, payload, **kwargs):
+                self.received = payload
+                return {"state": True}
+
+        client = FakeP115()
+        tree = [
+            {"_share_id": "42", "_share_name": "兰香如故.S01E42.mkv", "_share_is_dir": False},
+            {"_share_id": "43", "_share_name": "兰香如故.S01E43.mkv", "_share_is_dir": False},
+        ]
+
+        def hdhive_call(method, _slug):
+            if method == "resource_file_list":
+                return {"data": {"files": [{"name": item["_share_name"]} for item in tree]}}
+            return {"data": {"url": "https://115.com/s/lanxiang?password=aB12"}}
+
+        with patch.object(app, "destination_episode_progress", return_value={
+            "emby_episode_numbers": {"1": list(range(1, 42))},
+        }), patch.object(app, "hdhive_call", side_effect=hdhive_call), patch.object(
+            app, "p115_client", return_value=client
+        ), patch.object(app, "p115_share_tree", return_value=tree), patch.object(
+            app, "p115_folder_snapshot", return_value={
+                ("existing", "兰香如故.S01E42.mkv", "100")
+            }
+        ), patch.object(app, "wait_for_p115_change", return_value=True):
+            detail = asyncio.run(app.process_channel_hdhive_event(
+                monitor={"id": 1}, message_id=43555,
+                payload={"provider": "hdhive", "tmdb_id": 282326, "slug": "lanxiang",
+                         "season_number": 1, "episode_numbers": []},
+                transfer_mode="missing",
+            ))
+
+        self.assertIn("新增转存 1 集", detail)
+        self.assertEqual(client.received["file_id"], "43")
+
     def test_channel_scan_retries_legacy_failed_transfer_and_isolates_bad_post(self):
         with app.db() as connection:
             stamp = app.now_iso()
